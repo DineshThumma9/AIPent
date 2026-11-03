@@ -1,0 +1,14 @@
+# Level 1 lab: one deliberately vulnerable web app, loopback only.
+# Never expose this port beyond 127.0.0.1.
+name: aipent-lvl1
+
+services:
+  juice-shop:
+    image: bkimminich/juice-shop:v20.3.0
+    container_name: aipent-juice-shop
+    ports:
+      - "127.0.0.1:3000:3000"
+    restart: "no"
+    mem_limit: 512m
+    security_opt:
+      - no-new-privileges:true

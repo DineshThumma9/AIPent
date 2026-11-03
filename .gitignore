@@ -1,0 +1,38 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Node / frontend
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Local state: SQLite, LangGraph checkpoints, scan artifacts, logs, generated reports
+data/
+logs/
+*.log
+backend/data 
+backend/.pytest_cache
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+plan.md 
+*.pdf 
+.python-version 

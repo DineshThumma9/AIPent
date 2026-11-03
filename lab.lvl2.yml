@@ -1,0 +1,15 @@
+# Level 2 lab: DVWA (PHP/MySQL). Start only when you want the extra target.
+# Loopback only. First visit: http://127.0.0.1:8080 -> login admin/password,
+# then "Create / Reset Database" once.
+name: aipent-lvl2
+
+services:
+  dvwa:
+    image: vulnerables/web-dvwa
+    container_name: aipent-dvwa
+    ports:
+      - "127.0.0.1:8080:80"
+    restart: "no"
+    mem_limit: 768m
+    security_opt:
+      - no-new-privileges:true
