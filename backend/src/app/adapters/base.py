@@ -22,4 +22,9 @@ class FindingDraft(BaseModel):
     confidence: float = Field(default=1.0, ge=0, le=1)
     status: FindingStatus = FindingStatus.CONFIRMED
     origin: Origin = Origin.TOOL
+    impact: str = ""
+    remediation: str = ""
+    cvss: float | None = None
+    cve: list[str] = Field(default_factory=list)
+    cwe: list[str] = Field(default_factory=list)
     evidence: list[EvidenceDraft] = Field(default_factory=list)

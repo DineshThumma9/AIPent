@@ -1,25 +1,3 @@
-import pytest
-from fastapi.testclient import TestClient
-from sqlmodel import Session
-
-from app.db import get_session, init_db, make_engine
-from app.main import app
-
-
-@pytest.fixture
-def client(tmp_path):
-    engine = make_engine(f"sqlite:///{tmp_path / 'api.db'}")
-    init_db(engine)
-
-    def override():
-        with Session(engine, expire_on_commit=False) as session:
-            yield session
-
-    app.dependency_overrides[get_session] = override
-    yield TestClient(app)
-    app.dependency_overrides.clear()
-
-
 def test_create_list_and_detail(client):
     created = client.post(
         "/api/assessments",
@@ -39,6 +17,7 @@ def test_create_list_and_detail(client):
 
     detail = client.get(f"/api/assessments/{assessment['id']}").json()
     assert detail["steps"] == []
+    assert detail["evidence"] == []
     assert detail["audit"][0]["event_type"] == "assessment.created"
 
 
@@ -49,3 +28,34 @@ def test_rejects_empty_scope(client):
 
 def test_missing_assessment_is_404(client):
     assert client.get("/api/assessments/999").status_code == 404
+
+
+def test_scan_route_marks_assessment_completed(client, monkeypatch):
+    created = client.post(
+        "/api/assessments",
+        json={"title": "Lab", "targets": ["127.0.0.1"], "ports": [3000]},
+    ).json()
+
+    async def fake_run_scan(session, assessment_id, target=None, timeout=None):
+        from app.models import Step
+
+        step = Step(
+            assessment_id=assessment_id,
+            seq=1,
+            action="recon_services",
+            status="succeeded",
+            exit_code=0,
+        )
+        session.add(step)
+        session.commit()
+        session.refresh(step)
+        return step
+
+    monkeypatch.setattr("app.routes.run_scan", fake_run_scan)
+    response = client.post(f"/api/assessments/{created['id']}/scan")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "completed"
+    assert body["finished_at"] is not None
+    assert len(body["steps"]) == 1

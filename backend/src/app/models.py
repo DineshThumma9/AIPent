@@ -4,8 +4,9 @@ Six tables: one row per fact, no duplicated state. Graph checkpoints live in
 LangGraph's own SQLite file; this database is the evidence of record.
 """
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from enum import StrEnum
+from enum import Enum, StrEnum
 from typing import Any
 
 from sqlalchemy import JSON, UniqueConstraint
@@ -14,6 +15,25 @@ from sqlmodel import Field, SQLModel
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+@dataclass(frozen=True)
+class ThinkingConfig:
+    message_limit: int
+    token_limit: int
+    keep_message_limit: int
+    model_thread_limit: int
+    model_run_limit: int
+    tool_thread_limit: int
+    tool_run_limit: int
+
+
+class ThinkingLevel(Enum):
+    """Context/call budgets used by the planner middleware."""
+
+    LOW = ThinkingConfig(20, 8_000, 6, 12, 6, 12, 6)
+    MEDIUM = ThinkingConfig(40, 24_000, 10, 24, 10, 24, 10)
+    HIGH = ThinkingConfig(80, 48_000, 20, 40, 16, 40, 16)
 
 
 class AssessmentStatus(StrEnum):
@@ -25,6 +45,7 @@ class AssessmentStatus(StrEnum):
     REPORTING = "reporting"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class StepStatus(StrEnum):
@@ -71,6 +92,7 @@ class Assessment(SQLModel, table=True):
     ports: list[int] = Field(default_factory=list, sa_type=JSON)
     exclusions: list[str] = Field(default_factory=list, sa_type=JSON)
     status: str = AssessmentStatus.DRAFT.value
+    risk_score: float | None = None
     created_at: datetime = Field(default_factory=utcnow)
     finished_at: datetime | None = None
     report_path: str | None = None
@@ -84,6 +106,7 @@ class Step(SQLModel, table=True):
     assessment_id: int = Field(foreign_key="assessment.id", index=True)
     seq: int
     action: str
+    target: str | None = None
     argv: list[str] = Field(default_factory=list, sa_type=JSON)
     rationale: str = ""
     status: str = StepStatus.PLANNED.value
@@ -141,6 +164,7 @@ class Approval(SQLModel, table=True):
     step_id: int | None = Field(default=None, foreign_key="step.id", index=True)
     action: str
     argv: list[str] = Field(default_factory=list, sa_type=JSON)
+    detail: dict[str, Any] = Field(default_factory=dict, sa_type=JSON)
     decision: str = Decision.PENDING.value
     actor: str | None = None
     reason: str | None = None

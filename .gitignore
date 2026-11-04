@@ -36,3 +36,5 @@ backend/.pytest_cache
 plan.md 
 *.pdf 
 .python-version 
+walkthrough.md 
+MCP-NEXT-STEPS.md 

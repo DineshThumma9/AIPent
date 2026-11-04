@@ -1,91 +1,69 @@
+import type { z } from 'zod'
+import {
+  AgentAcceptedSchema,
+  AssessmentDetailSchema,
+  AssessmentInputSchema,
+  AssessmentSchema,
+  DecisionInputSchema,
+  type Assessment,
+  type AssessmentDetail,
+  type AssessmentInput,
+  type DecisionInput,
+} from './schemas'
+
 const BASE = '/api'
 
-async function req<T>(path: string, init?: RequestInit): Promise<T> {
+async function req<S extends z.ZodType>(
+  path: string,
+  schema: S,
+  init?: RequestInit,
+): Promise<z.infer<S>> {
   const res = await fetch(`${BASE}${path}`, {
     headers: { 'Content-Type': 'application/json' },
     ...init,
   })
-  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`)
-  return res.json() as Promise<T>
+
+  if (!res.ok) {
+    const body = await res.text()
+    throw new Error(body || `${res.status} ${res.statusText}`)
+  }
+
+  const parsed = schema.safeParse(await res.json())
+  if (!parsed.success) {
+    console.error('API schema mismatch', path, parsed.error.issues)
+    throw new Error(`Unexpected response shape from ${path}`)
+  }
+  return parsed.data
 }
 
-export type Assessment = {
-  id: number
-  title: string
-  request: string
-  targets: string[]
-  ports: number[]
-  exclusions: string[]
-  status: string
-  created_at: string
-  finished_at: string | null
-  report_path: string | null
-  report_sha256: string | null
-}
+const listSchema = AssessmentSchema.array()
 
-export type Step = {
-  id: number
-  seq: number
-  action: string
-  argv: string[]
-  rationale: string
-  status: string
-  error: string | null
-  created_at: string
-  ended_at: string | null
-}
+export const listAssessments = () =>
+  req('/assessments', listSchema) as Promise<Assessment[]>
 
-export type Finding = {
-  id: number
-  canonical_key: string
-  asset: string
-  endpoint: string | null
-  title: string
-  severity: string
-  cvss: number | null
-  confidence: number
-  status: string
-  origin: string
-}
-
-export type Approval = {
-  id: number
-  action: string
-  argv: string[]
-  decision: string
-  actor: string | null
-  reason: string | null
-  requested_at: string
-}
-
-export type AuditEvent = {
-  id: number
-  ts: string
-  actor: string
-  event_type: string
-  payload: Record<string, unknown>
-}
-
-export type AssessmentDetail = Assessment & {
-  steps: Step[]
-  findings: Finding[]
-  approvals: Approval[]
-  audit: AuditEvent[]
-}
-
-export type AssessmentInput = {
-  title: string
-  request: string
-  targets: string[]
-  ports: number[]
-}
-
-export const listAssessments = () => req<Assessment[]>('/assessments')
-
-export const getAssessment = (id: number) => req<AssessmentDetail>(`/assessments/${id}`)
+export const getAssessment = (id: number) =>
+  req(`/assessments/${id}`, AssessmentDetailSchema) as Promise<AssessmentDetail>
 
 export const createAssessment = (body: AssessmentInput) =>
-  req<Assessment>('/assessments', { method: 'POST', body: JSON.stringify(body) })
+  req('/assessments', AssessmentSchema, {
+    method: 'POST',
+    body: JSON.stringify(AssessmentInputSchema.parse(body)),
+  }) as Promise<Assessment>
 
 export const runScan = (id: number) =>
-  req<Step>(`/assessments/${id}/scan`, { method: 'POST' })
+  req(`/assessments/${id}/scan`, AssessmentDetailSchema, {
+    method: 'POST',
+  }) as Promise<AssessmentDetail>
+
+export const runAgent = (id: number) =>
+  req(`/assessments/${id}/run`, AgentAcceptedSchema, {
+    method: 'POST',
+  }) as Promise<z.infer<typeof AgentAcceptedSchema>>
+
+export const resumeAgent = (id: number, decision: DecisionInput) =>
+  req(`/assessments/${id}/resume`, AgentAcceptedSchema, {
+    method: 'POST',
+    body: JSON.stringify(DecisionInputSchema.parse(decision)),
+  }) as Promise<z.infer<typeof AgentAcceptedSchema>>
+
+export const reportUrl = (id: number) => `${BASE}/assessments/${id}/report`
