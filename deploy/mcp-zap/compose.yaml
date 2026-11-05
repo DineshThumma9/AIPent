@@ -1,0 +1,81 @@
+name: aipent-zap
+
+services:
+  zap:
+    image: zaproxy/zap-stable:2.17.0
+    restart: unless-stopped
+    command:
+      - zap.sh
+      - -daemon
+      - -host
+      - 0.0.0.0
+      - -port
+      - "8090"
+      - -config
+      - api.key=${ZAP_API_KEY}
+      - -config
+      - api.addrs.addr.name=.*
+      - -config
+      - api.addrs.addr.regex=true
+      - -addoninstall
+      - spiderAjax
+      - -addoninstall
+      - client
+    ports:
+      - "127.0.0.1:8090:8090"
+    environment:
+      ZAP_API_KEY: ${ZAP_API_KEY}
+      ZAP_MEMORY: ${ZAP_MEMORY:-2G}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS \"http://127.0.0.1:8090/JSON/core/view/version/?apikey=$$ZAP_API_KEY\" >/dev/null",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
+    volumes:
+      # Both containers run as uid 1000; this host directory is owned by the
+      # same uid, so ZAP can write reports and the MCP server can read them.
+      - ./reports:/zap/wrk
+      - ./zap-workplace/zap-home:/home/zap/.ZAP
+
+  mcp-server:
+    image: dtkmn/mcp-zap-server:v0.17.1
+    restart: unless-stopped
+    depends_on:
+      zap:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:7456:7456"
+    # The Java MCP server resolves the target URL before handing it to ZAP,
+    # so it needs the host alias too, not just the ZAP container.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      ZAP_API_URL: zap
+      ZAP_API_PORT: "8090"
+      ZAP_API_KEY: ${ZAP_API_KEY}
+      MCP_API_KEY: ${MCP_API_KEY}
+      MCP_SECURITY_MODE: api-key
+      MCP_SECURITY_ENABLED: "true"
+      ZAP_ALLOW_LOCALHOST: "true"
+      ZAP_ALLOW_PRIVATE_NETWORKS: "true"
+      ZAP_REPORT_DIRECTORY: /zap/wrk
+      ZAP_MAX_ACTIVE_SCAN_DURATION: "30"
+      # dtkmn reads this as minutes, not seconds. Two minutes caps the demo
+      # crawl while still covering Juice Shop's main routes.
+      ZAP_MAX_SPIDER_SCAN_DURATION: "2"
+      ZAP_SPIDER_MAX_DEPTH: "5"
+      ZAP_SPIDER_MAX_CHILDREN: "10"
+      ZAP_SCAN_JOBS_STORE_BACKEND: in-memory
+    volumes:
+      - ./reports:/zap/wrk
+      - mcp-launch-safety:/var/lib/mcp-zap/scan-launch-safety
+
+volumes:
+  mcp-launch-safety:

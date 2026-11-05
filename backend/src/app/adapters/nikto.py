@@ -1,6 +1,7 @@
 """Nikto adapter: fixed argv, typed JSON parse, conservative severity."""
 
 import json
+import re
 import shutil
 from pathlib import Path
 from typing import Any
@@ -102,15 +103,19 @@ def _severity(message: str) -> Severity:
 def to_drafts(host: str, port: int, items: list[NiktoItem]) -> list[FindingDraft]:
     drafts: list[FindingDraft] = []
     for item in items:
-        title = item.msg.strip().split(". ")[0][:160]
+        clean_msg = re.sub(r"^\[\d+\]\s*", "", item.msg.strip())
+        clean_msg = re.sub(r"^/:\s*", "", clean_msg)
+        title = clean_msg.split(". ")[0][:160].strip()
+        if not title:
+            continue
         drafts.append(
             FindingDraft(
                 canonical_key=f"web:{title.lower()}:{host}:{port}",
                 asset=host,
                 endpoint=f"http://{host}:{port}{item.url}",
                 title=title,
-                description=item.msg,
-                severity=_severity(item.msg),
+                description=clean_msg,
+                severity=_severity(clean_msg),
                 confidence=0.6,
                 status=FindingStatus.SUSPECTED,
                 evidence=[
@@ -121,7 +126,7 @@ def to_drafts(host: str, port: int, items: list[NiktoItem]) -> list[FindingDraft
                             "url": item.url,
                             "method": item.method,
                         },
-                        excerpt=item.msg[:600],
+                        excerpt=clean_msg[:600],
                     )
                 ],
             )
@@ -130,9 +135,52 @@ def to_drafts(host: str, port: int, items: list[NiktoItem]) -> list[FindingDraft
 
 
 def scan(text: str, host: str, port: int) -> list[FindingDraft]:
-    items = parse(text)
+    """Parse either the local JSON file or the Kali MCP's plain text."""
+    stripped = text.lstrip()
+    items = parse(text) if stripped.startswith(("{", "[")) else parse_text(text)
     for item in items:
         lowered = item.msg.lower()
         if "unable to connect" in lowered or "no web server found" in lowered:
             raise ValueError(f"Nikto could not connect to {host}:{port}")
     return to_drafts(host, port, items)
+
+
+NOISE = (
+    "target ip:",
+    "target hostname:",
+    "target port:",
+    "start time:",
+    "end time:",
+    "server:",
+    "platform:",
+    "error: failed to check for updates",
+    "no cgi directories found",
+    "root page / redirects to",
+    "0 item(s) reported",
+    "nikto v",
+    "host(s) tested",
+)
+
+
+def parse_text(text: str) -> list[NiktoItem]:
+    items: list[NiktoItem] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("+"):
+            continue
+        message = line[1:].strip()
+        lowered = message.lower()
+        if (
+            not message
+            or any(lowered.startswith(noise) for noise in NOISE)
+            or "requests: " in lowered
+            or "host(s) tested" in lowered
+        ):
+            continue
+        item_id = ""
+        match = re.match(r"^\[(\d+)\]\s*(.*)$", message)
+        if match:
+            item_id = match.group(1)
+            message = match.group(2).strip()
+        items.append(NiktoItem(id=item_id, msg=message, url="/"))
+    return items

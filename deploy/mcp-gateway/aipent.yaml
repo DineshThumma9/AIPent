@@ -1,0 +1,29 @@
+registry:
+  kali:
+    name: kali
+    title: Kali Linux MCP
+    description: Local Kali Linux tool server exposing nmap and Nikto over MCP.
+    type: server
+    image: cyberillo/kali-mcp-server:latest
+    longLived: true
+    extraHosts:
+      - "host.docker.internal:host-gateway"
+    tools:
+      - name: nmap_scan
+        description: Run an nmap scan.
+      - name: nikto_scan
+        description: Run a Nikto web scan.
+
+  zap:
+    name: zap
+    title: OWASP ZAP MCP
+    description: Guided crawl, passive scan and JSON reports through dtkmn/mcp-zap-server.
+    type: remote
+    remote:
+      url: "http://127.0.0.1:7456/mcp"
+      transport_type: streamable-http
+      headers:
+        X-API-Key: "${MCP_API_KEY}"
+    secrets:
+      - name: MCP_API_KEY
+        env: MCP_API_KEY

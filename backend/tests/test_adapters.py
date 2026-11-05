@@ -171,3 +171,61 @@ def test_duplicate_evidence_is_not_written_twice(session, monkeypatch):
 
     assert len(session.exec(select(Finding)).all()) == 2
     assert len(session.exec(select(Evidence)).all()) == 4
+
+
+def test_zap_strips_html_tags():
+    raw_zap = json.dumps(
+        {
+            "site": [
+                {
+                    "@name": "http://127.0.0.1:3000",
+                    "alerts": [
+                        {
+                            "pluginid": "10038",
+                            "alert": "CSP Header Not Set",
+                            "riskcode": "2",
+                            "confidence": "3",
+                            "desc": "<p>Content Security Policy is missing.</p><p>It protects against XSS.</p>",
+                            "solution": "<p>Set the <b>Content-Security-Policy</b> header.</p>",
+                            "instances": [
+                                {
+                                    "uri": "http://127.0.0.1:3000/",
+                                    "method": "GET",
+                                    "param": "",
+                                    "evidence": "<p>Missing header</p>",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+    drafts = zap.scan(raw_zap, "127.0.0.1", 3000)
+    assert len(drafts) == 1
+    assert "<p>" not in drafts[0].description
+    assert "</p>" not in drafts[0].description
+    assert drafts[0].description == "Content Security Policy is missing. It protects against XSS."
+    assert "<p>" not in drafts[0].remediation
+    assert "<b>" not in drafts[0].remediation
+    assert drafts[0].remediation == "Set the Content-Security-Policy header."
+
+
+def test_nikto_text_strips_bracket_ids_and_noise():
+    raw_nikto_text = """
++ [007303] /JAMonAdmin.jsp: JAMon - Java Application Monitor Admin interface identified.
++ [013587] /: Suggested security header missing: content-security-policy.
++ 4454 requests: 2 errors and 28 items reported on the remote host
++ 1 host(s) tested
+"""
+    drafts = nikto.scan(raw_nikto_text, "127.0.0.1", 3000)
+    assert len(drafts) == 2
+    assert "[" not in drafts[0].title
+    assert "]" not in drafts[0].title
+    assert drafts[0].title.startswith("/JAMonAdmin.jsp: JAMon")
+    assert drafts[0].evidence[0].locator["id"] == "007303"
+    assert "[" not in drafts[1].title
+    assert "]" not in drafts[1].title
+    assert drafts[1].title.startswith("Suggested security header missing")
+    assert drafts[1].evidence[0].locator["id"] == "013587"
+

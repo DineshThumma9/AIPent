@@ -37,9 +37,16 @@
 
 #v(6pt)
 #text(size: 8.5pt, fill: luma(90))[
-  Only the targets above were contacted. Every step is recorded with its exact
-  argv, output artifact and SHA-256. Active web probes required a human action
-  approval; the plan and final report required human gates.
+  Only the targets above were contacted. Active web probes required a human
+  action approval; the plan and final report required human gates.
+  #if data.mcp_only [
+    Transport: Docker MCP Gateway. Scanner arguments were constructed and
+    approved by the policy layer; the LLM did not supply argv.
+  ] else if data.mcp [
+    Transport: mixed local/Docker and Docker MCP Gateway steps.
+  ] else [
+    Every step is recorded with its exact argv, output artifact and SHA-256.
+  ]
 ]
 
 = Executive summary

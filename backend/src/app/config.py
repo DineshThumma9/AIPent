@@ -44,6 +44,13 @@ class Settings(BaseSettings):
     model_exit_behavior: Literal["end", "error"] = "end"
     tool_exit_behaviour: Literal["continue", "error", "end"] = "continue"
 
+    mcp_enabled: bool = False
+    mcp_transport: Literal["local", "gateway"] = "local"
+    mcp_gateway_url: str = "http://127.0.0.1:8812/sse"
+    mcp_timeout: int = 600
+    mcp_handshake_timeout: int = 30
+    lab_target_alias: str = "host.docker.internal"
+
     @property
     def database_url(self) -> str:
         return self.db or f"sqlite:///{self.data_dir / 'aipent.db'}"

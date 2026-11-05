@@ -6,10 +6,11 @@ resolves the fixed command, keeps the artifact, and persists evidence.
 
 import asyncio
 import hashlib
+import json
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Any, Callable, Literal
 
 from sqlalchemy import func
 from sqlmodel import Session, select
@@ -18,6 +19,8 @@ from app.adapters import nikto, nmap, zap
 from app.adapters.base import FindingDraft
 from app.config import settings
 from app.correlate import canonical_key
+from app.integrations.zap_guided import run_zap_baseline
+from app.mcp_client import GatewayClient
 from app.models import (
     Assessment,
     Audit,
@@ -28,6 +31,13 @@ from app.models import (
     StepStatus,
     utcnow,
 )
+
+
+@dataclass
+class MCPResult:
+    text: str
+    calls: list[dict]
+
 
 ARTIFACT_DIR = settings.artifacts_path
 
@@ -92,7 +102,7 @@ ACTIONS: dict[str, ActionSpec] = {
         transport="local",
         ok_codes=(0,),
         build_argv=_nmap_argv,
-        parse=lambda text, _host, _port: nmap.scan(text),
+        parse=lambda text, host, _port: nmap.scan(text, host_override=host),
     ),
     "nikto_scan": ActionSpec(
         name="nikto_scan",
@@ -119,6 +129,48 @@ ACTIONS: dict[str, ActionSpec] = {
 }
 
 
+def transport_target(target: str) -> str:
+    """Map a scope target to its container-visible alias.
+
+    The assessment, findings and report always use the scope target. Only the
+    MCP tool argument gets the alias.
+    """
+    if not settings.mcp_enabled or settings.mcp_transport != "gateway":
+        return target
+
+    if target in {"127.0.0.1", "localhost"}:
+        return settings.lab_target_alias
+
+    return target
+
+
+def mcp_tool_call(
+    action: str, assessment: Assessment, target: str
+) -> tuple[str, dict[str, Any]]:
+    """The single mapping from semantic action to gateway tool and arguments.
+
+    Both the approval descriptor and the live call use this function, so the
+    thing a human approves is exactly the thing that runs.
+    """
+    alias = transport_target(target)
+    port = _web_port(assessment)
+    if action == "recon_services":
+        return "nmap_scan", {
+            "target": alias,
+            "flags": nmap.mcp_flags(assessment.ports or [3000]),
+        }
+    if action == "nikto_scan":
+        return "nikto_scan", {"target_url": f"http://{alias}:{port}"}
+    if action == "zap_baseline":
+        return "zap_baseline", {"target_url": f"http://{alias}:{port}"}
+    raise UnknownAction(action)
+
+
+def mcp_command(action: str, assessment: Assessment, target: str) -> list[str]:
+    tool, arguments = mcp_tool_call(action, assessment, target)
+    return ["mcp", tool, json.dumps(arguments, sort_keys=True)]
+
+
 def get_action(name: str) -> ActionSpec:
     try:
         return ACTIONS[name]
@@ -126,7 +178,11 @@ def get_action(name: str) -> ActionSpec:
         raise UnknownAction(f"action {name!r} is not in the catalogue") from exc
 
 
-def resolve_argv(action: str, assessment: Assessment, target: str, step_id: int) -> list[str]:
+def resolve_argv(
+    action: str, assessment: Assessment, target: str, step_id: int
+) -> list[str]:
+    if settings.mcp_enabled and settings.mcp_transport == "gateway":
+        return mcp_command(action, assessment, target)
     spec = get_action(action)
     output = _artifact_dir(assessment.id or 0) / f"{step_id}{spec.suffix}"
     return spec.build_argv(assessment, target, output)
@@ -292,6 +348,20 @@ async def execute_action(
     session.commit()
     session.refresh(step)
 
+    transport = (
+        "mcp"
+        if settings.mcp_enabled and settings.mcp_transport == "gateway"
+        else spec.transport
+    )
+    alias = transport_target(target)
+    if alias != target:
+        _audit(
+            session,
+            assessment_id,
+            "target.translated",
+            {"scope_target": target, "transport_target": alias},
+        )
+
     _audit(
         session,
         assessment_id,
@@ -300,7 +370,7 @@ async def execute_action(
             "step_id": step.id,
             "action": action,
             "tool": spec.tool,
-            "transport": spec.transport,
+            "transport": transport,
             "target": target,
             "argv": step.argv,
         },
@@ -309,25 +379,49 @@ async def execute_action(
 
     artifact = _artifact_dir(assessment_id) / f"{step.id}{spec.suffix}"
     try:
-        process = await _run(step.argv, timeout)
-
-        if process.returncode not in spec.ok_codes:
-            detail = (process.stderr or process.stdout).strip()[-500:]
-            raise RuntimeError(detail or f"{spec.tool} exited {process.returncode}")
-
-        if spec.output == "file":
-            if not artifact.exists():
-                detail = (process.stderr or process.stdout).strip()[-500:]
-                raise RuntimeError(detail or f"{spec.tool} produced no report")
-            text = artifact.read_text(encoding="utf-8", errors="replace")
-        else:
-            text = process.stdout
+        if settings.mcp_enabled and settings.mcp_transport == "gateway":
+            result = await _run_gateway(action, assessment, target, step)
+            text = result.text
+            step.exit_code = 0
             artifact.parent.mkdir(parents=True, exist_ok=True)
             artifact.write_text(text, encoding="utf-8")
+            step.output_path = str(artifact)
+            step.output_sha256 = hashlib.sha256(
+                artifact.read_bytes()
+            ).hexdigest()
+            for call in result.calls:
+                _audit(
+                    session,
+                    assessment_id,
+                    "mcp.call",
+                    {
+                        "step_id": step.id,
+                        "action": action,
+                        "tool": call["tool"],
+                        "arguments": call["arguments"],
+                    },
+                )
+            session.commit()
+        else:
+            process = await _run(step.argv, timeout)
 
-        step.exit_code = process.returncode
-        step.output_path = str(artifact)
-        step.output_sha256 = hashlib.sha256(artifact.read_bytes()).hexdigest()
+            if process.returncode not in spec.ok_codes:
+                detail = (process.stderr or process.stdout).strip()[-500:]
+                raise RuntimeError(detail or f"{spec.tool} exited {process.returncode}")
+
+            if spec.output == "file":
+                if not artifact.exists():
+                    detail = (process.stderr or process.stdout).strip()[-500:]
+                    raise RuntimeError(detail or f"{spec.tool} produced no report")
+                text = artifact.read_text(encoding="utf-8", errors="replace")
+            else:
+                text = process.stdout
+                artifact.parent.mkdir(parents=True, exist_ok=True)
+                artifact.write_text(text, encoding="utf-8")
+
+            step.exit_code = process.returncode
+            step.output_path = str(artifact)
+            step.output_sha256 = hashlib.sha256(artifact.read_bytes()).hexdigest()
 
         drafts = spec.parse(text, target, _web_port(assessment))
         added, merged = _save_findings(session, assessment_id, step, drafts)
@@ -340,7 +434,7 @@ async def execute_action(
                 "step_id": step.id,
                 "action": action,
                 "tool": spec.tool,
-                "transport": spec.transport,
+                "transport": transport,
                 "findings_added": added,
                 "findings_merged": merged,
             },
@@ -392,3 +486,27 @@ def completed_actions(session: Session, assessment_id: int) -> set[tuple[str, st
         for row in rows
         if row.action in ACTIONS and (row.target or row.argv)
     }
+
+
+async def _run_gateway(
+    action: str,
+    assessment: Assessment,
+    target: str,
+    step: Step,
+) -> MCPResult:
+    tool, arguments = mcp_tool_call(action, assessment, target)
+    calls: list[dict] = []
+
+    async with GatewayClient() as gateway:
+        if action == "zap_baseline":
+            text, zap_calls = await run_zap_baseline(
+                gateway,
+                arguments["target_url"],
+                idempotency_key=f"aipent:{assessment.id}:{step.id}",
+            )
+            calls.extend(zap_calls)
+        else:
+            text = await gateway.call(tool, arguments)
+            calls.append({"tool": tool, "arguments": arguments})
+
+    return MCPResult(text=text, calls=calls)

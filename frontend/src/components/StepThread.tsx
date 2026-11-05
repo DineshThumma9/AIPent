@@ -1,3 +1,5 @@
+import { useState } from 'react'
+import { ChevronDown, ChevronUp } from 'lucide-react'
 import {
   basename,
   formatClock,
@@ -20,6 +22,7 @@ function Ticks({ count = 14 }: { count?: number }) {
 
 function StepNode({ step }: { step: Step }) {
   const duration = formatDuration(step.created_at, step.ended_at)
+  const isMcp = step.argv[0] === 'mcp'
 
   return (
     <li className="thread-node" data-status={step.status}>
@@ -32,11 +35,22 @@ function StepNode({ step }: { step: Step }) {
 
         {step.rationale && <p className="step-why">{step.rationale}</p>}
 
-        <pre className="argv" aria-label="Command executed">
-          <span className="argv-prompt">$</span>{' '}
-          <span className="argv-verb">{step.argv[0]}</span>{' '}
-          {step.argv.slice(1).join(' ')}
-        </pre>
+        {isMcp ? (
+          <div className="mcp-call" aria-label="MCP tool call">
+            <span className="mcp-badge">MCP</span>
+            <span className="argv-verb">{step.argv[1] ?? 'tool'}</span>
+            <details>
+              <summary>arguments</summary>
+              <pre>{step.argv.slice(2).join(' ')}</pre>
+            </details>
+          </div>
+        ) : (
+          <pre className="argv" aria-label="Command executed">
+            <span className="argv-prompt">$</span>{' '}
+            <span className="argv-verb">{step.argv[0]}</span>{' '}
+            {step.argv.slice(1).join(' ')}
+          </pre>
+        )}
 
         <div className="step-meta">
           <span>
@@ -74,10 +88,26 @@ function StepNode({ step }: { step: Step }) {
 }
 
 export function StepThread({ steps }: { steps: Step[] }) {
+  const [collapsed, setCollapsed] = useState(false)
+
   return (
     <section className="panel panel-thread" aria-labelledby="thread-title">
       <div className="panel-head">
-        <h2 id="thread-title">Run thread</h2>
+        <div className="panel-thread-head">
+          <h2 id="thread-title">Run thread</h2>
+          {steps.length > 0 && (
+            <button
+              type="button"
+              className="thread-toggle-btn mono"
+              onClick={() => setCollapsed(!collapsed)}
+              title={collapsed ? 'Expand run thread' : 'Collapse run thread'}
+              aria-label={collapsed ? 'Expand run thread' : 'Collapse run thread'}
+            >
+              <span>{collapsed ? 'show steps' : 'hide steps'}</span>
+              {collapsed ? <ChevronDown size={12} /> : <ChevronUp size={12} />}
+            </button>
+          )}
+        </div>
         <span className="panel-meta">
           {steps.length} {steps.length === 1 ? 'step' : 'steps'}
         </span>
@@ -87,7 +117,7 @@ export function StepThread({ steps }: { steps: Step[] }) {
         <p className="empty">
           No steps yet. Run the scan to open the evidence thread.
         </p>
-      ) : (
+      ) : collapsed ? null : (
         <ol className="thread">
           {steps.map((step) => (
             <StepNode key={step.id} step={step} />

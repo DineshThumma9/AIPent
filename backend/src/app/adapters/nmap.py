@@ -110,5 +110,22 @@ def to_drafts(records: list[NmapPort]) -> list[FindingDraft]:
     return drafts
 
 
-def scan(xml_text: str) -> list[FindingDraft]:
-    return to_drafts(parse(xml_text))
+def mcp_flags(ports: list[int]) -> str:
+    return f"-sV -Pn -T3 -p {','.join(map(str, ports))} -oX -"
+
+
+def _xml_only(text: str) -> str:
+    """Keep only the XML document when a wrapper prints banners or stderr."""
+    start = text.find("<nmaprun")
+    end = text.rfind("</nmaprun>")
+    if start < 0 or end < 0:
+        return text
+    return text[start : end + len("</nmaprun>")]
+
+
+def scan(xml_text: str, host_override: str | None = None) -> list[FindingDraft]:
+    records = parse(_xml_only(xml_text))
+    if host_override:
+        for record in records:
+            record.host = host_override
+    return to_drafts(records)

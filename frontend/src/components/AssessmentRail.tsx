@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from 'react'
+import { PanelLeftClose, PanelLeftOpen, Plus } from 'lucide-react'
 import { pad } from '../lib/format'
 import type { Assessment, AssessmentInput } from '../lib/schemas'
 import { StatusMark } from './StatusMark'
@@ -6,11 +7,15 @@ import { StatusMark } from './StatusMark'
 export function AssessmentRail({
   items,
   selectedId,
+  collapsed = false,
+  onToggleCollapse,
   onSelect,
   onCreate,
 }: {
   items: Assessment[]
   selectedId: number | null
+  collapsed?: boolean
+  onToggleCollapse?: () => void
   onSelect: (id: number) => void
   onCreate: (input: AssessmentInput) => Promise<void>
 }) {
@@ -49,11 +54,72 @@ export function AssessmentRail({
     }
   }
 
+  if (collapsed) {
+    return (
+      <aside className="rail rail-collapsed" aria-label="Assessments">
+        <div className="rail-collapsed-content">
+          <button
+            type="button"
+            className="rail-toggle-btn"
+            onClick={onToggleCollapse}
+            title="Expand assessments sidebar"
+            aria-label="Expand assessments sidebar"
+          >
+            <PanelLeftOpen size={16} />
+          </button>
+
+          <span className="rail-collapsed-count mono" title={`${items.length} assessments`}>
+            {pad(items.length)}
+          </span>
+
+          <div className="rail-collapsed-list">
+            {items.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                className="rail-collapsed-item"
+                onClick={() => onSelect(item.id)}
+                aria-current={item.id === selectedId ? 'true' : undefined}
+                title={`#${pad(item.id)}: ${item.title} (${item.status})`}
+              >
+                <span className="mono">#{pad(item.id)}</span>
+                <StatusMark status={item.status} />
+              </button>
+            ))}
+          </div>
+
+          <button
+            type="button"
+            className="rail-collapsed-new"
+            onClick={onToggleCollapse}
+            title="New assessment (expand sidebar)"
+            aria-label="New assessment"
+          >
+            <Plus size={14} />
+          </button>
+        </div>
+      </aside>
+    )
+  }
+
   return (
     <aside className="rail" aria-label="Assessments">
       <div className="rail-head">
-        <h2>Assessments</h2>
-        <span className="rail-count">{pad(items.length)}</span>
+        <div className="rail-head-left">
+          <h2>Assessments</h2>
+          <span className="rail-count">{pad(items.length)}</span>
+        </div>
+        {onToggleCollapse && (
+          <button
+            type="button"
+            className="rail-toggle-btn"
+            onClick={onToggleCollapse}
+            title="Collapse assessments sidebar"
+            aria-label="Collapse assessments sidebar"
+          >
+            <PanelLeftClose size={15} />
+          </button>
+        )}
       </div>
 
       {items.length === 0 ? (
@@ -127,3 +193,4 @@ export function AssessmentRail({
     </aside>
   )
 }
+

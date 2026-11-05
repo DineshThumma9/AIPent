@@ -2,8 +2,17 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session
 
+from app.config import settings
 from app.db import get_engine, get_session, init_db, make_engine
 from app.main import app
+
+
+@pytest.fixture(autouse=True)
+def _local_transport(monkeypatch):
+    """Unit tests never dial a live gateway, even if .env enables MCP."""
+    monkeypatch.setattr(settings, "mcp_enabled", False)
+    monkeypatch.setattr(settings, "mcp_transport", "local")
+
 
 NMAP_XML = """<?xml version="1.0"?>
 <nmaprun>

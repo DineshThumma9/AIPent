@@ -7,6 +7,7 @@ hand-escapes markup.
 
 import hashlib
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from sqlmodel import Session, col, select
 import typst
 from app import risk
 from app.actions import ACTIONS, ARTIFACT_DIR
+from app.adapters.base import strip_html
 from app.log import get_logger
 from app.models import Approval, Assessment, Audit, Evidence, Finding, Step
 
@@ -32,6 +34,17 @@ def _counts(findings: list[Finding]) -> dict[str, int]:
     for finding in findings:
         counts[finding.severity] = counts.get(finding.severity, 0) + 1
     return counts
+
+
+def _clean_text(text: str | None) -> str:
+    if not text:
+        return ""
+    text = strip_html(text)
+    # Strip bracketed test IDs like [007303]
+    text = re.sub(r"^\[\d+\]\s*", "", text.strip())
+    # Strip leading /: or /path: prefixes if bare
+    text = re.sub(r"^/:\s*", "", text)
+    return text.strip()
 
 
 def build_report_data(session: Session, assessment: Assessment) -> dict:
@@ -71,30 +84,35 @@ def build_report_data(session: Session, assessment: Assessment) -> dict:
         for step in steps
         if step.action in ACTIONS and step.status == "succeeded"
     }
+    executed_steps = [step for step in steps if step.status != "pending"]
+    mcp_steps = [
+        step for step in executed_steps if step.argv and step.argv[0] == "mcp"
+    ]
 
     finding_rows = []
     for finding in ordered:
         score = scores[finding.id]
         rows = [row for row in evidence if row.finding_id == finding.id]
+        clean_title = _clean_text(finding.title)
         finding_rows.append(
             {
                 "id": finding.id,
-                "title": finding.title,
+                "title": clean_title,
                 "severity": finding.severity,
                 "score": score["score"],
                 "confidence": round(finding.confidence, 2),
                 "status": finding.status,
                 "asset": finding.asset,
                 "endpoint": finding.endpoint or "",
-                "description": finding.description,
-                "impact": finding.impact,
-                "remediation": finding.remediation,
+                "description": _clean_text(finding.description),
+                "impact": _clean_text(finding.impact),
+                "remediation": _clean_text(finding.remediation),
                 "cve": finding.cve,
                 "cwe": finding.cwe,
                 "evidence": [
                     {
                         "tool": row.locator.get("tool", "nmap"),
-                        "excerpt": row.excerpt[:500],
+                        "excerpt": _clean_text(row.excerpt[:500]),
                         "locator": json.dumps(row.locator, sort_keys=True),
                     }
                     for row in rows
@@ -120,6 +138,8 @@ def build_report_data(session: Session, assessment: Assessment) -> dict:
             "confirmed": sum(1 for finding in findings if finding.status == "confirmed"),
         },
         "tool_count": len(tools),
+        "mcp": bool(mcp_steps),
+        "mcp_only": bool(executed_steps) and len(mcp_steps) == len(executed_steps),
         "findings": finding_rows,
         "steps": [
             {

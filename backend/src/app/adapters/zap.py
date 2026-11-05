@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from app.adapters.base import EvidenceDraft, FindingDraft
+from app.adapters.base import EvidenceDraft, FindingDraft, strip_html
 from app.models import FindingStatus, Severity
 
 RiskCode = Literal["0", "1", "2", "3"]
@@ -89,6 +89,8 @@ def parse(text: str) -> list[ZapAlert]:
 def to_drafts(host: str, port: int, alerts: list[ZapAlert]) -> list[FindingDraft]:
     drafts: list[FindingDraft] = []
     for alert in alerts:
+        desc = strip_html(alert.desc)
+        solution = strip_html(alert.solution)
         evidence = [
             EvidenceDraft(
                 locator={
@@ -97,7 +99,7 @@ def to_drafts(host: str, port: int, alerts: list[ZapAlert]) -> list[FindingDraft
                     "uri": instance.uri,
                     "param": instance.param,
                 },
-                excerpt=(instance.evidence or alert.desc)[:600],
+                excerpt=strip_html(instance.evidence or desc)[:600],
             )
             for instance in alert.instances[:3]
         ]
@@ -106,12 +108,12 @@ def to_drafts(host: str, port: int, alerts: list[ZapAlert]) -> list[FindingDraft
                 canonical_key=f"web:{alert.alert.lower()}:{host}:{port}",
                 asset=host,
                 endpoint=f"http://{host}:{port}",
-                title=alert.alert[:160],
-                description=alert.desc,
+                title=strip_html(alert.alert)[:160],
+                description=desc,
                 severity=SEVERITY[alert.riskcode],
                 confidence=CONFIDENCE.get(alert.confidence, 0.5),
                 status=FindingStatus.SUSPECTED,
-                remediation=alert.solution,
+                remediation=solution,
                 evidence=evidence,
             )
         )

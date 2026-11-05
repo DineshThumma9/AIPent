@@ -62,6 +62,23 @@ export default function App() {
   const [scanning, setScanning] = useState(false)
   const [agentBusy, setAgentBusy] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
+  const [railCollapsed, setRailCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem('aipent-rail-collapsed') === 'true'
+    } catch {
+      return false
+    }
+  })
+
+  function handleToggleRail() {
+    setRailCollapsed((prev) => {
+      const next = !prev
+      try {
+        localStorage.setItem('aipent-rail-collapsed', String(next))
+      } catch {}
+      return next
+    })
+  }
 
   const stream = useAssessmentStream(selectedId)
   const detail = stream.detail
@@ -158,10 +175,12 @@ export default function App() {
         rejected={stream.rejected}
       />
 
-      <div className="frame">
+      <div className="frame" data-collapsed={railCollapsed}>
         <AssessmentRail
           items={items}
           selectedId={selectedId}
+          collapsed={railCollapsed}
+          onToggleCollapse={handleToggleRail}
           onSelect={select}
           onCreate={handleCreate}
         />
@@ -179,23 +198,21 @@ export default function App() {
             <LoadingWorkspace />
           ) : (
             <>
-              <AssessmentHeader
-                detail={detail}
-                scanning={scanning}
-                agentBusy={agentBusy}
-                gatePending={pendingGate}
-                onScan={handleScan}
-                onRunAgent={handleRunAgent}
-              />
-
-              <StepThread steps={detail.steps} />
-
               <div className="workspace-grid">
                 <div className="column-main">
+                  <AssessmentHeader
+                    detail={detail}
+                    scanning={scanning}
+                    agentBusy={agentBusy}
+                    gatePending={pendingGate}
+                    onScan={handleScan}
+                    onRunAgent={handleRunAgent}
+                  />
                   <FindingLedger
                     findings={detail.findings}
                     evidence={detail.evidence}
                   />
+                  <StepThread steps={detail.steps} />
                 </div>
 
                 <aside className="column-side" aria-label="Assessment record">

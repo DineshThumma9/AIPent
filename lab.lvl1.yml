@@ -1,5 +1,6 @@
-# Level 1 lab: one deliberately vulnerable web app, loopback only.
-# Never expose this port beyond 127.0.0.1.
+# Level 1 lab: one deliberately vulnerable web app.
+# Loopback for the browser, plus the Docker bridge gateway for scanner
+# containers. Never expose this port beyond the local machine.
 name: aipent-lvl1
 
 services:
@@ -8,7 +9,10 @@ services:
     container_name: aipent-juice-shop
     ports:
       - "127.0.0.1:3000:3000"
-    restart: "no"
-    mem_limit: 512m
+      - "${AIPENT_LAB_BIND:-172.17.0.1}:3000:3000"
+    restart: unless-stopped
+    mem_limit: 2g
+    environment:
+      NODE_OPTIONS: "--max-old-space-size=1536"
     security_opt:
       - no-new-privileges:true
