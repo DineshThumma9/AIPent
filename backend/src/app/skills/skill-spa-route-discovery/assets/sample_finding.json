@@ -1,0 +1,43 @@
+{
+  "id": 12,
+  "canonical_key": "web:spa:127.0.0.1:3000",
+  "asset": "127.0.0.1",
+  "endpoint": "http://127.0.0.1:3000",
+  "title": "SPA Application Detected (Angular)",
+  "description": "nmap service banner indicates Node.js/Express. Nikto found main.js and vendor.js bundle files. Client-side routing detected via hash fragments (#/).",
+  "severity": "info",
+  "confidence": 0.7,
+  "status": "suspected",
+  "origin": "tool",
+  "cve": [],
+  "cwe": [],
+  "evidence": [
+    {
+      "locator": {
+        "tool": "nikto",
+        "id": "999999",
+        "url": "/main.js",
+        "method": "GET"
+      },
+      "excerpt": "JavaScript bundle file found: main.js (likely Angular/React/Vue SPA)"
+    },
+    {
+      "locator": {
+        "tool": "nikto",
+        "id": "999998",
+        "url": "/vendor.js",
+        "method": "GET"
+      },
+      "excerpt": "Vendor bundle file found: vendor.js"
+    },
+    {
+      "locator": {
+        "tool": "zap",
+        "plugin": "10098",
+        "uri": "http://127.0.0.1:3000/",
+        "param": ""
+      },
+      "excerpt": "Client-side hash routing detected: #/login, #/register, #/score-board in page source"
+    }
+  ]
+}

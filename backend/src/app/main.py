@@ -2,9 +2,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.db import get_engine, init_db
-from app.log import get_logger
-from app.routes import router
+from app.core.db import get_engine, init_db
+from app.core.log import get_logger
+from app.api.routes import router
 
 log = get_logger("api")
 

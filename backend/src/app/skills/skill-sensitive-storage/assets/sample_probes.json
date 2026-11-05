@@ -1,0 +1,12 @@
+{
+  "probes": [
+    {"action": "http_probe", "target": "127.0.0.1", "method": "GET", "path": "/ftp/", "headers": {}, "expected_status": 200, "rationale": "Path referenced by scanner evidence: /ftp/"},
+    {"action": "http_probe", "target": "127.0.0.1", "method": "GET", "path": "/ftp/legal.md", "headers": {}, "expected_status": 200, "rationale": "Path referenced by scanner evidence: /ftp/legal.md"},
+    {"action": "http_probe", "target": "127.0.0.1", "method": "GET", "path": "/ftp/legal.md.bak", "headers": {}, "expected_status": 200, "rationale": "Backup extension probe for /ftp/legal.md"},
+    {"action": "http_probe", "target": "127.0.0.1", "method": "GET", "path": "/ftp/package.json.bak", "headers": {}, "expected_status": 200, "rationale": "Backup extension probe for /package.json"},
+    {"action": "http_probe", "target": "127.0.0.1", "method": "GET", "path": "/package.json", "headers": {}, "expected_status": 200, "rationale": "Config file probe"},
+    {"action": "http_probe", "target": "127.0.0.1", "method": "GET", "path": "/.git/HEAD", "headers": {}, "expected_status": 200, "rationale": "VCS metadata probe"},
+    {"action": "http_probe", "target": "127.0.0.1", "method": "GET", "path": "/robots.txt", "headers": {}, "expected_status": 200, "rationale": "robots.txt may reveal hidden/protected storage paths"}
+  ],
+  "reasoning": "Generated 7 probes: 2 evidence paths, 1 storage dirs, 2 backup extensions, 1 VCS paths, 1 robots.txt."
+}

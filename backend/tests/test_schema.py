@@ -4,9 +4,9 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
-from app.db import init_db, make_engine
-from app.log import get_logger, setup_logging
-from app.models import Assessment, Audit, Evidence, Finding, Step
+from app.core.db import init_db, make_engine
+from app.core.log import get_logger, setup_logging
+from app.domain.models import Assessment, Audit, Evidence, Finding, Step
 
 
 @pytest.fixture

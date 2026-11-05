@@ -1,7 +1,8 @@
 """Live end-to-end rehearsal against a running backend and MCP gateway.
 
-Creates an assessment, walks the plan/action/review gates, downloads the PDF
-and prints the audit trail. This is a manual rehearsal, not a pytest test.
+Creates an assessment, approves each action gate and the final review,
+downloads the PDF and prints the audit trail. This is a manual rehearsal,
+not a pytest test.
 
 Prerequisites:
 
@@ -25,12 +26,20 @@ import sys
 import httpx
 
 BASE = os.getenv("AIPENT_API", "http://127.0.0.1:8010/api")
-TIMEOUT = float(os.getenv("AIPENT_E2E_TIMEOUT", "900"))
+TIMEOUT = float(os.getenv("AIPENT_E2E_TIMEOUT", "1200"))
+MAX_DECISIONS = int(os.getenv("AIPENT_E2E_MAX_DECISIONS", "20"))
 
 
-async def wait_for(
-    client: httpx.AsyncClient, aid: int, want: str, timeout: float = TIMEOUT
+async def wait_for_pause(
+    client: httpx.AsyncClient, aid: int, timeout: float = TIMEOUT
 ) -> dict:
+    """Wait for a human gate or a terminal run state.
+
+    Only return when the run is NOT actively executing (running=False) and is
+    genuinely paused at a gate. While a resume task executes a step (e.g.
+    nmap via MCP), the checkpoint can be stale and still show paused=True;
+    we must not send a second resume while the first task is still running.
+    """
     deadline = asyncio.get_event_loop().time() + timeout
     seen = None
     while asyncio.get_event_loop().time() < deadline:
@@ -39,14 +48,16 @@ async def wait_for(
         if state != seen:
             print("agent:", json.dumps(state), "| steps:", view["steps"])
             seen = state
-        if want in {"plan", "action", "review"}:
-            pending = view["pending"] or {}
-            if view["paused"] and pending.get("gate") == want:
-                return view
-        if want == "done" and not view["running"] and not view["paused"]:
+        if not view["running"] and view["paused"]:
+            return view
+        if not view["running"] and not view["paused"] and view["status"] in {
+            "completed",
+            "failed",
+            "cancelled",
+        }:
             return view
         await asyncio.sleep(1)
-    raise TimeoutError(f"never reached {want}; last={seen}")
+    raise TimeoutError(f"run did not pause or finish; last={seen}")
 
 
 async def resume(
@@ -65,8 +76,11 @@ async def main() -> None:
         created = await client.post(
             f"{BASE}/assessments",
             json={
-                "title": "E2E MCP rehearsal",
-                "request": "Assess the Juice Shop lab on port 3000.",
+                "title": "Juice Shop agent run",
+                "request": (
+                    "Authorised non-destructive assessment of the local Juice "
+                    "Shop lab on port 3000. Find and verify real exposures."
+                ),
                 "targets": ["127.0.0.1"],
                 "ports": [3000],
             },
@@ -78,31 +92,54 @@ async def main() -> None:
         accepted = await client.post(f"{BASE}/assessments/{aid}/run")
         accepted.raise_for_status()
 
-        plan = await wait_for(client, aid, "plan")
-        print("PLAN GATE:", json.dumps(plan["pending"], indent=2)[:1200])
-        if not plan["pending"].get("plan"):
-            raise AssertionError("empty plan")
-        await resume(client, aid, "approved", "Authorized lab scope; proceed.")
+        decisions = 0
+        while True:
+            view = await wait_for_pause(client, aid)
+            pending = view["pending"] or {}
+            if not view["paused"]:
+                break
 
-        action = await wait_for(client, aid, "action")
-        print("ACTION GATE:", json.dumps(action["pending"], indent=2)[:1200])
-        if action["pending"].get("argv", [None])[0] != "mcp":
-            raise AssertionError(f"not an MCP descriptor: {action['pending']}")
-        await resume(client, aid, "approved", "Active web probe is within scope.")
+            gate = pending.get("gate")
+            print(f"\n{str(gate).upper()} GATE:")
+            print(json.dumps(pending, indent=2)[:2000])
+            if view.get("last_message"):
+                print("agent says:", view["last_message"][:600])
 
-        review = await wait_for(client, aid, "review")
-        print("REVIEW GATE:", json.dumps(review["pending"], indent=2)[:1200])
-        await resume(client, aid, "approved", "Findings reviewed; publish report.")
+            if gate == "action":
+                if not pending.get("argv"):
+                    raise AssertionError(f"action gate without argv: {pending}")
+                reason = "Authorized Juice Shop lab; action is within scope."
+            elif gate == "review":
+                reason = "Findings reviewed; publish the report."
+            else:
+                raise AssertionError(f"unknown gate: {pending}")
 
-        done = await wait_for(client, aid, "done")
+            await resume(client, aid, "approved", reason)
+            decisions += 1
+            if decisions > MAX_DECISIONS:
+                raise AssertionError(f"more than {MAX_DECISIONS} gate decisions")
+
         detail = (await client.get(f"{BASE}/assessments/{aid}")).json()
-        print("DONE:", done["status"], "risk:", done["risk_score"])
+        print("\nDONE:", view["status"], "risk:", view["risk_score"])
+        print("agent says:", (view.get("last_message") or "")[:1000])
         print(
             "steps:",
-            [(s["seq"], s["action"], s["status"], s["argv"][0]) for s in detail["steps"]],
+            [
+                (step["seq"], step["action"], step["status"], step["argv"][:2])
+                for step in detail["steps"]
+            ],
         )
         print("findings:", len(detail["findings"]), "evidence:", len(detail["evidence"]))
-        print("assets:", sorted({f["asset"] for f in detail["findings"]}))
+        for finding in detail["findings"]:
+            print(
+                "  finding:",
+                finding["severity"],
+                finding["status"],
+                finding["title"],
+                "|",
+                finding["canonical_key"],
+            )
+        print("assets:", sorted({row["asset"] for row in detail["findings"]}))
         print("audit:", sorted({row["event_type"] for row in detail["audit"]}))
         print(
             "mcp calls:",
@@ -115,10 +152,13 @@ async def main() -> None:
         print(
             "approvals:",
             [
-                (a["action"], a["decision"], a["actor"], a["argv"][:2])
-                for a in detail["approvals"]
+                (row["action"], row["decision"], row["actor"], row["argv"][:2])
+                for row in detail["approvals"]
             ],
         )
+
+        if view["status"] != "completed":
+            raise AssertionError(f"run ended as {view['status']}")
 
         report = await client.get(f"{BASE}/assessments/{aid}/report")
         report.raise_for_status()

@@ -13,6 +13,10 @@ registry:
         description: Run an nmap scan.
       - name: nikto_scan
         description: Run a Nikto web scan.
+      - name: sqlmap_scan
+        description: Run SQLMap to detect and exploit SQL injection flaws (batch mode).
+      - name: dirb_scan
+        description: Run Dirb for web content / directory brute-forcing.
 
   zap:
     name: zap

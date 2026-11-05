@@ -7,7 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.adapters.base import EvidenceDraft, FindingDraft, strip_html
-from app.models import FindingStatus, Severity
+from app.domain.models import FindingStatus, Severity
 
 RiskCode = Literal["0", "1", "2", "3"]
 

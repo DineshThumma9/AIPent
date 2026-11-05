@@ -9,8 +9,8 @@ from typing import Any
 from pydantic import BaseModel, Field, ValidationError
 
 from app.adapters.base import EvidenceDraft, FindingDraft
-from app.config import settings
-from app.models import FindingStatus, Severity
+from app.core.config import settings
+from app.domain.models import FindingStatus, Severity
 
 VENDORED = Path(__file__).resolve().parents[3] / "bin" / "nikto" / "program"
 

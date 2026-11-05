@@ -63,7 +63,6 @@ function planFrom(approval: Approval): PlanStep[] {
 }
 
 function gateLabel(action: string) {
-  if (action === 'plan_review') return 'assessment plan'
   if (action === 'final_review') return 'final findings review'
   return action.replaceAll('_', ' ')
 }
@@ -155,8 +154,8 @@ export function ApprovalPanel({
 
       {approvals.length === 0 ? (
         <p className="empty small">
-          No gate has been raised. The agent pauses here before its plan, before an
-          active web probe, and before the report.
+          No gate has been raised. The agent pauses here before an action, before
+          the final review, and before the report.
         </p>
       ) : (
         <ul className="approval-list">

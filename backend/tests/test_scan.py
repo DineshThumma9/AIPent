@@ -4,9 +4,11 @@ import subprocess
 import pytest
 from sqlmodel import Session, select
 
-from app import actions, scan
-from app.db import init_db, make_engine
-from app.models import Assessment, Audit, Evidence, Finding, Step
+from app import actions
+from app.actions import executor
+from app.runtime import scan
+from app.core.db import init_db, make_engine
+from app.domain.models import Assessment, Audit, Evidence, Finding, Step
 
 
 @pytest.fixture
@@ -20,7 +22,7 @@ def session(tmp_path, monkeypatch, nmap_xml):
         stdout = nmap_xml
         stderr = ""
 
-    monkeypatch.setattr(actions.subprocess, "run", lambda *a, **k: Process())
+    monkeypatch.setattr(executor.subprocess, "run", lambda *a, **k: Process())
     with Session(engine, expire_on_commit=False) as session:
         yield session
 
@@ -68,6 +70,6 @@ def test_out_of_scope_target_never_runs(session, monkeypatch):
     def explode(*_args, **_kwargs):
         raise AssertionError("subprocess must not run out of scope")
 
-    monkeypatch.setattr(actions.subprocess, "run", explode)
+    monkeypatch.setattr(executor.subprocess, "run", explode)
     with pytest.raises(scan.ScopeError):
         asyncio.run(scan.run_scan(session, assessment.id, target="10.0.0.1"))

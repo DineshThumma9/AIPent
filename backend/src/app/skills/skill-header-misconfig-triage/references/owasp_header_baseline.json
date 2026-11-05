@@ -1,0 +1,66 @@
+{
+  "baseline_headers": {
+    "content-security-policy": {
+      "families": ["csp"],
+      "cwe": "CWE-693",
+      "owasp": "A05:2021",
+      "minimum_policy": "There must be a CSP restricting script/connect sources; an empty or unsafe-inline-only policy is a weak finding."
+    },
+    "strict-transport-security": {
+      "families": ["hsts"],
+      "cwe": "CWE-319",
+      "owasp": "A02:2021",
+      "note": "Not applicable to http://-only deployments. Triage to SUSPECTED if target has no TLS."
+    },
+    "x-frame-options": {
+      "families": ["x-frame-options"],
+      "cwe": "CWE-1021",
+      "owasp": "A05:2021",
+      "equivalent": "CSP frame-ancestors 'none' or 'self' satisfies this family."
+    },
+    "x-content-type-options": {
+      "families": ["x-content-type-options"],
+      "cwe": "CWE-430",
+      "owasp": "A05:2021",
+      "note": "This header is cheap; missing it on any served asset counts."
+    }
+  },
+  "cors_probe": {
+    "api_paths": [
+      "/api",
+      "/api/users",
+      "/api/me",
+      "/rest",
+      "/rest/user",
+      "/rest/admin",
+      "/graphql",
+      "/v1/me"
+    ],
+    "static_paths": [
+      "/main.js",
+      "/favicon.ico",
+      "/robots.txt"
+    ]
+  },
+  "cookie_baseline": {
+    "session_names": ["session", "sid", "jsessionid", "jwt", "oauth", "auth", "token"],
+    "required_flags": ["Secure", "HttpOnly", "SameSite=strict|lax"],
+    "cookie_paths_to_probe": ["/login", "/auth/token", "/api/login", "/session"],
+    "note": "Analytics/tracking cookies (auid, ga, fbq) do not count for session-flag findings."
+  },
+  "cdn_public_paths": [
+    "/fonts/",
+    "/img/",
+    "/images/",
+    "/js/",
+    "/css/",
+    "/static/"
+  ],
+  "title_families": {
+    "csp": ["content security policy", "csp"],
+    "x-frame-options": ["x-frame-options", "frame options", "clickjacking"],
+    "x-content-type-options": ["x-content-type-options", "mime sniff", "mime type"],
+    "hsts": ["strict-transport-security", "hsts"],
+    "cors": ["access-control-allow-origin", "cors"]
+  }
+}

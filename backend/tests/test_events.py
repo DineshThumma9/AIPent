@@ -1,11 +1,11 @@
 import json
 
-from app.events import EventType, StreamState
-from app.queries import load_assessment_detail
-from app.schema import AssessmentDetail
+from app.core.events import EventType, StreamState
+from app.api.queries import load_assessment_detail
+from app.api.schema import AssessmentDetail
 from sqlmodel import Session
 
-from app.models import Assessment
+from app.domain.models import Assessment
 
 
 def _create(client, title="Lab"):

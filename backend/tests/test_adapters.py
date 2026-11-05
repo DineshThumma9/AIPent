@@ -6,8 +6,9 @@ import pytest
 from sqlmodel import Session, select
 
 from app import actions
+from app.actions import executor
 from app.adapters import nikto, zap
-from app.models import Assessment, Evidence, Finding, Step
+from app.domain.models import Assessment, Evidence, Finding, Step
 
 NIKTO_JSON = json.dumps(
     {
@@ -116,7 +117,7 @@ def test_execute_nikto_writes_artifact_and_evidence(session, monkeypatch):
 
         return Process()
 
-    monkeypatch.setattr(actions.subprocess, "run", fake_run)
+    monkeypatch.setattr(executor.subprocess, "run", fake_run)
     step = asyncio.run(
         actions.execute_action(
             session,
@@ -141,7 +142,7 @@ def test_execute_missing_tool_is_blocked(session, monkeypatch):
     def explode(*_args, **_kwargs):
         raise FileNotFoundError("nikto")
 
-    monkeypatch.setattr(actions.subprocess, "run", explode)
+    monkeypatch.setattr(executor.subprocess, "run", explode)
     step = asyncio.run(
         actions.execute_action(session, assessment.id, "nikto_scan")
     )
@@ -165,7 +166,7 @@ def test_duplicate_evidence_is_not_written_twice(session, monkeypatch):
 
         return Process()
 
-    monkeypatch.setattr(actions.subprocess, "run", fake_run)
+    monkeypatch.setattr(executor.subprocess, "run", fake_run)
     asyncio.run(actions.execute_action(session, assessment.id, "nikto_scan"))
     asyncio.run(actions.execute_action(session, assessment.id, "nikto_scan"))
 

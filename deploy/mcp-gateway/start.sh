@@ -43,7 +43,7 @@ export DOCKER_MCP_ALLOW_INSECURE_REMOTE_URLS=1
 
 # Only the eight tools the guided workflow needs. The LLM never sees these
 # names; the backend maps three semantic actions onto them.
-tools="${AIPENT_MCP_TOOLS:-nmap_scan,nikto_scan,zap_crawl_start,zap_crawl_status,zap_crawl_stop,zap_passive_scan_wait,zap_report_generate,zap_report_read_chunk}"
+tools="${AIPENT_MCP_TOOLS:-nmap_scan,nikto_scan,sqlmap_scan,dirb_scan,zap_crawl_start,zap_crawl_status,zap_crawl_stop,zap_passive_scan_wait,zap_report_generate,zap_report_read_chunk}"
 
 exec docker mcp gateway run \
   --catalog=aipent.yaml \

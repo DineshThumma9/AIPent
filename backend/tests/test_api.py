@@ -37,7 +37,7 @@ def test_scan_route_marks_assessment_completed(client, monkeypatch):
     ).json()
 
     async def fake_run_scan(session, assessment_id, target=None, timeout=None):
-        from app.models import Step
+        from app.domain.models import Step
 
         step = Step(
             assessment_id=assessment_id,
@@ -51,7 +51,7 @@ def test_scan_route_marks_assessment_completed(client, monkeypatch):
         session.refresh(step)
         return step
 
-    monkeypatch.setattr("app.routes.run_scan", fake_run_scan)
+    monkeypatch.setattr("app.api.routes.run_scan", fake_run_scan)
     response = client.post(f"/api/assessments/{created['id']}/scan")
 
     assert response.status_code == 200

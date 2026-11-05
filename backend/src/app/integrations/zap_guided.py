@@ -11,7 +11,7 @@ import json
 import re
 from typing import Any
 
-from app.mcp_client import GatewayClient
+from app.integrations.mcp_client import GatewayClient
 
 # Queue mode returns "Job ID"; direct mode returns "Operation ID".
 JOB_ID = re.compile(r"^(?:Job|Operation) ID:\s*(\S+)", re.MULTILINE)

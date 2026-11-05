@@ -1,0 +1,34 @@
+{
+  "true_markers": " AND 1=1--",
+  "false_markers": " AND 1=2--",
+  "quote_marker": "'",
+  "generic_endpoints": [
+    "/search?q=hello'",
+    "/search?page=1'",
+    "/products?id=1'",
+    "/search?keyword=abc'",
+    "/rest/product/1?q=1'",
+    "/api/search?q=1'",
+    "/item?id=1'"
+  ],
+  "safe_probe_policy": {
+    "allowed": [
+      "GET with ?param=value AND 1=1 / AND 1=2",
+      "POST JSON {\"param\": \"value AND 1=1\"} equivalents",
+      "single appended single-quote for error reflection",
+      "comparing TRUE vs FALSE response status/length/error strings"
+    ],
+    "forbidden": [
+      "UNION SELECT data dumping",
+      "SLEEP/BENCHMARK/timing attacks",
+      "UPDATE / INSERT / DELETE / DROP / ALTER",
+      "sqlmap or any automated injector without an approved human gate",
+      "bulk/invasive automation beyond ~10 probe requests"
+    ]
+  },
+  "response_comparison": {
+    "delta_length_threshold": 200,
+    "ratio_threshold": 1.2,
+    "note": "TRUE vs FALSE length delta above threshold with baseline close to false indicates boolean control."
+  }
+}

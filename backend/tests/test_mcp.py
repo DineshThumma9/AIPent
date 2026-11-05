@@ -4,11 +4,12 @@ import json
 import pytest
 
 from app import actions
+from app.actions import executor
 from app.adapters import nikto, nmap
-from app.config import settings
+from app.core.config import settings
 from app.integrations import zap_guided
-from app.mcp_client import normalise_text
-from app.models import Assessment, Step
+from app.integrations.mcp_client import normalise_text
+from app.domain.models import Assessment, Step
 
 
 def test_normalise_unwraps_spring_ai_strings_only():
@@ -150,12 +151,12 @@ def test_gateway_mapping_uses_fixed_arguments(monkeypatch):
             calls.append((name, arguments))
             return "<nmaprun/>"
 
-    monkeypatch.setattr(actions, "GatewayClient", FakeGateway)
+    monkeypatch.setattr(executor, "GatewayClient", FakeGateway)
     assessment = Assessment(title="Lab", targets=["127.0.0.1"], ports=[3000])
     step = Step(assessment_id=1, seq=1, action="recon_services", target="127.0.0.1")
 
     result = asyncio.run(
-        actions._run_gateway("recon_services", assessment, "127.0.0.1", step)
+        executor._run_gateway("recon_services", assessment, "127.0.0.1", step)
     )
 
     assert result.text == "<nmaprun/>"

@@ -1,0 +1,24 @@
+{
+  "id": 1,
+  "canonical_key": "web:x-frame-options:127.0.0.1:3000",
+  "asset": "127.0.0.1",
+  "endpoint": "http://127.0.0.1:3000",
+  "title": "The anti-clickjacking X-Frame-Options header is not present.",
+  "description": "Nikto flagged missing X-Frame-Options on 3000. ZAP baseline alerts also flag CSP Header Not Set and X-Content-Type-Options missing on several endpoints.",
+  "severity": "low",
+  "confidence": 0.6,
+  "status": "suspected",
+  "origin": "tool",
+  "cve": [],
+  "cwe": ["CWE-693"],
+  "evidence": [
+    {
+      "locator": {"tool": "nikto", "id": "999957", "url": "/", "method": "GET"},
+      "excerpt": "+ The anti-clickjacking X-Frame-Options header is not present."
+    },
+    {
+      "locator": {"tool": "zap", "plugin": "10038", "uri": "http://127.0.0.1:3000/", "param": ""},
+      "excerpt": "Content Security Policy (CSP) header is missing"
+    }
+  ]
+}

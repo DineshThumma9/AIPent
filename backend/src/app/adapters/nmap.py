@@ -6,7 +6,7 @@ from typing import Literal
 from pydantic import BaseModel
 
 from app.adapters.base import EvidenceDraft, FindingDraft
-from app.models import Severity
+from app.domain.models import Severity
 
 PortState = Literal[
     "open",

@@ -1,0 +1,81 @@
+{
+  "probes": [
+    {
+      "action": "http_probe",
+      "target": "127.0.0.1",
+      "method": "GET",
+      "path": "/definitely-random-uuid-404-check-a1b2c3d4",
+      "headers": {},
+      "expected_status": 200,
+      "rationale": "Detect SPA wildcard fallback (404 returns 200 with root HTML)"
+    },
+    {
+      "action": "http_probe",
+      "target": "127.0.0.1",
+      "method": "GET",
+      "path": "/#/score-board",
+      "headers": {},
+      "expected_status": 200,
+      "rationale": "Probe for hidden Angular route: /#/score-board"
+    },
+    {
+      "action": "http_probe",
+      "target": "127.0.0.1",
+      "method": "GET",
+      "path": "/#/administration",
+      "headers": {},
+      "expected_status": 200,
+      "rationale": "Probe for hidden Angular route: /#/administration"
+    },
+    {
+      "action": "http_probe",
+      "target": "127.0.0.1",
+      "method": "GET",
+      "path": "/#/admin",
+      "headers": {},
+      "expected_status": 200,
+      "rationale": "Probe for hidden Angular route: /#/admin"
+    },
+    {
+      "action": "http_probe",
+      "target": "127.0.0.1",
+      "method": "GET",
+      "path": "/#/login",
+      "headers": {},
+      "expected_status": 200,
+      "rationale": "Probe for hidden Angular route: /#/login"
+    },
+    {
+      "action": "http_probe",
+      "target": "127.0.0.1",
+      "method": "GET",
+      "path": "/#/register",
+      "headers": {},
+      "expected_status": 200,
+      "rationale": "Probe for hidden Angular route: /#/register"
+    },
+    {
+      "action": "http_probe",
+      "target": "127.0.0.1",
+      "method": "GET",
+      "path": "/rest/user/profile",
+      "headers": {
+        "Origin": "https://attacker.com"
+      },
+      "expected_status": 200,
+      "rationale": "Test CORS reflection on API endpoint: /rest/user/profile"
+    },
+    {
+      "action": "http_probe",
+      "target": "127.0.0.1",
+      "method": "GET",
+      "path": "/rest/user/login",
+      "headers": {
+        "Origin": "https://attacker.com"
+      },
+      "expected_status": 200,
+      "rationale": "Test CORS reflection on API endpoint: /rest/user/login"
+    }
+  ],
+  "reasoning": "Detected framework: angular. Generated 8 probes: 1 wildcard check, 5 hidden routes, 2 CORS tests."
+}

@@ -6,7 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from app.models import FindingStatus, Origin, Severity
+from app.domain.models import FindingStatus, Origin, Severity
 
 
 def strip_html(text: str) -> str:

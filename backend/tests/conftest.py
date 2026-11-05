@@ -2,8 +2,8 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session
 
-from app.config import settings
-from app.db import get_engine, get_session, init_db, make_engine
+from app.core.config import settings
+from app.core.db import get_engine, get_session, init_db, make_engine
 from app.main import app
 
 
