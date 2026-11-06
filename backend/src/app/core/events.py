@@ -35,6 +35,7 @@ class EventType(StrEnum):
     APPROVAL = "approval"
     AUDIT = "audit"
     REPORT = "report"
+    MESSAGE = "message"
     ERROR = "error"
     HEARTBEAT = "heartbeat"
 

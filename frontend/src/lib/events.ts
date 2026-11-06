@@ -5,6 +5,7 @@ import {
   AuditEventSchema,
   EvidenceSchema,
   FindingSchema,
+  MessageSchema,
   StepSchema,
   type AssessmentDetail,
 } from './schemas'
@@ -17,6 +18,7 @@ export const STREAM_EVENT_TYPES = [
   'approval',
   'audit',
   'report',
+  'message',
   'error',
   'heartbeat',
 ] as const
@@ -67,6 +69,12 @@ export const StreamEventSchema = z.discriminatedUnion('type', [
       report_sha256: z.string().nullable(),
       finished_at: z.string().nullable(),
       status: z.string(),
+    }),
+  ),
+  envelope(
+    'message',
+    z.object({
+      message: MessageSchema,
     }),
   ),
   envelope(
@@ -154,10 +162,14 @@ export function applyEvent(
           }
         : detail
 
+    case 'message':
+      return detail
+
     case 'error':
     case 'heartbeat':
       return detail
   }
+  return detail
 }
 
 export function summarizeEvent(event: StreamEvent): string {
@@ -182,5 +194,8 @@ export function summarizeEvent(event: StreamEvent): string {
       return String(event.data.message ?? 'stream error')
     case 'heartbeat':
       return 'heartbeat'
+    case 'message':
+      return 'new message'
   }
+  return 'event'
 }

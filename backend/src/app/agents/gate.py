@@ -21,7 +21,9 @@ from sqlalchemy import func
 from sqlmodel import Session, select
 
 from app.actions import (
+    ActionSpec,
     ScopeError,
+    _artifact_dir,
     check_scope,
     execute_action,
     get_action,
@@ -30,6 +32,7 @@ from app.actions import (
 from app.core.config import settings
 from app.core.db import get_engine
 from app.core.log import get_logger
+from app.core.policy import DEFAULT_ACTION_POLICIES, ActionPolicy, load_policies
 from app.domain.models import (
     Approval,
     Assessment,
@@ -49,6 +52,19 @@ ACTIVE_STATES = (
     StepStatus.RUNNING.value,
     StepStatus.SUCCEEDED.value,
 )
+
+_policy_cache: dict[str, ActionPolicy] | None = None
+
+
+def _policies() -> dict[str, ActionPolicy]:
+    global _policy_cache
+    if _policy_cache is None:
+        _policy_cache = settings.action_policies()
+    return _policy_cache
+
+
+def _policy_for(action: str) -> ActionPolicy:
+    return _policies().get(action, DEFAULT_ACTION_POLICIES.get(action, ActionPolicy()))
 
 PROBE_HEADERS = (
     "content-type",
@@ -70,11 +86,27 @@ def _next_seq(session: Session, assessment_id: int) -> int:
     return (current or 0) + 1
 
 
+def _inject_output_path(argv: list[str], output_path: str, spec: ActionSpec) -> list[str]:
+    """Ensure agent-supplied argv writes to the artifact output path.
+
+    Replaces an existing ``-output <path>`` flag, or appends one, so the
+    executor finds the artifact where it expects it.
+    """
+    result = list(argv)
+    try:
+        idx = result.index("-output")
+        if idx + 1 < len(result):
+            result[idx + 1] = output_path
+    except ValueError:
+        result.extend(["-output", output_path])
+    return result
+
+
 def queue_step(
     session: Session,
     assessment: Assessment,
     run_id: str,
-    phase: str,
+    role: str,
     action: str,
     target: str,
     rationale: str,
@@ -86,6 +118,10 @@ def queue_step(
 
     Returns a dict the tool can hand straight to the LLM. Policy refusals are
     returned, not raised, so the agent can adapt in the same turn.
+
+    When the tool supplies argv (agent-owned command) for a file-based action,
+    the artifact output path is injected automatically so the executor finds
+    the artifact where it expects it.
     """
     assessment_id = assessment.id or 0
     spec = get_action(action)
@@ -99,7 +135,7 @@ def queue_step(
         return {
             "error": (
                 f"action budget exhausted ({settings.max_steps} queued actions "
-                "for this run); call finish and let the analyst review what ran"
+                "for this run); hand off and let the analyst review what ran"
             )
         }
 
@@ -133,10 +169,16 @@ def queue_step(
 
     if argv is None:
         argv = resolve_argv(action, assessment, target, step.id or 0)
+    elif spec.output == "file":
+        # Inject artifact output path into agent-supplied argv.
+        output_path = str(_artifact_dir(assessment_id) / f"{step.id}{spec.suffix}")
+        argv = _inject_output_path(list(argv), output_path, spec)
     step.argv = argv
 
     approval_detail: dict[str, Any] = {
-        "phase": phase,
+        "role": role,
+        # Kept as an alias for the current dashboard read model.
+        "phase": role,
         "rationale": rationale,
         "tool": spec.tool,
         "plan": [
@@ -161,6 +203,7 @@ def queue_step(
         "action.queued",
         {
             "run_id": run_id,
+            "role": role,
             "step_id": step.id,
             "action": action,
             "target": target,
@@ -229,7 +272,7 @@ def _fallback_approval(assessment_id: int, step: dict[str, Any]) -> dict[str, An
             step_id=step["step_id"],
             action=step["action"],
             argv=step["argv"],
-            detail={"phase": "unknown", "rationale": step["rationale"]},
+            detail={"role": "unknown", "phase": "unknown", "rationale": step["rationale"]},
         )
         session.add(row)
         session.commit()
@@ -404,14 +447,13 @@ def _decide_and_execute(
             raise LookupError(f"assessment {assessment_id} not found")
         target = step.target or assessment.targets[0]
 
-        expected = (
-            list(step.argv)
-            if step.action == "http_probe"
-            else resolve_argv(step.action, assessment, target, step.id or 0)
-        )
+        # The approved argv must match what is stored on the step. Both were
+        # set from the same argv at queue time; Python does not re-generate
+        # the command from the catalogue at execution time.
+        expected = list(step.argv or [])
         if approval.argv != expected:
             step.status = StepStatus.REJECTED.value
-            step.error = "resolved argv changed after approval"
+            step.error = "approved argv does not match step argv"
             step.ended_at = utcnow()
             audit(
                 session,
@@ -453,7 +495,7 @@ def _decide_and_execute(
 
 def run_gate_step(
     assessment_id: int,
-    phase: str,
+    role: str,
     interrupt_fn: Callable[[dict], Any],
     executor: Callable[..., Any] | None = None,
 ) -> dict[str, Any] | None:
@@ -478,21 +520,35 @@ def run_gate_step(
 
     decision = None
     if approval["decision"] == Decision.PENDING.value:
-        _set_status(assessment_id, AssessmentStatus.AWAITING_APPROVAL.value)
-        detail = approval.get("detail") or {}
-        decision = interrupt_fn(
-            {
-                "gate": "action",
-                "phase": detail.get("phase", phase),
-                "approval_id": approval["id"],
-                "step_id": step["step_id"],
-                "action": step["action"],
-                "target": step["target"],
-                "argv": step["argv"],
-                "rationale": step["rationale"],
-                "finding_id": detail.get("finding_id"),
+        policy = _policy_for(step["action"])
+        if not policy.requires_approval:
+            # Agent authority: auto-approve per policy, no human interrupt.
+            _set_status(assessment_id, AssessmentStatus.RUNNING.value)
+            decision = {
+                "decision": "approved",
+                "actor": "system",
+                "reason": f"auto-approved by policy ({policy.risk} risk)",
             }
-        )
+        else:
+            _set_status(assessment_id, AssessmentStatus.AWAITING_APPROVAL.value)
+            detail = approval.get("detail") or {}
+            decision = interrupt_fn(
+                {
+                    "gate": "action",
+                    "role": detail.get("role", role),
+                    # Alias kept for the current dashboard approval card.
+                    "phase": detail.get("phase", role),
+                    "approval_id": approval["id"],
+                    "step_id": step["step_id"],
+                    "action": step["action"],
+                    "target": step["target"],
+                    "argv": step["argv"],
+                    "rationale": step["rationale"],
+                    "finding_id": detail.get("finding_id"),
+                    "risk": policy.risk,
+                    "requires_approval": True,
+                }
+            )
 
     return _decide_and_execute(
         assessment_id, step["step_id"], decision, executor=executor

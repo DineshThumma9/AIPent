@@ -6,6 +6,7 @@ process-local and the checkpoint is durable across restarts.
 """
 
 import asyncio
+import sqlite3
 from typing import Any
 
 from langgraph.types import Command
@@ -18,6 +19,7 @@ from app.agents.graph import (
     initial_state,
     prepare_run,
 )
+from app.core.config import settings
 from app.core.db import get_engine
 from app.core.log import get_logger
 from app.domain.models import Assessment, AssessmentStatus, Audit, utcnow
@@ -54,6 +56,34 @@ def reset_runner() -> None:
     for task in _tasks.values():
         task.cancel()
     _tasks.clear()
+
+
+def reset_graph_checkpoint(assessment_id: int) -> None:
+    """Clear the LangGraph checkpoint for one assessment.
+
+    After a stop/cancel, the graph checkpoint may still hold ``state.next``
+    from a paused gate. Deleting the checkpoint rows lets ``start_run`` begin
+    a fresh loop instead of erroring with ``the graph is paused at a gate``.
+    """
+    thread_id = f"agent-{assessment_id}"
+    try:
+        conn = sqlite3.connect(settings.graph_path)
+        try:
+            conn.execute(
+                "DELETE FROM checkpoints WHERE thread_id = ?", (thread_id,)
+            )
+            conn.execute(
+                "DELETE FROM checkpoint_blobs WHERE thread_id = ?",
+                (thread_id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except sqlite3.OperationalError:
+        # Tables may not exist yet on a fresh database; that is fine.
+        pass
+    except Exception:  # noqa: BLE001 - checkpoint reset is best-effort
+        log.debug("checkpoint reset failed for %s", assessment_id)
 
 
 def _values(assessment_id: int) -> tuple[Any, Any]:
@@ -149,7 +179,21 @@ async def start_run(
     graph, config = _graph_for(assessment_id)
     state = graph.get_state(config)
     if state.next:
-        raise AlreadyRunning("the graph is paused at a gate; resume it instead")
+        # If the assessment is cancelled or failed, the old checkpoint state
+        # is stale. Reset it and start fresh instead of erroring.
+        with Session(engine, expire_on_commit=False) as session:
+            assessment = session.get(Assessment, assessment_id)
+            if assessment is None:
+                raise LookupError(f"assessment {assessment_id} not found")
+            if assessment.status in (
+                AssessmentStatus.CANCELLED.value,
+                AssessmentStatus.FAILED.value,
+            ):
+                reset_graph_checkpoint(assessment_id)
+            else:
+                raise AlreadyRunning(
+                    "the graph is paused at a gate; resume it instead"
+                )
 
     with Session(engine, expire_on_commit=False) as session:
         if session.get(Assessment, assessment_id) is None:
@@ -178,3 +222,37 @@ async def resume_run(
 
     _launch(engine, assessment_id, Command(resume=decision))
     return get_view(assessment_id, running=True)
+
+
+async def stop_run(
+    assessment_id: int,
+    engine: Engine,
+    actor: str = "analyst",
+) -> AgentView:
+    """Cancel an active agent run and mark the assessment cancelled."""
+    task = _tasks.get(assessment_id)
+    if task is not None and not task.done():
+        task.cancel()
+    _tasks.pop(assessment_id, None)
+
+    # Clear the graph checkpoint so a fresh start_run can begin a new loop
+    # instead of finding a paused gate from the previous run.
+    reset_graph_checkpoint(assessment_id)
+
+    with Session(engine, expire_on_commit=False) as session:
+        assessment = session.get(Assessment, assessment_id)
+        if assessment is None:
+            raise LookupError(f"assessment {assessment_id} not found")
+        assessment.status = AssessmentStatus.CANCELLED.value
+        assessment.finished_at = utcnow()
+        session.add(
+            Audit(
+                assessment_id=assessment_id,
+                actor=actor,
+                event_type="agent.stopped",
+                payload={"reason": "stopped by operator"},
+            )
+        )
+        session.commit()
+
+    return get_view(assessment_id, running=False)

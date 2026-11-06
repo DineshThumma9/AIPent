@@ -5,10 +5,12 @@ import {
   AssessmentInputSchema,
   AssessmentSchema,
   DecisionInputSchema,
+  MessageSchema,
   type Assessment,
   type AssessmentDetail,
   type AssessmentInput,
   type DecisionInput,
+  type Message,
 } from './schemas'
 
 const BASE = '/api'
@@ -50,6 +52,12 @@ export const createAssessment = (body: AssessmentInput) =>
     body: JSON.stringify(AssessmentInputSchema.parse(body)),
   }) as Promise<Assessment>
 
+export const updateAssessmentRequest = (id: number, request: string) =>
+  req(`/assessments/${id}/request`, AssessmentSchema, {
+    method: 'PATCH',
+    body: JSON.stringify({ request }),
+  }) as Promise<Assessment>
+
 export const runScan = (id: number) =>
   req(`/assessments/${id}/scan`, AssessmentDetailSchema, {
     method: 'POST',
@@ -65,5 +73,19 @@ export const resumeAgent = (id: number, decision: DecisionInput) =>
     method: 'POST',
     body: JSON.stringify(DecisionInputSchema.parse(decision)),
   }) as Promise<z.infer<typeof AgentAcceptedSchema>>
+
+export const stopAgent = (id: number) =>
+  req(`/assessments/${id}/stop`, AgentAcceptedSchema, {
+    method: 'POST',
+  }) as Promise<z.infer<typeof AgentAcceptedSchema>>
+
+export const listMessages = (id: number) =>
+  req(`/assessments/${id}/messages`, MessageSchema.array()) as Promise<Message[]>
+
+export const createMessage = (id: number, payload: { role: 'operator' | 'assistant'; text: string }) =>
+  req(`/assessments/${id}/messages`, MessageSchema, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  }) as Promise<Message>
 
 export const reportUrl = (id: number) => `${BASE}/assessments/${id}/report`

@@ -6,3 +6,4 @@ current_assessment_id: ContextVar[int | None] = ContextVar(
     "current_assessment_id", default=None
 )
 current_run_id: ContextVar[str | None] = ContextVar("current_run_id", default=None)
+current_role: ContextVar[str | None] = ContextVar("current_role", default=None)

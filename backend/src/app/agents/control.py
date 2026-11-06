@@ -1,27 +1,35 @@
-"""Run-scoped control state chosen by the agent.
+"""Run-scoped role and handoff state.
 
-The LLM decides which phase it is in and when the assessment is finished.
-Python only records those decisions in the append-only audit trail and reads
-them back. Keeping control state in the database (rather than in a checkpoint
-only) means a restart cannot silently move the agent back to recon.
+The three specialist roles are real graph nodes now. The LLM decides what to do
+inside its role; Python records which role ran, what it handed off, and enforces
+the role budgets. Keeping this in the database (rather than only in a
+checkpoint) means a restart cannot silently lose the handoff trail.
 
-Every event is scoped by ``run_id`` so a previous run cannot leak its finish or
-phase into a new one.
+Every event is scoped by ``run_id`` so a previous run cannot leak its handoffs
+into a new one.
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 from sqlmodel import Session, select
 
 from app.domain.models import Audit
 
-PHASES = ("recon", "discovery", "validation")
+ROLES = ("recon", "discovery", "validation")
 
-# The phase label is the agent identity used by the skill allowlists.
-PHASE_AGENT = {
+# The role label is the agent identity used by the skill allowlists.
+ROLE_AGENT = {
     "recon": "recon_agent",
     "discovery": "discovery_agent",
     "validation": "validation_agent",
+}
+
+ROLE_TURN_CAPS = {
+    "recon": 3,
+    "discovery": 4,
+    "validation": 8,
 }
 
 
@@ -61,53 +69,107 @@ def _for_run(events: list[Audit], run_id: str) -> list[dict]:
     ]
 
 
-def current_phase(session: Session, assessment_id: int, run_id: str) -> str:
-    """The last phase the agent entered during this run."""
-    for payload in reversed(_for_run(_events(session, assessment_id, "phase.advanced"), run_id)):
-        phase = str(payload.get("to") or "")
-        if phase in PHASES:
-            return phase
+def current_role(session: Session, assessment_id: int, run_id: str) -> str:
+    """The last role entered during this run."""
+    for payload in reversed(
+        _for_run(_events(session, assessment_id, "role.started"), run_id)
+    ):
+        role = str(payload.get("role") or "")
+        if role in ROLES:
+            return role
     return "recon"
 
 
-def phase_history(session: Session, assessment_id: int, run_id: str) -> list[dict]:
-    return _for_run(_events(session, assessment_id, "phase.advanced"), run_id)
+def role_history(session: Session, assessment_id: int, run_id: str) -> list[dict]:
+    return _for_run(_events(session, assessment_id, "role.started"), run_id)
 
 
-def record_phase(
+def record_role(
     session: Session,
     assessment_id: int,
     run_id: str,
-    to_phase: str,
+    role: str,
     reason: str,
-    from_phase: str | None = None,
+    from_role: str | None = None,
 ) -> dict:
-    if to_phase not in PHASES:
-        raise ValueError(f"unknown phase {to_phase!r}; expected one of {PHASES}")
-    previous = from_phase or current_phase(session, assessment_id, run_id)
+    if role not in ROLES:
+        raise ValueError(f"unknown role {role!r}; expected one of {ROLES}")
     payload = {
         "run_id": run_id,
-        "from": previous,
-        "to": to_phase,
+        "from": from_role,
+        "to": role,
+        "role": role,
         "reason": reason,
     }
-    audit(session, assessment_id, "phase.advanced", payload)
+    audit(session, assessment_id, "role.started", payload)
     return payload
 
 
-def record_finish(
-    session: Session, assessment_id: int, run_id: str, reason: str
+def record_handoff(
+    session: Session,
+    assessment_id: int,
+    run_id: str,
+    role: str,
+    payload: dict[str, Any],
 ) -> dict:
-    payload = {"run_id": run_id, "reason": reason}
-    audit(session, assessment_id, "run.finished", payload)
-    return payload
+    if role not in ROLES:
+        raise ValueError(f"unknown role {role!r}; expected one of {ROLES}")
+    body = {
+        "run_id": run_id,
+        "role": role,
+        "summary": str(payload.get("summary") or "")[:1000],
+        "decisions": payload.get("decisions") or [],
+        "finding_ids": payload.get("finding_ids") or [],
+        "step_ids": payload.get("step_ids") or [],
+        "next_recommendation": payload.get("next_recommendation") or "review",
+        "needs_input": bool(payload.get("needs_input")),
+        "question": payload.get("question") or None,
+        "open_questions": payload.get("open_questions") or [],
+    }
+    audit(session, assessment_id, "handoff.created", body)
+    return body
 
 
-def run_finished(session: Session, assessment_id: int, run_id: str) -> bool:
-    return bool(_for_run(_events(session, assessment_id, "run.finished"), run_id))
+def handoff_history(
+    session: Session,
+    assessment_id: int,
+    run_id: str,
+    role: str | None = None,
+) -> list[dict]:
+    rows = _for_run(_events(session, assessment_id, "handoff.created"), run_id)
+    if role is not None:
+        rows = [row for row in rows if row.get("role") == role]
+    return rows
+
+
+def latest_handoff(
+    session: Session,
+    assessment_id: int,
+    run_id: str,
+    role: str | None = None,
+) -> dict | None:
+    rows = handoff_history(session, assessment_id, run_id, role)
+    return rows[-1] if rows else None
 
 
 def run_event_count(
-    session: Session, assessment_id: int, run_id: str, event_type: str
+    session: Session,
+    assessment_id: int,
+    run_id: str,
+    event_type: str,
 ) -> int:
     return len(_for_run(_events(session, assessment_id, event_type), run_id))
+
+
+def role_event_count(
+    session: Session,
+    assessment_id: int,
+    run_id: str,
+    role: str,
+    event_type: str,
+) -> int:
+    return sum(
+        1
+        for payload in _for_run(_events(session, assessment_id, event_type), run_id)
+        if payload.get("role") == role
+    )

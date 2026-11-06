@@ -183,3 +183,13 @@ class Audit(SQLModel, table=True):
     actor: str = "system"
     event_type: str
     payload: dict[str, Any] = Field(default_factory=dict, sa_type=JSON)
+
+
+class Message(SQLModel, table=True):
+    """Operator/assistant turns persisted for one assessment."""
+
+    id: int | None = Field(default=None, primary_key=True)
+    assessment_id: int = Field(foreign_key="assessment.id", index=True)
+    role: str
+    text: str
+    created_at: datetime = Field(default_factory=utcnow)

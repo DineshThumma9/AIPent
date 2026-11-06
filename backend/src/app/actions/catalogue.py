@@ -54,6 +54,16 @@ def _nmap_argv(assessment: Assessment, target: str, _output: Path) -> list[str]:
     return nmap.argv(target, assessment.ports or [3000])
 
 
+def _nmap_scan_argv(assessment: Assessment, target: str, _output: Path) -> list[str]:
+    """Nmap scan with agent-supplied argv stored on the step.
+
+    The nmap_scan tool builds the full command (flags, ports, target) and the
+    gate approves it exactly. This resolver is only a fallback when argv is not
+    already set on the step.
+    """
+    return nmap.argv(target, assessment.ports or [3000])
+
+
 def _nikto_argv(assessment: Assessment, target: str, output: Path) -> list[str]:
     return nikto.argv(target, _web_port(assessment), str(output))
 
@@ -97,6 +107,16 @@ ACTIONS: dict[str, ActionSpec] = {
         transport="local",
         ok_codes=(0,),
         build_argv=_nmap_argv,
+        parse=lambda text, host, _port: nmap.scan(text, host_override=host),
+    ),
+    "nmap_scan": ActionSpec(
+        name="nmap_scan",
+        tool="nmap",
+        suffix=".nmap.xml",
+        output="stdout",
+        transport="local",
+        ok_codes=(0,),
+        build_argv=_nmap_scan_argv,
         parse=lambda text, host, _port: nmap.scan(text, host_override=host),
     ),
     "nikto_scan": ActionSpec(

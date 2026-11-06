@@ -12,10 +12,21 @@ from app.domain.models import (
     Assessment,
     AssessmentStatus,
     Audit,
+    Message,
     StepStatus,
     utcnow,
 )
 from app.api.queries import load_assessment_detail
+from app.api.schema import (
+    AgentAccepted,
+    AgentView,
+    AssessmentCreate,
+    AssessmentDetail,
+    AssessmentRequestUpdate,
+    DecisionIn,
+    MessageIn,
+    MessageOut,
+)
 from app.domain.risk import refresh_risk
 from app.runtime.scan import ScopeError, run_scan
 from app.api.schema import (
@@ -23,6 +34,7 @@ from app.api.schema import (
     AgentView,
     AssessmentCreate,
     AssessmentDetail,
+    AssessmentRequestUpdate,
     DecisionIn,
 )
 
@@ -57,6 +69,73 @@ def get_assessment(assessment_id: int, session: Session = Depends(get_session)):
     if detail is None:
         raise HTTPException(404, "assessment not found")
     return detail
+
+
+@router.patch("/assessments/{assessment_id}/request", response_model=Assessment)
+def update_assessment_request(
+    assessment_id: int,
+    payload: AssessmentRequestUpdate,
+    session: Session = Depends(get_session),
+):
+    assessment = session.get(Assessment, assessment_id)
+    if assessment is None:
+        raise HTTPException(404, "assessment not found")
+
+    active = {
+        AssessmentStatus.PLANNING.value,
+        AssessmentStatus.RUNNING.value,
+        AssessmentStatus.AWAITING_APPROVAL.value,
+        AssessmentStatus.REPORTING.value,
+    }
+    if assessment.status in active:
+        raise HTTPException(409, "cannot change the objective while a run is active")
+
+    assessment.request = payload.request.strip()
+    session.add(
+        Audit(
+            assessment_id=assessment_id,
+            actor="analyst",
+            event_type="assessment.request_updated",
+            payload={"request": assessment.request[:500]},
+        )
+    )
+    session.commit()
+    session.refresh(assessment)
+    return assessment
+
+
+@router.get("/assessments/{assessment_id}/messages", response_model=list[MessageOut])
+def list_messages(
+    assessment_id: int,
+    session: Session = Depends(get_session),
+):
+    if session.get(Assessment, assessment_id) is None:
+        raise HTTPException(404, "assessment not found")
+    return session.exec(
+        select(Message)
+        .where(Message.assessment_id == assessment_id)
+        .order_by(Message.created_at.asc(), Message.id.asc())
+    ).all()
+
+
+@router.post("/assessments/{assessment_id}/messages", response_model=MessageOut)
+def create_message(
+    assessment_id: int,
+    payload: MessageIn,
+    session: Session = Depends(get_session),
+):
+    if session.get(Assessment, assessment_id) is None:
+        raise HTTPException(404, "assessment not found")
+
+    message = Message(
+        assessment_id=assessment_id,
+        role=payload.role,
+        text=payload.text.strip(),
+    )
+    session.add(message)
+    session.commit()
+    session.refresh(message)
+    return message
 
 
 @router.get("/assessments/{assessment_id}/events")
@@ -135,6 +214,25 @@ async def run_agent(
     return AgentAccepted(
         assessment_id=assessment_id,
         message="Agent run accepted; watch the event stream for the action gate.",
+    )
+
+
+@router.post(
+    "/assessments/{assessment_id}/stop",
+    response_model=AgentAccepted,
+    status_code=202,
+)
+async def stop_agent(
+    assessment_id: int,
+    engine: Engine = Depends(get_engine),
+):
+    try:
+        await runner.stop_run(assessment_id, engine)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return AgentAccepted(
+        assessment_id=assessment_id,
+        message="Agent run stopped.",
     )
 
 

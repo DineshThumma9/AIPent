@@ -1,19 +1,14 @@
-"""Tool layer for the single assessment agent.
+"""Tool layer for the three specialist roles.
 
-There is one agent loop. The LLM chooses what to do; every tool either reads
-state or *queues* an action behind the shared human gate. No tool executes a
-scanner or touches the target directly.
+Each role gets a different tool list. The LLM chooses what to do inside its
+role; every action tool *queues* work behind the shared human gate. No tool
+executes a scanner or touches the target directly.
 
-Tools available:
-  scan_services        queue nmap service discovery
-  web_scan             queue nikto or zap against a scoped target
-  http_probe           queue one safe HTTP probe bound to a finding
-  invoke_skill         load a phase-allowed verification playbook
-  query_findings       read findings for the active assessment
-  query_steps          read recent action results
-  update_finding_status record a verdict (requires executed probe evidence)
-  advance_phase        record the phase the agent is entering
-  finish               declare active work complete and go to final review
+Roles:
+  recon        scan_services, query_findings, query_steps, handoff
+  discovery    web_scan, query_findings, query_steps, handoff
+  validation   http_probe, invoke_skill, query_findings, query_steps,
+               update_finding_status, handoff
 """
 
 from __future__ import annotations
@@ -26,13 +21,8 @@ from langchain_core.tools import tool
 from sqlalchemy import func
 from sqlmodel import Session, select
 
-from app.agents.context import current_assessment_id, current_run_id
-from app.agents.control import (
-    PHASE_AGENT,
-    current_phase,
-    record_finish,
-    record_phase,
-)
+from app.agents.context import current_assessment_id, current_role, current_run_id
+from app.agents.control import ROLES, record_handoff
 from app.agents.gate import queue_step
 from app.actions.probe import SAFE_METHODS
 from app.core.config import settings
@@ -80,8 +70,20 @@ def _audit(session: Session, assessment_id: int, event_type: str, payload: dict)
     )
 
 
-def _phase(session: Session, assessment_id: int, run_id: str) -> str:
-    return current_phase(session, assessment_id, run_id)
+def _role() -> str | None:
+    return current_role.get()
+
+
+def _role_refusal(role: str | None, allowed: str) -> dict[str, Any] | None:
+    """Defense in depth: a role cannot call another role's action tool."""
+    if role and role != allowed:
+        return {
+            "error": (
+                f"this tool belongs to the {allowed} role; "
+                f"the active role is {role}"
+            )
+        }
+    return None
 
 
 def _probe_url(target: str, path: str, assessment: Assessment) -> str:
@@ -112,19 +114,241 @@ def scan_services(target: str, rationale: str = "") -> dict[str, Any]:
         return _missing_context()
     assessment_id, run_id = ctx
 
+    role = _role()
+    refusal = _role_refusal(role, "recon")
+    if refusal:
+        return refusal
+
     with Session(get_engine(), expire_on_commit=False) as session:
         assessment = session.get(Assessment, assessment_id)
         if assessment is None:
             return {"error": f"assessment {assessment_id} not found"}
-        phase = _phase(session, assessment_id, run_id)
         return queue_step(
             session,
             assessment,
             run_id,
-            phase,
+            role or "recon",
             "recon_services",
             target,
             rationale or "Service and port discovery",
+        )
+
+
+@tool("nmap_scan")
+def nmap_scan(
+    flags: str,
+    ports: str,
+    target: str,
+    rationale: str = "",
+) -> dict[str, Any]:
+    """Queue an nmap scan with agent-supplied flags and port range.
+
+    You own the command: any nmap flags, any port range, any timing template.
+    The action pauses at the human gate (per policy) and the exact argv you
+    supply is what gets approved and executed.
+
+    Args:
+        flags: nmap flags (e.g. "-sS -sV -T4 -Pn" or "-sS -p 1-1000").
+        ports: port range or list (e.g. "1-1000", "3000", "21,22,80,443").
+        target: one of the assessment's authorised targets.
+        rationale: why this scan is the right next step.
+    """
+    ctx = _context()
+    if ctx is None:
+        return _missing_context()
+    assessment_id, run_id = ctx
+
+    role = _role()
+    refusal = _role_refusal(role, "recon")
+    if refusal:
+        return refusal
+
+    if not flags or not flags.strip():
+        return {"error": "flags are required for nmap_scan"}
+    if not ports or not ports.strip():
+        return {"error": "ports are required for nmap_scan"}
+
+    argv = ["nmap"] + flags.strip().split() + ["-p", ports.strip(), "-oX", "-", target]
+
+    with Session(get_engine(), expire_on_commit=False) as session:
+        assessment = session.get(Assessment, assessment_id)
+        if assessment is None:
+            return {"error": f"assessment {assessment_id} not found"}
+        return queue_step(
+            session,
+            assessment,
+            run_id,
+            role or "recon",
+            "nmap_scan",
+            target,
+            rationale or f"nmap {flags} -p {ports}",
+            argv=argv,
+        )
+
+
+@tool("nikto_scan")
+def nikto_scan(
+    flags: str,
+    target: str,
+    rationale: str = "",
+) -> dict[str, Any]:
+    """Queue nikto with agent-supplied flags.
+
+    You own the nikto command line. The output path is handled automatically.
+
+    Args:
+        flags: nikto flags (e.g. "-Tuning 123" or "-e db").
+        target: one of the assessment's authorised targets.
+        rationale: what you expect this scan to add.
+    """
+    ctx = _context()
+    if ctx is None:
+        return _missing_context()
+    assessment_id, run_id = ctx
+
+    role = _role()
+    refusal = _role_refusal(role, "discovery")
+    if refusal:
+        return refusal
+
+    with Session(get_engine(), expire_on_commit=False) as session:
+        assessment = session.get(Assessment, assessment_id)
+        if assessment is None:
+            return {"error": f"assessment {assessment_id} not found"}
+        if not assessment.ports:
+            return {
+                "error": (
+                    "no authorised web ports on this assessment; run "
+                    "nmap_scan first to establish what is open"
+                )
+            }
+        port = assessment.ports[0]
+        base_cmd = nikto.command()
+        argv = [
+            *base_cmd,
+            "-h",
+            target,
+            "-p",
+            str(port),
+        ] + flags.strip().split() + [
+            "-nointeractive",
+            "-Format",
+            "json",
+        ]
+        return queue_step(
+            session,
+            assessment,
+            run_id,
+            role or "discovery",
+            "nikto_scan",
+            target,
+            rationale or f"nikto {flags}",
+            argv=argv,
+        )
+
+
+@tool("sqlmap_scan")
+def sqlmap_scan(
+    flags: str,
+    target: str,
+    rationale: str = "",
+) -> dict[str, Any]:
+    """Queue sqlmap with agent-supplied flags.
+
+    High-risk action: requires human approval at the gate by default policy.
+    You own the sqlmap command line.
+
+    Args:
+        flags: sqlmap flags (e.g. "--batch --dbs --level 2").
+        target: one of the assessment's authorised targets.
+        rationale: what you expect this scan to add.
+    """
+    ctx = _context()
+    if ctx is None:
+        return _missing_context()
+    assessment_id, run_id = ctx
+
+    role = _role()
+    refusal = _role_refusal(role, "discovery")
+    if refusal:
+        return refusal
+
+    with Session(get_engine(), expire_on_commit=False) as session:
+        assessment = session.get(Assessment, assessment_id)
+        if assessment is None:
+            return {"error": f"assessment {assessment_id} not found"}
+        if not assessment.ports:
+            return {
+                "error": (
+                    "no authorised web ports on this assessment; run "
+                    "nmap_scan first to establish what is open"
+                )
+            }
+        port = assessment.ports[0]
+        url = f"http://{target}:{port}/"
+        argv = ["sqlmap", "-u", url] + flags.strip().split()
+        return queue_step(
+            session,
+            assessment,
+            run_id,
+            role or "discovery",
+            "sqlmap_scan",
+            target,
+            rationale or f"sqlmap {flags}",
+            argv=argv,
+        )
+
+
+@tool("dirb_scan")
+def dirb_scan(
+    flags: str,
+    wordlist: str,
+    target: str,
+    rationale: str = "",
+) -> dict[str, Any]:
+    """Queue dirb with agent-supplied flags and wordlist.
+
+    You own the dirb command line. The output path is handled automatically.
+
+    Args:
+        flags: dirb flags (e.g. "-S" or "-r").
+        wordlist: path to the wordlist file.
+        target: one of the assessment's authorised targets.
+        rationale: what you expect this scan to add.
+    """
+    ctx = _context()
+    if ctx is None:
+        return _missing_context()
+    assessment_id, run_id = ctx
+
+    role = _role()
+    refusal = _role_refusal(role, "discovery")
+    if refusal:
+        return refusal
+
+    with Session(get_engine(), expire_on_commit=False) as session:
+        assessment = session.get(Assessment, assessment_id)
+        if assessment is None:
+            return {"error": f"assessment {assessment_id} not found"}
+        if not assessment.ports:
+            return {
+                "error": (
+                    "no authorised web ports on this assessment; run "
+                    "nmap_scan first to establish what is open"
+                )
+            }
+        port = assessment.ports[0]
+        url = f"http://{target}:{port}/"
+        argv = ["dirb", url, wordlist] + flags.strip().split()
+        return queue_step(
+            session,
+            assessment,
+            run_id,
+            role or "discovery",
+            "dirb_scan",
+            target,
+            rationale or f"dirb {wordlist} {flags}",
+            argv=argv,
         )
 
 
@@ -150,6 +374,11 @@ def web_scan(scanner: str, target: str, rationale: str = "") -> dict[str, Any]:
     if action is None:
         return {"error": "scanner must be 'nikto' or 'zap'"}
 
+    role = _role()
+    refusal = _role_refusal(role, "discovery")
+    if refusal:
+        return refusal
+
     with Session(get_engine(), expire_on_commit=False) as session:
         assessment = session.get(Assessment, assessment_id)
         if assessment is None:
@@ -161,106 +390,14 @@ def web_scan(scanner: str, target: str, rationale: str = "") -> dict[str, Any]:
                     "scan_services first to establish what is open"
                 )
             }
-        phase = _phase(session, assessment_id, run_id)
         return queue_step(
             session,
             assessment,
             run_id,
-            phase,
+            role or "discovery",
             action,
             target,
             rationale or f"{scanner} web scan",
-        )
-
-
-@tool("sqlmap_scan")
-def sqlmap_scan(
-    target: str,
-    params: str = "--batch --dbs",
-    rationale: str = "",
-) -> dict[str, Any]:
-    """Queue SQLMap against one authorised target to test for SQL injection.
-
-    SQLMap runs in --batch mode automatically and only against in-scope URLs.
-    The action pauses at the human action gate; its raw output is stored as an
-    artifact for review.
-
-    Args:
-        target: one of the assessment's authorised targets.
-        params: extra SQLMap parameters (default "--batch --dbs").
-        rationale: why SQL injection is suspected on this target.
-    """
-    ctx = _context()
-    if ctx is None:
-        return _missing_context()
-    assessment_id, run_id = ctx
-
-    with Session(get_engine(), expire_on_commit=False) as session:
-        assessment = session.get(Assessment, assessment_id)
-        if assessment is None:
-            return {"error": f"assessment {assessment_id} not found"}
-        if not assessment.ports:
-            return {
-                "error": (
-                    "no authorised web ports on this assessment; run "
-                    "scan_services first to establish what is open"
-                )
-            }
-        phase = _phase(session, assessment_id, run_id)
-        return queue_step(
-            session,
-            assessment,
-            run_id,
-            phase,
-            "sqlmap_scan",
-            target,
-            rationale or "SQL injection testing",
-            detail={"params": params},
-        )
-
-
-@tool("dirb_scan")
-def dirb_scan(
-    target: str,
-    wordlist: str = "/usr/share/wordlists/dirb/common.txt",
-    rationale: str = "",
-) -> dict[str, Any]:
-    """Queue Dirb to brute-force directories and files on one authorised target.
-
-    Dirb uses the common wordlist by default. The action pauses at the human
-    action gate; its raw output is stored as an artifact for review.
-
-    Args:
-        target: one of the assessment's authorised targets.
-        wordlist: path to the wordlist Dirb should use.
-        rationale: why directory enumeration is useful on this target.
-    """
-    ctx = _context()
-    if ctx is None:
-        return _missing_context()
-    assessment_id, run_id = ctx
-
-    with Session(get_engine(), expire_on_commit=False) as session:
-        assessment = session.get(Assessment, assessment_id)
-        if assessment is None:
-            return {"error": f"assessment {assessment_id} not found"}
-        if not assessment.ports:
-            return {
-                "error": (
-                    "no authorised web ports on this assessment; run "
-                    "scan_services first to establish what is open"
-                )
-            }
-        phase = _phase(session, assessment_id, run_id)
-        return queue_step(
-            session,
-            assessment,
-            run_id,
-            phase,
-            "dirb_scan",
-            target,
-            rationale or "Directory and file enumeration",
-            detail={"wordlist": wordlist},
         )
 
 
@@ -281,7 +418,7 @@ def http_probe(
     port must be inside the assessment scope; identical probes are
     deduplicated and the probe budget is capped.
 
-    Call this only in the validation phase. The response arrives in the next
+    Only the validation role may call this. The response arrives in the next
     observation after the gate executes the approved probe.
 
     Args:
@@ -297,6 +434,11 @@ def http_probe(
     if ctx is None:
         return _missing_context()
     assessment_id, run_id = ctx
+
+    role = _role()
+    refusal = _role_refusal(role, "validation")
+    if refusal:
+        return refusal
 
     method = (method or "GET").upper()
     if method not in SAFE_METHODS:
@@ -317,14 +459,6 @@ def http_probe(
         assessment = session.get(Assessment, assessment_id)
         if assessment is None:
             return {"error": f"assessment {assessment_id} not found"}
-        phase = _phase(session, assessment_id, run_id)
-        if phase != "validation":
-            return {
-                "error": (
-                    f"http_probe belongs to validation (current phase: {phase}). "
-                    "Call advance_phase('validation', reason) first."
-                )
-            }
         if host in assessment.exclusions or host not in assessment.targets:
             return {"error": f"{host} is not in scope for assessment {assessment_id}"}
         if assessment.ports and port not in assessment.ports:
@@ -359,7 +493,7 @@ def http_probe(
                 "error": (
                     f"probe budget exhausted ({settings.max_validation_probes} "
                     "probes planned/executed for this assessment); interpret the "
-                    "probes already run or call finish"
+                    "probes already run and hand off"
                 )
             }
 
@@ -375,7 +509,7 @@ def http_probe(
             session,
             assessment,
             run_id,
-            phase,
+            role or "validation",
             "http_probe",
             host,
             rationale or "Verification probe",
@@ -403,8 +537,7 @@ def invoke_skill(
     without authentication"). The skill returns candidate probes; you still
     choose which ones to queue with http_probe.
 
-    Only skills allowed for the current phase can be invoked. Advancing to
-    validation unlocks the full verification set.
+    Only the validation role may invoke verification skills.
 
     Args:
         skill_name: registered skill name.
@@ -416,15 +549,18 @@ def invoke_skill(
         return _missing_context()
     assessment_id, run_id = ctx
 
+    role = _role()
+    refusal = _role_refusal(role, "validation")
+    if refusal:
+        return refusal
+
     with Session(get_engine(), expire_on_commit=False) as session:
-        phase = _phase(session, assessment_id, run_id)
-        agent_name = PHASE_AGENT.get(phase, "validation_agent")
-        allowed = AGENT_SKILL_MAP.get(agent_name, [])
+        allowed = AGENT_SKILL_MAP.get("validation_agent", [])
         if skill_name not in allowed:
             return {
                 "error": (
-                    f"skill {skill_name!r} is not allowed for {agent_name} "
-                    f"in phase {phase!r}; allowed: {allowed}"
+                    f"skill {skill_name!r} is not allowed for the validation "
+                    f"role; allowed: {allowed}"
                 )
             }
         skill = SKILL_REGISTRY.get(skill_name)
@@ -466,8 +602,7 @@ def invoke_skill(
             "verification.skill_invoked",
             {
                 "run_id": run_id,
-                "phase": phase,
-                "agent": agent_name,
+                "role": role,
                 "skill": skill_name,
                 "finding_id": finding_id,
                 "hypothesis": hypothesis,
@@ -618,7 +753,7 @@ def update_finding_status(
     one executed http_probe evidence row. Leave the finding SUSPECTED when the
     probes were inconclusive; that is an honest outcome, not a failure.
 
-    Call this only in the validation phase.
+    Only the validation role may record a verdict.
 
     Args:
         finding_id: finding under verification.
@@ -630,18 +765,15 @@ def update_finding_status(
         return _missing_context()
     assessment_id, run_id = ctx
 
+    role = _role()
+    refusal = _role_refusal(role, "validation")
+    if refusal:
+        return refusal
+
     if status not in ("confirmed", "false_positive", "suspected"):
         return {"error": "status must be confirmed, false_positive, or suspected"}
 
     with Session(get_engine(), expire_on_commit=False) as session:
-        phase = _phase(session, assessment_id, run_id)
-        if phase != "validation":
-            return {
-                "error": (
-                    f"verdicts belong to validation (current phase: {phase}). "
-                    "Call advance_phase('validation', reason) first."
-                )
-            }
         row = session.get(Finding, finding_id)
         if row is None or row.assessment_id != assessment_id:
             return {"error": f"finding {finding_id} not in current assessment"}
@@ -672,7 +804,7 @@ def update_finding_status(
             "verification.status_updated",
             {
                 "run_id": run_id,
-                "phase": phase,
+                "role": role,
                 "finding_id": finding_id,
                 "from": old,
                 "to": status,
@@ -690,86 +822,139 @@ def update_finding_status(
         }
 
 
-@tool("advance_phase")
-def advance_phase(phase: str, reason: str) -> dict[str, Any]:
-    """Record the assessment phase you are entering.
+NEXT_ROLE_ALLOWED = {
+    "recon": {"discovery", "review"},
+    "discovery": {"validation", "review"},
+    "validation": {"review"},
+}
 
-    The methodology is recon -> discovery -> validation -> finish. The phase is
-    your own working label: it unlocks phase-specific skills and is written to
-    the audit trail. It does not restrict scope or safety; those are enforced by
-    the action tools themselves.
+
+@tool("handoff")
+def handoff(
+    summary: str,
+    decisions: list[dict] | None = None,
+    finding_ids: list[int] | None = None,
+    step_ids: list[int] | None = None,
+    next_recommendation: str = "review",
+    needs_input: bool = False,
+    question: str = "",
+    open_questions: list[str] | None = None,
+) -> dict[str, Any]:
+    """End your role with a typed handoff.
+
+    The graph reads this handoff to decide the next role. Python validates the
+    recommendation and every ID before the transition. Call this once, after
+    the work you want this role to do is queued or finished.
 
     Args:
-        phase: recon, discovery, or validation.
-        reason: why this phase is the right place to work now.
+        summary: 2-5 sentences on what you learned and what remains uncertain.
+        decisions: list of {what, why, profile/params} objects.
+        finding_ids: findings this role relied on or produced.
+        step_ids: steps this role queued or relied on.
+        next_recommendation: "discovery", "validation", or "review".
+        needs_input: true when you need the operator to decide.
+        question: one concrete question when needs_input is true.
+        open_questions: questions that do not block the handoff.
     """
     ctx = _context()
     if ctx is None:
         return _missing_context()
     assessment_id, run_id = ctx
-    phase = (phase or "").strip().lower()
+    role = _role()
+    if role not in ROLES:
+        return {"error": "handoff requires an active specialist role"}
 
-    with Session(get_engine(), expire_on_commit=False) as session:
-        previous = _phase(session, assessment_id, run_id)
-        if phase == previous:
-            return {
-                "phase": phase,
-                "previous": previous,
-                "changed": False,
-                "note": "already in this phase",
-            }
-        try:
-            payload = record_phase(
-                session, assessment_id, run_id, phase, reason or "", previous
+    summary = (summary or "").strip()
+    if not summary:
+        return {"error": "handoff summary is required"}
+
+    recommendation = (next_recommendation or "review").strip().lower()
+    allowed = NEXT_ROLE_ALLOWED[role]
+    if recommendation not in allowed:
+        return {
+            "error": (
+                f"{role} cannot recommend {recommendation!r}; "
+                f"allowed: {sorted(allowed)}"
             )
-        except ValueError as exc:
-            return {"error": str(exc)}
-        session.commit()
-        return {
-            "phase": phase,
-            "previous": previous,
-            "changed": True,
-            "reason": reason,
-            "audited": bool(payload),
         }
+    if needs_input and not (question or "").strip():
+        return {"error": "needs_input=true requires one concrete question"}
 
-
-@tool("finish")
-def finish(reason: str) -> dict[str, Any]:
-    """Declare active work complete and send the findings to final human review.
-
-    Call this when the coverage is adequate or further work has low value. The
-    graph stops the loop after this call; the analyst reviews the findings
-    before a report is generated.
-
-    Args:
-        reason: short summary of coverage and what remains uncertain.
-    """
-    ctx = _context()
-    if ctx is None:
-        return _missing_context()
-    assessment_id, run_id = ctx
+    decisions = decisions or []
+    finding_ids = [int(item) for item in (finding_ids or [])]
+    step_ids = [int(item) for item in (step_ids or [])]
 
     with Session(get_engine(), expire_on_commit=False) as session:
-        record_finish(session, assessment_id, run_id, reason or "")
+        for finding_id in finding_ids:
+            finding = session.get(Finding, finding_id)
+            if finding is None or finding.assessment_id != assessment_id:
+                return {
+                    "error": f"finding {finding_id} is not in the current assessment"
+                }
+        for step_id in step_ids:
+            step = session.get(Step, step_id)
+            if step is None or step.assessment_id != assessment_id:
+                return {"error": f"step {step_id} is not in the current assessment"}
+
+        payload = record_handoff(
+            session,
+            assessment_id,
+            run_id,
+            role,
+            {
+                "summary": summary,
+                "decisions": decisions,
+                "finding_ids": finding_ids,
+                "step_ids": step_ids,
+                "next_recommendation": recommendation,
+                "needs_input": needs_input,
+                "question": question,
+                "open_questions": open_questions or [],
+            },
+        )
+        _audit(
+            session,
+            assessment_id,
+            "role.handoff",
+            {
+                "run_id": run_id,
+                "role": role,
+                "next_recommendation": recommendation,
+                "summary": summary[:500],
+            },
+        )
         session.commit()
         return {
-            "finished": True,
-            "reason": reason,
-            "next": "final human review gate; no further actions will run",
+            "handoff_recorded": True,
+            "role": role,
+            "next_recommendation": recommendation,
+            "needs_input": needs_input,
+            "summary": payload["summary"],
+            "note": "The role is ending. The graph will route from this handoff.",
         }
 
 
-ASSESSMENT_TOOLS = [
-    scan_services,
+RECON_TOOLS = [scan_services, nmap_scan, query_findings, query_steps, handoff]
+DISCOVERY_TOOLS = [
     web_scan,
+    nikto_scan,
     sqlmap_scan,
     dirb_scan,
+    query_findings,
+    query_steps,
+    handoff,
+]
+VALIDATION_TOOLS = [
     http_probe,
     invoke_skill,
     query_findings,
     query_steps,
     update_finding_status,
-    advance_phase,
-    finish,
+    handoff,
 ]
+
+ROLE_TOOLS = {
+    "recon": RECON_TOOLS,
+    "discovery": DISCOVERY_TOOLS,
+    "validation": VALIDATION_TOOLS,
+}

@@ -2,7 +2,7 @@
 
 import os
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from dotenv import load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -47,6 +47,19 @@ class Settings(BaseSettings):
     model_exit_behavior: Literal["end", "error"] = "end"
     tool_exit_behaviour: Literal["continue", "error", "end"] = "continue"
 
+    # Per-provider models (used as fallback when primary hits token limits).
+    # Populated from AIPENT_*_MODEL env vars (e.g. AIPENT_GROQ_MODEL).
+    groq_model: str | None = None
+    mistral_model: str | None = None
+    ollama_model: str | None = None
+    gemini_model: str | None = None
+    openrouter_model: str | None = None
+    huggingface_model: str | None = None
+
+    # Action policy: per-action gate requirements. JSON string or dict.
+    # Example: AIPENT_ACTION_POLICIES='{"sqlmap_scan":{"approve":true},"nmap_scan":{"approve":false}}'
+    action_policies_json: str | None = None
+
     mcp_enabled: bool = False
     mcp_transport: Literal["local", "gateway"] = "local"
     mcp_gateway_url: str = "http://127.0.0.1:8812/sse"
@@ -80,6 +93,24 @@ class Settings(BaseSettings):
     @property
     def mistral_api_key(self) -> str | None:
         return os.getenv("AIPENT_MISTRAL_API_KEY") or os.getenv("MISTRALAI_API_KEY")
+
+    @property
+    def gemini_api_key(self) -> str | None:
+        return os.getenv("AIPENT_GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
+
+    @property
+    def openrouter_api_key(self) -> str | None:
+        return os.getenv("AIPENT_OPENROUTER_API_KEY") or os.getenv("OPENROUTER_API_KEY")
+
+    @property
+    def huggingface_api_key(self) -> str | None:
+        return os.getenv("AIPENT_HUGGINGFACE_API_KEY") or os.getenv("HUGGINGFACE_API_KEY")
+
+    def action_policies(self) -> dict[str, Any]:
+        """Load per-action gate policies from settings JSON override."""
+        from app.core.policy import load_policies_from_json
+
+        return load_policies_from_json(self.action_policies_json)
 
 
 settings = Settings()

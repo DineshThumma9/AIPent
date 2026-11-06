@@ -132,11 +132,23 @@ export const DecisionInputSchema = z.object({
   reason: z.string(),
 })
 
+export const MessageSchema = z.object({
+  id: z.number().int(),
+  assessment_id: z.number().int(),
+  role: z.string(),
+  text: z.string(),
+  created_at: z.string(),
+})
+
 export const AssessmentInputSchema = z.object({
   title: z.string().min(1),
   request: z.string().default(''),
   targets: z.array(z.string().min(1)).min(1),
   ports: z.array(z.number().int().min(1).max(65535)),
+})
+
+export const AssessmentRequestSchema = z.object({
+  request: z.string().min(1).max(4000),
 })
 
 export type Assessment = z.infer<typeof AssessmentSchema>
@@ -149,4 +161,5 @@ export type Approval = z.infer<typeof ApprovalSchema>
 export type AuditEvent = z.infer<typeof AuditEventSchema>
 export type AgentView = z.infer<typeof AgentViewSchema>
 export type DecisionInput = z.infer<typeof DecisionInputSchema>
+export type Message = z.infer<typeof MessageSchema>
 export type PlanStep = z.infer<typeof PlanStepSchema>

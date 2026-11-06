@@ -16,10 +16,27 @@ class AssessmentCreate(SQLModel):
     ports: list[Annotated[int, Field(ge=1, le=65535)]] = Field(default_factory=list)
 
 
+class AssessmentRequestUpdate(SQLModel):
+    request: str = Field(min_length=1, max_length=4000)
+
+
 class DecisionIn(BaseModel):
     decision: Literal["approved", "rejected"]
     actor: str = Field(default="analyst", min_length=1, max_length=80)
     reason: str = Field(default="", max_length=500)
+
+
+class MessageOut(BaseModel):
+    id: int
+    assessment_id: int
+    role: str
+    text: str
+    created_at: datetime
+
+
+class MessageIn(BaseModel):
+    role: Literal["operator", "assistant"]
+    text: str = Field(min_length=1, max_length=4000)
 
 
 class PlanStepOut(BaseModel):

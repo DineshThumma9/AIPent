@@ -203,10 +203,10 @@ async def execute_action(
         step.status = StepStatus.RUNNING.value
         step.error = None
 
-    # http_probe steps carry the exact descriptor the human action gate
-    # approved; resolving it again would overwrite method/url/headers with the
-    # default GET "/". Every other action resolves argv from the catalogue.
-    if not (action == "http_probe" and step.argv):
+    # If the tool supplied argv (agent-owned command), use it exactly as
+    # approved. Only resolve from the closed catalogue when no argv was
+    # stored (e.g. legacy recon_services without custom flags).
+    if not step.argv:
         step.argv = resolve_argv(action, assessment, target, step.id or 0)
     step.status = StepStatus.RUNNING.value
     session.commit()
