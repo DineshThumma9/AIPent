@@ -3,6 +3,10 @@
 The graph is synchronous (SqliteSaver), so invocation happens in a worker
 thread. Only one invocation per assessment is allowed; the task registry is
 process-local and the checkpoint is durable across restarts.
+
+All run operations are serialised per assessment via an asyncio Lock so that
+concurrent HTTP requests (for example a double-clicked Approve button) cannot
+interleave and leave the task registry in an inconsistent state.
 """
 
 import asyncio
@@ -28,6 +32,7 @@ from app.api.schema import AgentView
 log = get_logger("runner")
 
 _tasks: dict[int, asyncio.Task] = {}
+_locks: dict[int, asyncio.Lock] = {}
 
 
 def _graph_for(assessment_id: int):
@@ -47,7 +52,24 @@ class NotPaused(RuntimeError):
     pass
 
 
+def _lock_for(assessment_id: int) -> asyncio.Lock:
+    """Return (creating if necessary) the per-assessment lock."""
+    lock = _locks.get(assessment_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _locks[assessment_id] = lock
+    return lock
+
+
+def _cleanup_done_tasks() -> None:
+    """Remove any done tasks from the registry so they don't block new runs."""
+    done = [aid for aid, task in _tasks.items() if task.done()]
+    for aid in done:
+        _tasks.pop(aid, None)
+
+
 def is_running(assessment_id: int) -> bool:
+    _cleanup_done_tasks()
     task = _tasks.get(assessment_id)
     return task is not None and not task.done()
 
@@ -56,6 +78,7 @@ def reset_runner() -> None:
     for task in _tasks.values():
         task.cancel()
     _tasks.clear()
+    _locks.clear()
 
 
 def reset_graph_checkpoint(assessment_id: int) -> None:
@@ -173,36 +196,38 @@ async def start_run(
     engine: Engine,
     actor: str = "analyst",
 ) -> AgentView:
-    if is_running(assessment_id):
-        raise AlreadyRunning("an agent run is already active")
+    async with _lock_for(assessment_id):
+        _cleanup_done_tasks()
+        if is_running(assessment_id):
+            raise AlreadyRunning("an agent run is already active")
 
-    graph, config = _graph_for(assessment_id)
-    state = graph.get_state(config)
-    if state.next:
-        # If the assessment is cancelled or failed, the old checkpoint state
-        # is stale. Reset it and start fresh instead of erroring.
+        graph, config = _graph_for(assessment_id)
+        state = graph.get_state(config)
+        if state.next:
+            # If the assessment is cancelled or failed, the old checkpoint state
+            # is stale. Reset it and start fresh instead of erroring.
+            with Session(engine, expire_on_commit=False) as session:
+                assessment = session.get(Assessment, assessment_id)
+                if assessment is None:
+                    raise LookupError(f"assessment {assessment_id} not found")
+                if assessment.status in (
+                    AssessmentStatus.CANCELLED.value,
+                    AssessmentStatus.FAILED.value,
+                ):
+                    reset_graph_checkpoint(assessment_id)
+                else:
+                    raise AlreadyRunning(
+                        "the graph is paused at a gate; resume it instead"
+                    )
+
         with Session(engine, expire_on_commit=False) as session:
-            assessment = session.get(Assessment, assessment_id)
-            if assessment is None:
+            if session.get(Assessment, assessment_id) is None:
                 raise LookupError(f"assessment {assessment_id} not found")
-            if assessment.status in (
-                AssessmentStatus.CANCELLED.value,
-                AssessmentStatus.FAILED.value,
-            ):
-                reset_graph_checkpoint(assessment_id)
-            else:
-                raise AlreadyRunning(
-                    "the graph is paused at a gate; resume it instead"
-                )
+            prepare_run(session, assessment_id, actor=actor)
+            payload = initial_state(assessment_id)
 
-    with Session(engine, expire_on_commit=False) as session:
-        if session.get(Assessment, assessment_id) is None:
-            raise LookupError(f"assessment {assessment_id} not found")
-        prepare_run(session, assessment_id, actor=actor)
-        payload = initial_state(assessment_id)
-
-    _launch(engine, assessment_id, payload)
-    return get_view(assessment_id, running=True)
+        _launch(engine, assessment_id, payload)
+        return get_view(assessment_id, running=True)
 
 
 async def resume_run(
@@ -210,18 +235,20 @@ async def resume_run(
     engine: Engine,
     decision: dict,
 ) -> AgentView:
-    if is_running(assessment_id):
-        raise AlreadyRunning("an agent run is already active")
+    async with _lock_for(assessment_id):
+        _cleanup_done_tasks()
+        if is_running(assessment_id):
+            raise AlreadyRunning("an agent run is already active")
 
-    graph, config = _graph_for(assessment_id)
-    state = graph.get_state(config)
-    if not state.next:
-        raise NotPaused("the graph is not waiting at a gate")
-    if not getattr(state, "interrupts", ()):
-        raise NotPaused("the graph has no pending decision")
+        graph, config = _graph_for(assessment_id)
+        state = graph.get_state(config)
+        if not state.next:
+            raise NotPaused("the graph is not waiting at a gate")
+        if not getattr(state, "interrupts", ()):
+            raise NotPaused("the graph has no pending decision")
 
-    _launch(engine, assessment_id, Command(resume=decision))
-    return get_view(assessment_id, running=True)
+        _launch(engine, assessment_id, Command(resume=decision))
+        return get_view(assessment_id, running=True)
 
 
 async def stop_run(
@@ -230,29 +257,30 @@ async def stop_run(
     actor: str = "analyst",
 ) -> AgentView:
     """Cancel an active agent run and mark the assessment cancelled."""
-    task = _tasks.get(assessment_id)
-    if task is not None and not task.done():
-        task.cancel()
-    _tasks.pop(assessment_id, None)
+    async with _lock_for(assessment_id):
+        task = _tasks.get(assessment_id)
+        if task is not None and not task.done():
+            task.cancel()
+        _tasks.pop(assessment_id, None)
 
-    # Clear the graph checkpoint so a fresh start_run can begin a new loop
-    # instead of finding a paused gate from the previous run.
-    reset_graph_checkpoint(assessment_id)
+        # Clear the graph checkpoint so a fresh start_run can begin a new loop
+        # instead of finding a paused gate from the previous run.
+        reset_graph_checkpoint(assessment_id)
 
-    with Session(engine, expire_on_commit=False) as session:
-        assessment = session.get(Assessment, assessment_id)
-        if assessment is None:
-            raise LookupError(f"assessment {assessment_id} not found")
-        assessment.status = AssessmentStatus.CANCELLED.value
-        assessment.finished_at = utcnow()
-        session.add(
-            Audit(
-                assessment_id=assessment_id,
-                actor=actor,
-                event_type="agent.stopped",
-                payload={"reason": "stopped by operator"},
+        with Session(engine, expire_on_commit=False) as session:
+            assessment = session.get(Assessment, assessment_id)
+            if assessment is None:
+                raise LookupError(f"assessment {assessment_id} not found")
+            assessment.status = AssessmentStatus.CANCELLED.value
+            assessment.finished_at = utcnow()
+            session.add(
+                Audit(
+                    assessment_id=assessment_id,
+                    actor=actor,
+                    event_type="agent.stopped",
+                    payload={"reason": "stopped by operator"},
+                )
             )
-        )
-        session.commit()
+            session.commit()
 
-    return get_view(assessment_id, running=False)
+        return get_view(assessment_id, running=False)
