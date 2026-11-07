@@ -6,7 +6,8 @@ reviewer can reproduce every number.
 risk (0-10) = severity weight x (0.5 + 0.5 x confidence) x exposure x impact
 """
 
-from sqlmodel import Session, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlmodel import select
 
 from app.domain.models import Assessment, Finding
 
@@ -69,13 +70,14 @@ def summarize(findings: list[Finding]) -> dict:
     }
 
 
-def refresh_risk(session: Session, assessment_id: int) -> dict:
-    assessment = session.get(Assessment, assessment_id)
-    findings = session.exec(
+async def refresh_risk(session: AsyncSession, assessment_id: int) -> dict:
+    assessment = await session.get(Assessment, assessment_id)
+    result = await session.execute(
         select(Finding).where(Finding.assessment_id == assessment_id)
-    ).all()
+    )
+    findings = list(result.scalars().all())
     summary = summarize(findings)
     if assessment is not None:
         assessment.risk_score = summary["score"]
-        session.commit()
+        await session.commit()
     return summary

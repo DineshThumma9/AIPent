@@ -3,12 +3,13 @@ import json
 from pathlib import Path
 
 import pytest
-from sqlmodel import Session, select
+from sqlmodel import select
 
 from app import actions
-from app.actions import executor
+from app.actions import catalogue, executor
 from app.adapters import nikto, zap
-from app.domain.models import Assessment, Evidence, Finding, Step
+from app.core.db import get_async_session_ctx
+from app.domain.models import Assessment, Evidence, Finding
 
 NIKTO_JSON = json.dumps(
     {
@@ -92,19 +93,31 @@ def test_zap_argv_reports_relative_to_the_mount(tmp_path):
 
 
 @pytest.fixture
-def session(engine, tmp_path, monkeypatch):
-    monkeypatch.setattr(actions, "ARTIFACT_DIR", tmp_path / "artifacts")
-    with Session(engine, expire_on_commit=False) as session:
-        assessment = Assessment(title="Lab", targets=["127.0.0.1"], ports=[3000])
-        session.add(assessment)
-        session.commit()
-        session.refresh(assessment)
-        yield session, assessment
+def assessment_id(engine, tmp_path, monkeypatch):
+    monkeypatch.setattr(catalogue, "ARTIFACT_DIR", tmp_path / "artifacts")
+
+    async def seed():
+        async with get_async_session_ctx() as session:
+            assessment = Assessment(
+                title="Lab", targets=["127.0.0.1"], ports=[3000]
+            )
+            session.add(assessment)
+            await session.commit()
+            await session.refresh(assessment)
+            return assessment.id
+
+    return asyncio.run(seed())
 
 
-def test_execute_nikto_writes_artifact_and_evidence(session, monkeypatch):
-    session, assessment = session
+def _run(fn):
+    async def runner():
+        async with get_async_session_ctx() as session:
+            return await fn(session)
 
+    return asyncio.run(runner())
+
+
+def test_execute_nikto_writes_artifact_and_evidence(assessment_id, monkeypatch):
     def fake_run(argv, **kwargs):
         output = Path(argv[argv.index("-output") + 1])
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -118,42 +131,46 @@ def test_execute_nikto_writes_artifact_and_evidence(session, monkeypatch):
         return Process()
 
     monkeypatch.setattr(executor.subprocess, "run", fake_run)
-    step = asyncio.run(
-        actions.execute_action(
+
+    async def body(session):
+        step = await actions.execute_action(
             session,
-            assessment.id,
+            assessment_id,
             "nikto_scan",
             rationale="Active web probe of the approved endpoint",
         )
-    )
 
-    assert step.status == "succeeded"
-    assert step.output_path and step.output_sha256
-    assert Path(step.output_path).read_text() == NIKTO_JSON
+        assert step.status == "succeeded"
+        assert step.output_path and step.output_sha256
+        assert Path(step.output_path).read_text() == NIKTO_JSON
 
-    findings = session.exec(select(Finding)).all()
-    assert len(findings) == 2
-    assert len(session.exec(select(Evidence)).all()) == 2
+        result = await session.execute(select(Finding))
+        findings = list(result.scalars().all())
+        assert len(findings) == 2
+        result = await session.execute(select(Evidence))
+        assert len(result.scalars().all()) == 2
+
+    _run(body)
 
 
-def test_execute_missing_tool_is_blocked(session, monkeypatch):
-    session, assessment = session
-
+def test_execute_missing_tool_is_blocked(assessment_id, monkeypatch):
     def explode(*_args, **_kwargs):
         raise FileNotFoundError("nikto")
 
     monkeypatch.setattr(executor.subprocess, "run", explode)
-    step = asyncio.run(
-        actions.execute_action(session, assessment.id, "nikto_scan")
-    )
 
-    assert step.status == "blocked"
-    assert "not installed" in (step.error or "")
+    async def body(session):
+        step = await actions.execute_action(
+            session, assessment_id, "nikto_scan"
+        )
+
+        assert step.status == "blocked"
+        assert "not installed" in (step.error or "")
+
+    _run(body)
 
 
-def test_duplicate_evidence_is_not_written_twice(session, monkeypatch):
-    session, assessment = session
-
+def test_duplicate_evidence_is_not_written_twice(assessment_id, monkeypatch):
     def fake_run(argv, **kwargs):
         output = Path(argv[argv.index("-output") + 1])
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -167,11 +184,17 @@ def test_duplicate_evidence_is_not_written_twice(session, monkeypatch):
         return Process()
 
     monkeypatch.setattr(executor.subprocess, "run", fake_run)
-    asyncio.run(actions.execute_action(session, assessment.id, "nikto_scan"))
-    asyncio.run(actions.execute_action(session, assessment.id, "nikto_scan"))
 
-    assert len(session.exec(select(Finding)).all()) == 2
-    assert len(session.exec(select(Evidence)).all()) == 4
+    async def body(session):
+        await actions.execute_action(session, assessment_id, "nikto_scan")
+        await actions.execute_action(session, assessment_id, "nikto_scan")
+
+        result = await session.execute(select(Finding))
+        assert len(result.scalars().all()) == 2
+        result = await session.execute(select(Evidence))
+        assert len(result.scalars().all()) == 4
+
+    _run(body)
 
 
 def test_zap_strips_html_tags():
@@ -229,4 +252,3 @@ def test_nikto_text_strips_bracket_ids_and_noise():
     assert "]" not in drafts[1].title
     assert drafts[1].title.startswith("Suggested security header missing")
     assert drafts[1].evidence[0].locator["id"] == "013587"
-

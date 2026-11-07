@@ -1,9 +1,9 @@
+import asyncio
 import json
 
-from app.core.events import EventType, StreamState
 from app.api.queries import load_assessment_detail
-from app.api.schema import AssessmentDetail
-from sqlmodel import Session
+from app.core.db import get_async_session_ctx
+from app.core.events import EventType, StreamState
 
 from app.domain.models import Assessment
 
@@ -58,21 +58,30 @@ def test_stream_missing_assessment_is_404(client):
 
 
 def test_stream_state_emits_only_changes(engine):
-    with Session(engine, expire_on_commit=False) as session:
-        assessment = Assessment(title="Lab", targets=["127.0.0.1"], ports=[3000])
-        session.add(assessment)
-        session.commit()
-        session.refresh(assessment)
-        detail = load_assessment_detail(session, assessment.id)
+    async def run():
+        async with get_async_session_ctx() as session:
+            assessment = Assessment(
+                title="Lab", targets=["127.0.0.1"], ports=[3000]
+            )
+            session.add(assessment)
+            await session.commit()
+            await session.refresh(assessment)
+            detail = await load_assessment_detail(session, assessment.id)
 
-    assert detail is not None
-    state = StreamState(detail)
+        assert detail is not None
+        state = StreamState(detail)
 
-    snapshot = state.event(assessment.id, EventType.SNAPSHOT, {"assessment": detail.model_dump()})
-    assert snapshot.assessment_id == assessment.id
-    assert snapshot.data["assessment"]["id"] == assessment.id
+        snapshot = state.event(
+            assessment.id,
+            EventType.SNAPSHOT,
+            {"assessment": detail.model_dump()},
+        )
+        assert snapshot.assessment_id == assessment.id
+        assert snapshot.data["assessment"]["id"] == assessment.id
 
-    assert state.diff(detail) == []
+        assert state.diff(detail) == []
+
+    asyncio.run(run())
 
 
 def test_detail_includes_evidence_key(client):

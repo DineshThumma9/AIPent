@@ -5,13 +5,15 @@ are copied into a JSON file; the Typst template reads it, so Python never
 hand-escapes markup.
 """
 
+import asyncio
 import hashlib
 import json
 import re
 import shutil
 from pathlib import Path
 
-from sqlmodel import Session, col, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlmodel import col, select
 
 import typst
 from app.domain import risk
@@ -47,29 +49,36 @@ def _clean_text(text: str | None) -> str:
     return text.strip()
 
 
-def build_report_data(session: Session, assessment: Assessment) -> dict:
+async def build_report_data(session: AsyncSession, assessment: Assessment) -> dict:
     assessment_id = assessment.id or 0
-    findings = session.exec(
+    result = await session.execute(
         select(Finding)
         .where(Finding.assessment_id == assessment_id)
         .order_by(col(Finding.id))
-    ).all()
-    evidence = session.exec(
+    )
+    findings = list(result.scalars().all())
+
+    result = await session.execute(
         select(Evidence)
         .join(Finding, Evidence.finding_id == Finding.id)
         .where(Finding.assessment_id == assessment_id)
         .order_by(Evidence.id)
-    ).all()
-    steps = session.exec(
+    )
+    evidence = list(result.scalars().all())
+
+    result = await session.execute(
         select(Step)
         .where(Step.assessment_id == assessment_id)
         .order_by(Step.seq)
-    ).all()
-    approvals = session.exec(
+    )
+    steps = list(result.scalars().all())
+
+    result = await session.execute(
         select(Approval)
         .where(Approval.assessment_id == assessment_id)
         .order_by(col(Approval.id))
-    ).all()
+    )
+    approvals = list(result.scalars().all())
 
     scores = {finding.id: risk.finding_score(finding) for finding in findings}
     ordered = sorted(
@@ -84,7 +93,9 @@ def build_report_data(session: Session, assessment: Assessment) -> dict:
         for step in steps
         if step.action in ACTIONS and step.status == "succeeded"
     }
-    executed_steps = [step for step in steps if step.status != "pending"]
+    executed_steps = [
+        step for step in steps if step.status in ("succeeded", "failed", "timeout")
+    ]
     mcp_steps = [
         step for step in executed_steps if step.argv and step.argv[0] == "mcp"
     ]
@@ -173,8 +184,8 @@ def build_report_data(session: Session, assessment: Assessment) -> dict:
     }
 
 
-def generate_report(session: Session, assessment_id: int) -> Path:
-    assessment = session.get(Assessment, assessment_id)
+async def generate_report(session: AsyncSession, assessment_id: int) -> Path:
+    assessment = await session.get(Assessment, assessment_id)
     if assessment is None:
         raise LookupError(f"assessment {assessment_id} not found")
 
@@ -185,14 +196,16 @@ def generate_report(session: Session, assessment_id: int) -> Path:
     pdf_path = directory / f"report-{assessment_id}.pdf"
 
     data_path.write_text(
-        json.dumps(build_report_data(session, assessment), indent=2),
+        json.dumps(await build_report_data(session, assessment), indent=2),
         encoding="utf-8",
     )
     shutil.copyfile(TEMPLATE, typ_path)
 
     final = typ_path
     try:
-        typst.compile(str(typ_path), output=str(pdf_path), root=str(directory))
+        await asyncio.to_thread(
+            typst.compile, str(typ_path), output=str(pdf_path), root=str(directory)
+        )
         final = pdf_path
     except Exception:  # noqa: BLE001 - keep the source even if PDF fails
         log.exception("Typst compilation failed assessment=%s", assessment_id)
@@ -214,5 +227,5 @@ def generate_report(session: Session, assessment_id: int) -> Path:
             payload={"path": str(final), "sha256": digest},
         )
     )
-    session.commit()
+    await session.commit()
     return final

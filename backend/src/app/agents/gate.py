@@ -10,16 +10,15 @@ The same path drives nmap, nikto, zap and http_probe. There is no separate plan
 gate and no second execution path.
 """
 
-from __future__ import annotations
-
 import asyncio
 import json
 from pathlib import Path
 from typing import Any, Callable
 
 from sqlalchemy import func
-from sqlmodel import Session, select
-
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlmodel import select
+from ..domain.models import Audit 
 from app.actions import (
     ActionSpec,
     ScopeError,
@@ -30,20 +29,21 @@ from app.actions import (
     resolve_argv,
 )
 from app.core.config import settings
-from app.core.db import get_engine
+from app.core.db import get_async_session_ctx
 from app.core.log import get_logger
-from app.core.policy import DEFAULT_ACTION_POLICIES, ActionPolicy, load_policies
+from app.core.policy import DEFAULT_ACTION_POLICIES, ActionPolicy
 from app.domain.models import (
     Approval,
     Assessment,
     AssessmentStatus,
     Decision,
     Evidence,
+    Finding,
     Step,
     StepStatus,
     utcnow,
 )
-from app.agents.control import audit, run_event_count
+from app.agents.control import audit
 
 log = get_logger("agent.gate")
 
@@ -53,18 +53,21 @@ ACTIVE_STATES = (
     StepStatus.SUCCEEDED.value,
 )
 
-_policy_cache: dict[str, ActionPolicy] | None = None
+_policy_cache: dict[str, Any] | None = None
 
 
 def _policies() -> dict[str, ActionPolicy]:
     global _policy_cache
     if _policy_cache is None:
-        _policy_cache = settings.action_policies()
+        from app.core.policy import load_policies_from_json
+
+        _policy_cache = load_policies_from_json(settings.action_policies_json)
     return _policy_cache
 
 
 def _policy_for(action: str) -> ActionPolicy:
     return _policies().get(action, DEFAULT_ACTION_POLICIES.get(action, ActionPolicy()))
+
 
 PROBE_HEADERS = (
     "content-type",
@@ -79,31 +82,16 @@ PROBE_HEADERS = (
 )
 
 
-def _next_seq(session: Session, assessment_id: int) -> int:
-    current = session.exec(
+async def _next_seq(session: AsyncSession, assessment_id: int) -> int:
+    result = await session.execute(
         select(func.max(Step.seq)).where(Step.assessment_id == assessment_id)
-    ).one()
+    )
+    current = result.scalar()
     return (current or 0) + 1
 
 
-def _inject_output_path(argv: list[str], output_path: str, spec: ActionSpec) -> list[str]:
-    """Ensure agent-supplied argv writes to the artifact output path.
-
-    Replaces an existing ``-output <path>`` flag, or appends one, so the
-    executor finds the artifact where it expects it.
-    """
-    result = list(argv)
-    try:
-        idx = result.index("-output")
-        if idx + 1 < len(result):
-            result[idx + 1] = output_path
-    except ValueError:
-        result.extend(["-output", output_path])
-    return result
-
-
-def queue_step(
-    session: Session,
+async def queue_step(
+    session: AsyncSession,
     assessment: Assessment,
     run_id: str,
     role: str,
@@ -118,10 +106,6 @@ def queue_step(
 
     Returns a dict the tool can hand straight to the LLM. Policy refusals are
     returned, not raised, so the agent can adapt in the same turn.
-
-    When the tool supplies argv (agent-owned command) for a file-based action,
-    the artifact output path is injected automatically so the executor finds
-    the artifact where it expects it.
     """
     assessment_id = assessment.id or 0
     spec = get_action(action)
@@ -131,7 +115,18 @@ def queue_step(
     except ScopeError as exc:
         return {"error": str(exc)}
 
-    if run_event_count(session, assessment_id, run_id, "action.queued") >= settings.max_steps:
+    result = await session.execute(
+        select(Audit)
+        .where(
+            Audit.assessment_id == assessment_id,
+            Audit.event_type == "action.queued",
+        )
+    )
+    events = result.scalars().all()
+    queued_count = sum(
+        1 for event in events if (event.payload or {}).get("run_id") == run_id
+    )
+    if queued_count >= settings.max_steps:
         return {
             "error": (
                 f"action budget exhausted ({settings.max_steps} queued actions "
@@ -139,13 +134,14 @@ def queue_step(
             )
         }
 
-    existing = session.exec(
+    result = await session.execute(
         select(Step).where(
             Step.assessment_id == assessment_id,
             Step.action == action,
             Step.status.in_(ACTIVE_STATES),
         )
-    ).all()
+    )
+    existing = result.scalars().all()
     for row in existing:
         duplicate = row.argv == argv if argv is not None else row.target == target
         if duplicate:
@@ -158,14 +154,14 @@ def queue_step(
 
     step = Step(
         assessment_id=assessment_id,
-        seq=_next_seq(session, assessment_id),
+        seq=await _next_seq(session, assessment_id),
         action=action,
         target=target,
         rationale=rationale,
         status=StepStatus.PLANNED.value,
     )
     session.add(step)
-    session.flush()
+    await session.flush()
 
     if argv is None:
         argv = resolve_argv(action, assessment, target, step.id or 0)
@@ -196,7 +192,7 @@ def queue_step(
         detail=approval_detail,
     )
     session.add(approval)
-    session.flush()
+    await session.flush()
     audit(
         session,
         assessment_id,
@@ -210,7 +206,7 @@ def queue_step(
             "argv": argv,
         },
     )
-    session.commit()
+    await session.commit()
 
     return {
         "queued": True,
@@ -221,22 +217,67 @@ def queue_step(
         "argv": argv,
         "gate": "action",
         "note": (
-            "Awaiting the human action gate. Nothing has run yet; the result "
-            "arrives in the next observation after the gate executes it."
+            "Queued, not executed. The gate runs this action after your turn "
+            "ends; its result appears in the next observation. Do not poll "
+            "query_steps/query_findings waiting for it — call handoff now."
         ),
     }
 
 
-def _step_snapshot(assessment_id: int) -> dict[str, Any] | None:
-    with Session(get_engine(), expire_on_commit=False) as session:
-        step = session.exec(
+def _inject_output_path(argv: list[str], output_path: str, spec: ActionSpec) -> list[str]:
+    """Ensure agent-supplied argv writes to the artifact output path.
+
+    Different scanners use different flags for their output destination:
+
+    - dirb: ``-o <path>``
+    - sqlmap: ``--output-dir <directory>``
+    - nikto: ``-output <path>``
+    - http_probe: no file flag injected (writes its own artifact)
+
+    Replaces an existing matching flag, or appends one, so the executor
+    finds the artifact where it expects it.
+    """
+    from pathlib import Path
+
+    result = list(argv)
+    if spec.tool == "dirb":
+        try:
+            idx = result.index("-o")
+            if idx + 1 < len(result):
+                result[idx + 1] = output_path
+        except ValueError:
+            result.extend(["-o", output_path])
+    elif spec.tool == "sqlmap":
+        output_dir = str(Path(output_path).parent)
+        try:
+            idx = result.index("--output-dir")
+            if idx + 1 < len(result):
+                result[idx + 1] = output_dir
+        except ValueError:
+            result.extend(["--output-dir", output_dir])
+    elif spec.tool == "http_probe":
+        return result
+    else:
+        try:
+            idx = result.index("-output")
+            if idx + 1 < len(result):
+                result[idx + 1] = output_path
+        except ValueError:
+            result.extend(["-output", output_path])
+    return result
+
+
+async def _step_snapshot(assessment_id: int) -> dict[str, Any] | None:
+    async with get_async_session_ctx() as session:
+        result = await session.execute(
             select(Step)
             .where(
                 Step.assessment_id == assessment_id,
                 Step.status == StepStatus.PLANNED.value,
             )
             .order_by(Step.seq)
-        ).first()
+        )
+        step = result.scalars().first()
         if step is None:
             return None
         return {
@@ -248,13 +289,14 @@ def _step_snapshot(assessment_id: int) -> dict[str, Any] | None:
         }
 
 
-def _approval_snapshot(step_id: int) -> dict[str, Any] | None:
-    with Session(get_engine(), expire_on_commit=False) as session:
-        approval = session.exec(
+async def _approval_snapshot(step_id: int) -> dict[str, Any] | None:
+    async with get_async_session_ctx() as session:
+        result = await session.execute(
             select(Approval)
             .where(Approval.step_id == step_id)
             .order_by(Approval.id.desc())
-        ).first()
+        )
+        approval = result.scalars().first()
         if approval is None:
             return None
         return {
@@ -265,8 +307,8 @@ def _approval_snapshot(step_id: int) -> dict[str, Any] | None:
         }
 
 
-def _fallback_approval(assessment_id: int, step: dict[str, Any]) -> dict[str, Any]:
-    with Session(get_engine(), expire_on_commit=False) as session:
+async def _fallback_approval(assessment_id: int, step: dict[str, Any]) -> dict[str, Any]:
+    async with get_async_session_ctx() as session:
         row = Approval(
             assessment_id=assessment_id,
             step_id=step["step_id"],
@@ -275,8 +317,8 @@ def _fallback_approval(assessment_id: int, step: dict[str, Any]) -> dict[str, An
             detail={"role": "unknown", "phase": "unknown", "rationale": step["rationale"]},
         )
         session.add(row)
-        session.commit()
-        session.refresh(row)
+        await session.commit()
+        await session.refresh(row)
         return {
             "id": row.id,
             "decision": row.decision,
@@ -285,19 +327,23 @@ def _fallback_approval(assessment_id: int, step: dict[str, Any]) -> dict[str, An
         }
 
 
-def _set_status(assessment_id: int, status: str) -> None:
-    with Session(get_engine(), expire_on_commit=False) as session:
-        assessment = session.get(Assessment, assessment_id)
+async def _set_status(assessment_id: int, status: str) -> None:
+    async with get_async_session_ctx() as session:
+        assessment = await session.get(Assessment, assessment_id)
         if assessment is not None and assessment.status != AssessmentStatus.CANCELLED.value:
             assessment.status = status
-            session.commit()
+            await session.commit()
 
 
-def _probe_summary(step: Step) -> dict[str, Any]:
+async def _probe_summary(step: Step) -> dict[str, Any]:
     if not step.output_path:
         return {}
     try:
-        payload = json.loads(Path(step.output_path).read_text(encoding="utf-8"))
+        payload = json.loads(
+            await asyncio.to_thread(
+                Path(step.output_path).read_text, encoding="utf-8"
+            )
+        )
     except Exception as exc:  # noqa: BLE001 - artifact rendering only
         return {"artifact_error": str(exc)[:200]}
     probe = payload.get("probe_result", {})
@@ -314,10 +360,11 @@ def _probe_summary(step: Step) -> dict[str, Any]:
     }
 
 
-def _result_row(session: Session, step: Step, approval: Approval | None) -> dict[str, Any]:
-    linked = session.exec(
+async def _result_row(session: AsyncSession, step: Step, approval: Approval | None) -> dict[str, Any]:
+    result = await session.execute(
         select(func.count(Evidence.id)).where(Evidence.step_id == step.id)
-    ).one()
+    )
+    linked = result.scalar()
     detail = (approval.detail or {}) if approval else {}
     row: dict[str, Any] = {
         "step_id": step.id,
@@ -331,12 +378,12 @@ def _result_row(session: Session, step: Step, approval: Approval | None) -> dict
         "findings_linked": linked or 0,
     }
     if step.action == "http_probe":
-        row["http"] = _probe_summary(step)
+        row["http"] = await _probe_summary(step)
     return row
 
 
-def _record_probe_evidence(
-    session: Session,
+async def _record_probe_evidence(
+    session: AsyncSession,
     assessment_id: int,
     step: Step,
     approval: Approval | None,
@@ -351,14 +398,17 @@ def _record_probe_evidence(
     ):
         return
 
-    existing = session.exec(
+    existing = await session.execute(
         select(Evidence).where(
             Evidence.finding_id == finding_id,
             Evidence.step_id == step.id,
         )
-    ).first()
+    )
+    existing = existing.scalars().first()
     if existing is None:
         http = row.get("http", {})
+        if http.get("status_code") is None:
+            return
         session.add(
             Evidence(
                 finding_id=finding_id,
@@ -387,7 +437,7 @@ def _record_probe_evidence(
     )
 
 
-def _decide_and_execute(
+async def _decide_and_execute(
     assessment_id: int,
     step_id: int,
     decision: Any,
@@ -395,18 +445,19 @@ def _decide_and_execute(
 ) -> dict[str, Any]:
     """Apply the human decision (or an earlier one) and run the approved step."""
     execute = executor or execute_action
-    with Session(get_engine(), expire_on_commit=False) as session:
-        step = session.get(Step, step_id)
+    async with get_async_session_ctx() as session:
+        step = await session.get(Step, step_id)
         if step is None:
             return {"step_id": step_id, "status": "missing"}
-        approval = session.exec(
+        result = await session.execute(
             select(Approval)
             .where(
                 Approval.assessment_id == assessment_id,
                 Approval.step_id == step_id,
             )
             .order_by(Approval.id.desc())
-        ).first()
+        )
+        approval = result.scalars().first()
 
         if approval is not None and approval.decision == Decision.PENDING.value:
             payload = decision or {}
@@ -431,7 +482,7 @@ def _decide_and_execute(
                     "argv": approval.argv,
                 },
             )
-            session.commit()
+            await session.commit()
 
         if approval is None or approval.decision != Decision.APPROVED.value:
             step.status = StepStatus.REJECTED.value
@@ -439,10 +490,10 @@ def _decide_and_execute(
                 (approval.reason if approval else None) or "rejected by analyst"
             )
             step.ended_at = utcnow()
-            session.commit()
-            return _result_row(session, step, approval)
+            await session.commit()
+            return await _result_row(session, step, approval)
 
-        assessment = session.get(Assessment, assessment_id)
+        assessment = await session.get(Assessment, assessment_id)
         if assessment is None:
             raise LookupError(f"assessment {assessment_id} not found")
         target = step.target or assessment.targets[0]
@@ -466,24 +517,22 @@ def _decide_and_execute(
                     "resolved": expected,
                 },
             )
-            session.commit()
-            return _result_row(session, step, approval)
+            await session.commit()
+            return await _result_row(session, step, approval)
 
-        session.commit()
-        executed = asyncio.run(
-            execute(
-                session,
-                assessment_id,
-                step.action,
-                target=target,
-                rationale=step.rationale,
-                step=step,
-            )
+        await session.commit()
+        executed = await execute(
+            session,
+            assessment_id,
+            step.action,
+            target=target,
+            rationale=step.rationale,
+            step=step,
         )
-        session.refresh(executed)
-        row = _result_row(session, executed, approval)
-        _record_probe_evidence(session, assessment_id, executed, approval, row)
-        session.commit()
+        await session.refresh(executed)
+        row = await _result_row(session, executed, approval)
+        await _record_probe_evidence(session, assessment_id, executed, approval, row)
+        await session.commit()
         log.info(
             "gate: step=%s action=%s status=%s",
             executed.id,
@@ -493,7 +542,7 @@ def _decide_and_execute(
         return row
 
 
-def run_gate_step(
+async def run_gate_step(
     assessment_id: int,
     role: str,
     interrupt_fn: Callable[[dict], Any],
@@ -509,28 +558,28 @@ def run_gate_step(
     approval leak onto the next action. A single interrupt per node task keeps
     each decision bound to its own step and argv.
     """
-    step = _step_snapshot(assessment_id)
+    step = await _step_snapshot(assessment_id)
     if step is None:
-        _set_status(assessment_id, AssessmentStatus.RUNNING.value)
+        await _set_status(assessment_id, AssessmentStatus.RUNNING.value)
         return None
 
-    approval = _approval_snapshot(step["step_id"])
+    approval = await _approval_snapshot(step["step_id"])
     if approval is None:
-        approval = _fallback_approval(assessment_id, step)
+        approval = await _fallback_approval(assessment_id, step)
 
     decision = None
     if approval["decision"] == Decision.PENDING.value:
         policy = _policy_for(step["action"])
         if not policy.requires_approval:
             # Agent authority: auto-approve per policy, no human interrupt.
-            _set_status(assessment_id, AssessmentStatus.RUNNING.value)
+            await _set_status(assessment_id, AssessmentStatus.RUNNING.value)
             decision = {
                 "decision": "approved",
                 "actor": "system",
                 "reason": f"auto-approved by policy ({policy.risk} risk)",
             }
         else:
-            _set_status(assessment_id, AssessmentStatus.AWAITING_APPROVAL.value)
+            await _set_status(assessment_id, AssessmentStatus.AWAITING_APPROVAL.value)
             detail = approval.get("detail") or {}
             decision = interrupt_fn(
                 {
@@ -550,6 +599,6 @@ def run_gate_step(
                 }
             )
 
-    return _decide_and_execute(
+    return await _decide_and_execute(
         assessment_id, step["step_id"], decision, executor=executor
     )

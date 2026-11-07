@@ -2,20 +2,9 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
-from sqlalchemy.engine import Engine
-from sqlmodel import Session, col, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlmodel import col, select
 
-from app.runtime import runner
-from app.core.db import get_engine, get_session
-from app.core.events import stream_assessment_events
-from app.domain.models import (
-    Assessment,
-    AssessmentStatus,
-    Audit,
-    Message,
-    StepStatus,
-    utcnow,
-)
 from app.api.queries import load_assessment_detail
 from app.api.schema import (
     AgentAccepted,
@@ -27,31 +16,38 @@ from app.api.schema import (
     MessageIn,
     MessageOut,
 )
-from app.domain.risk import refresh_risk
-from app.runtime.scan import ScopeError, run_scan
-from app.api.schema import (
-    AgentAccepted,
-    AgentView,
-    AssessmentCreate,
-    AssessmentDetail,
-    AssessmentRequestUpdate,
-    DecisionIn,
+from app.core.db import get_session
+from app.core.events import stream_assessment_events
+from app.domain.models import (
+    Assessment,
+    AssessmentStatus,
+    Audit,
+    Message,
+    StepStatus,
+    utcnow,
 )
+from app.domain.risk import refresh_risk
+from app.runtime import runner
+from app.runtime.scan import ScopeError, run_scan
 
 router = APIRouter()
 
 
 @router.get("/assessments", response_model=list[Assessment])
-def list_assessments(session: Session = Depends(get_session)):
-    return session.exec(select(Assessment).order_by(col(Assessment.id).desc())).all()
+async def list_assessments(session: AsyncSession = Depends(get_session)):
+    result = await session.execute(
+        select(Assessment).order_by(col(Assessment.id).desc())
+    )
+    return list(result.scalars().all())
 
 
 @router.post("/assessments", response_model=Assessment, status_code=201)
-def create_assessment(payload: AssessmentCreate, session: Session = Depends(get_session)):
+async def create_assessment(
+    payload: AssessmentCreate, session: AsyncSession = Depends(get_session)
+):
     assessment = Assessment(**payload.model_dump())
     session.add(assessment)
-    session.commit()
-    session.refresh(assessment)
+    await session.flush()
     session.add(
         Audit(
             assessment_id=assessment.id,
@@ -59,25 +55,28 @@ def create_assessment(payload: AssessmentCreate, session: Session = Depends(get_
             payload={"title": assessment.title, "targets": assessment.targets},
         )
     )
-    session.commit()
+    await session.commit()
+    await session.refresh(assessment)
     return assessment
 
 
 @router.get("/assessments/{assessment_id}", response_model=AssessmentDetail)
-def get_assessment(assessment_id: int, session: Session = Depends(get_session)):
-    detail = load_assessment_detail(session, assessment_id)
+async def get_assessment(
+    assessment_id: int, session: AsyncSession = Depends(get_session)
+):
+    detail = await load_assessment_detail(session, assessment_id)
     if detail is None:
         raise HTTPException(404, "assessment not found")
     return detail
 
 
 @router.patch("/assessments/{assessment_id}/request", response_model=Assessment)
-def update_assessment_request(
+async def update_assessment_request(
     assessment_id: int,
     payload: AssessmentRequestUpdate,
-    session: Session = Depends(get_session),
+    session: AsyncSession = Depends(get_session),
 ):
-    assessment = session.get(Assessment, assessment_id)
+    assessment = await session.get(Assessment, assessment_id)
     if assessment is None:
         raise HTTPException(404, "assessment not found")
 
@@ -99,32 +98,33 @@ def update_assessment_request(
             payload={"request": assessment.request[:500]},
         )
     )
-    session.commit()
-    session.refresh(assessment)
+    await session.commit()
+    await session.refresh(assessment)
     return assessment
 
 
 @router.get("/assessments/{assessment_id}/messages", response_model=list[MessageOut])
-def list_messages(
+async def list_messages(
     assessment_id: int,
-    session: Session = Depends(get_session),
+    session: AsyncSession = Depends(get_session),
 ):
-    if session.get(Assessment, assessment_id) is None:
+    if await session.get(Assessment, assessment_id) is None:
         raise HTTPException(404, "assessment not found")
-    return session.exec(
+    result = await session.execute(
         select(Message)
         .where(Message.assessment_id == assessment_id)
         .order_by(Message.created_at.asc(), Message.id.asc())
-    ).all()
+    )
+    return list(result.scalars().all())
 
 
 @router.post("/assessments/{assessment_id}/messages", response_model=MessageOut)
-def create_message(
+async def create_message(
     assessment_id: int,
     payload: MessageIn,
-    session: Session = Depends(get_session),
+    session: AsyncSession = Depends(get_session),
 ):
-    if session.get(Assessment, assessment_id) is None:
+    if await session.get(Assessment, assessment_id) is None:
         raise HTTPException(404, "assessment not found")
 
     message = Message(
@@ -133,8 +133,8 @@ def create_message(
         text=payload.text.strip(),
     )
     session.add(message)
-    session.commit()
-    session.refresh(message)
+    await session.commit()
+    await session.refresh(message)
     return message
 
 
@@ -143,15 +143,16 @@ async def assessment_events(
     assessment_id: int,
     request: Request,
     once: bool = Query(False, include_in_schema=False),
-    engine: Engine = Depends(get_engine),
 ):
     """Replay a snapshot, then stream database changes until the client leaves."""
-    with Session(engine) as session:
-        if session.get(Assessment, assessment_id) is None:
+    from app.core.db import get_async_session_ctx
+
+    async with get_async_session_ctx() as session:
+        if await session.get(Assessment, assessment_id) is None:
             raise HTTPException(404, "assessment not found")
 
     return StreamingResponse(
-        stream_assessment_events(engine, assessment_id, request, once=once),
+        stream_assessment_events(assessment_id, request, once=once),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",
@@ -162,15 +163,15 @@ async def assessment_events(
 
 
 @router.post("/assessments/{assessment_id}/scan", response_model=AssessmentDetail)
-async def scan(assessment_id: int, session: Session = Depends(get_session)):
-    assessment = session.get(Assessment, assessment_id)
+async def scan(assessment_id: int, session: AsyncSession = Depends(get_session)):
+    assessment = await session.get(Assessment, assessment_id)
     if assessment is None:
         raise HTTPException(404, f"assessment {assessment_id} not found")
 
     previous_status = assessment.status
     assessment.status = AssessmentStatus.RUNNING.value
     assessment.finished_at = None
-    session.commit()
+    await session.commit()
 
     try:
         step = await run_scan(session, assessment_id)
@@ -178,7 +179,7 @@ async def scan(assessment_id: int, session: Session = Depends(get_session)):
         raise HTTPException(404, str(exc)) from exc
     except ScopeError as exc:
         assessment.status = previous_status
-        session.commit()
+        await session.commit()
         raise HTTPException(400, str(exc)) from exc
 
     assessment.status = (
@@ -187,10 +188,10 @@ async def scan(assessment_id: int, session: Session = Depends(get_session)):
         else AssessmentStatus.FAILED.value
     )
     assessment.finished_at = utcnow()
-    refresh_risk(session, assessment_id)
-    session.commit()
+    await refresh_risk(session, assessment_id)
+    await session.commit()
 
-    detail = load_assessment_detail(session, assessment_id)
+    detail = await load_assessment_detail(session, assessment_id)
     if detail is None:
         raise HTTPException(404, "assessment not found")
     return detail
@@ -201,12 +202,9 @@ async def scan(assessment_id: int, session: Session = Depends(get_session)):
     response_model=AgentAccepted,
     status_code=202,
 )
-async def run_agent(
-    assessment_id: int,
-    engine: Engine = Depends(get_engine),
-):
+async def run_agent(assessment_id: int):
     try:
-        await runner.start_run(assessment_id, engine)
+        await runner.start_run(assessment_id)
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
     except runner.AlreadyRunning as exc:
@@ -222,12 +220,9 @@ async def run_agent(
     response_model=AgentAccepted,
     status_code=202,
 )
-async def stop_agent(
-    assessment_id: int,
-    engine: Engine = Depends(get_engine),
-):
+async def stop_agent(assessment_id: int):
     try:
-        await runner.stop_run(assessment_id, engine)
+        await runner.stop_run(assessment_id)
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
     return AgentAccepted(
@@ -241,13 +236,9 @@ async def stop_agent(
     response_model=AgentAccepted,
     status_code=202,
 )
-async def resume_agent(
-    assessment_id: int,
-    payload: DecisionIn,
-    engine: Engine = Depends(get_engine),
-):
+async def resume_agent(assessment_id: int, payload: DecisionIn):
     try:
-        await runner.resume_run(assessment_id, engine, payload.model_dump())
+        await runner.resume_run(assessment_id, payload.model_dump())
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
     except runner.AlreadyRunning as exc:
@@ -261,21 +252,21 @@ async def resume_agent(
 
 
 @router.get("/assessments/{assessment_id}/agent", response_model=AgentView)
-def agent_state(
+async def agent_state(
     assessment_id: int,
-    session: Session = Depends(get_session),
+    session: AsyncSession = Depends(get_session),
 ):
-    if session.get(Assessment, assessment_id) is None:
+    if await session.get(Assessment, assessment_id) is None:
         raise HTTPException(404, "assessment not found")
-    return runner.get_view(assessment_id, session=session)
+    return await runner.get_view(assessment_id, session=session)
 
 
 @router.get("/assessments/{assessment_id}/report")
-def download_report(
+async def download_report(
     assessment_id: int,
-    session: Session = Depends(get_session),
+    session: AsyncSession = Depends(get_session),
 ):
-    assessment = session.get(Assessment, assessment_id)
+    assessment = await session.get(Assessment, assessment_id)
     if assessment is None:
         raise HTTPException(404, "assessment not found")
     if not assessment.report_path:

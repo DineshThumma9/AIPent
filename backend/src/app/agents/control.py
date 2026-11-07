@@ -7,13 +7,18 @@ checkpoint) means a restart cannot silently lose the handoff trail.
 
 Every event is scoped by ``run_id`` so a previous run cannot leak its handoffs
 into a new one.
+
+Write helpers are plain functions because they only append ORM objects to the
+session; the caller owns the commit. Read helpers are async because they issue
+queries.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from sqlmodel import Session, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlmodel import select
 
 from app.domain.models import Audit
 
@@ -34,7 +39,7 @@ ROLE_TURN_CAPS = {
 
 
 def audit(
-    session: Session,
+    session: AsyncSession,
     assessment_id: int,
     event_type: str,
     payload: dict,
@@ -50,15 +55,18 @@ def audit(
     )
 
 
-def _events(session: Session, assessment_id: int, event_type: str) -> list[Audit]:
-    return session.exec(
+async def _events(
+    session: AsyncSession, assessment_id: int, event_type: str
+) -> list[Audit]:
+    result = await session.execute(
         select(Audit)
         .where(
             Audit.assessment_id == assessment_id,
             Audit.event_type == event_type,
         )
         .order_by(Audit.id)
-    ).all()
+    )
+    return list(result.scalars().all())
 
 
 def _for_run(events: list[Audit], run_id: str) -> list[dict]:
@@ -69,10 +77,10 @@ def _for_run(events: list[Audit], run_id: str) -> list[dict]:
     ]
 
 
-def current_role(session: Session, assessment_id: int, run_id: str) -> str:
+async def current_role(session: AsyncSession, assessment_id: int, run_id: str) -> str:
     """The last role entered during this run."""
     for payload in reversed(
-        _for_run(_events(session, assessment_id, "role.started"), run_id)
+        _for_run(await _events(session, assessment_id, "role.started"), run_id)
     ):
         role = str(payload.get("role") or "")
         if role in ROLES:
@@ -80,12 +88,14 @@ def current_role(session: Session, assessment_id: int, run_id: str) -> str:
     return "recon"
 
 
-def role_history(session: Session, assessment_id: int, run_id: str) -> list[dict]:
-    return _for_run(_events(session, assessment_id, "role.started"), run_id)
+async def role_history(
+    session: AsyncSession, assessment_id: int, run_id: str
+) -> list[dict]:
+    return _for_run(await _events(session, assessment_id, "role.started"), run_id)
 
 
 def record_role(
-    session: Session,
+    session: AsyncSession,
     assessment_id: int,
     run_id: str,
     role: str,
@@ -106,7 +116,7 @@ def record_role(
 
 
 def record_handoff(
-    session: Session,
+    session: AsyncSession,
     assessment_id: int,
     run_id: str,
     role: str,
@@ -130,39 +140,32 @@ def record_handoff(
     return body
 
 
-def handoff_history(
-    session: Session,
+async def handoff_history(
+    session: AsyncSession,
     assessment_id: int,
     run_id: str,
     role: str | None = None,
 ) -> list[dict]:
-    rows = _for_run(_events(session, assessment_id, "handoff.created"), run_id)
+    rows = _for_run(
+        await _events(session, assessment_id, "handoff.created"), run_id
+    )
     if role is not None:
         rows = [row for row in rows if row.get("role") == role]
     return rows
 
 
-def latest_handoff(
-    session: Session,
+async def latest_handoff(
+    session: AsyncSession,
     assessment_id: int,
     run_id: str,
     role: str | None = None,
 ) -> dict | None:
-    rows = handoff_history(session, assessment_id, run_id, role)
+    rows = await handoff_history(session, assessment_id, run_id, role)
     return rows[-1] if rows else None
 
 
-def run_event_count(
-    session: Session,
-    assessment_id: int,
-    run_id: str,
-    event_type: str,
-) -> int:
-    return len(_for_run(_events(session, assessment_id, event_type), run_id))
-
-
-def role_event_count(
-    session: Session,
+async def role_event_count(
+    session: AsyncSession,
     assessment_id: int,
     run_id: str,
     role: str,
@@ -170,6 +173,8 @@ def role_event_count(
 ) -> int:
     return sum(
         1
-        for payload in _for_run(_events(session, assessment_id, event_type), run_id)
+        for payload in _for_run(
+            await _events(session, assessment_id, event_type), run_id
+        )
         if payload.get("role") == role
     )

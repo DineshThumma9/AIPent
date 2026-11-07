@@ -50,6 +50,9 @@ HARD RULES
 6. End your role by calling handoff. If you need the operator, set
    needs_input=true and ask one concrete question. The role ends; do not keep
    talking after the handoff.
+7. A queued action has not run yet. The gate executes it only after your turn
+   ends. Never poll query_steps or query_findings waiting for its result; queue
+   the action, then call handoff immediately.
 """
 
 RECON_SYSTEM_PROMPT = f"""{_COMMON}

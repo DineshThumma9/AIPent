@@ -1,10 +1,11 @@
+import asyncio
 import logging
 
 import pytest
 from sqlalchemy.exc import IntegrityError
-from sqlmodel import Session, select
+from sqlmodel import select
 
-from app.core.db import init_db, make_engine
+from app.core.db import get_async_session_ctx, init_db, make_engine, set_engine
 from app.core.log import get_logger, setup_logging
 from app.domain.models import Assessment, Audit, Evidence, Finding, Step
 
@@ -12,16 +13,27 @@ from app.domain.models import Assessment, Audit, Evidence, Finding, Step
 @pytest.fixture
 def engine(tmp_path):
     engine = make_engine(f"sqlite:///{tmp_path / 'test.db'}")
-    init_db(engine)
+    asyncio.run(init_db(engine))
+    set_engine(engine)
     return engine
 
 
+def _run(fn):
+    async def runner():
+        async with get_async_session_ctx() as session:
+            return await fn(session)
+
+    return asyncio.run(runner())
+
+
 def test_row_chain_roundtrip(engine):
-    with Session(engine) as session:
-        assessment = Assessment(title="Lab", targets=["127.0.0.1"], ports=[3000, 8080])
+    async def body(session):
+        assessment = Assessment(
+            title="Lab", targets=["127.0.0.1"], ports=[3000, 8080]
+        )
         session.add(assessment)
-        session.commit()
-        session.refresh(assessment)
+        await session.commit()
+        await session.refresh(assessment)
 
         step = Step(
             assessment_id=assessment.id,
@@ -31,8 +43,8 @@ def test_row_chain_roundtrip(engine):
             rationale="Only local lab target in scope",
         )
         session.add(step)
-        session.commit()
-        session.refresh(step)
+        await session.commit()
+        await session.refresh(step)
 
         finding = Finding(
             assessment_id=assessment.id,
@@ -42,8 +54,8 @@ def test_row_chain_roundtrip(engine):
             title="HTTP service exposed",
         )
         session.add(finding)
-        session.commit()
-        session.refresh(finding)
+        await session.commit()
+        await session.refresh(finding)
 
         session.add(
             Evidence(
@@ -60,20 +72,26 @@ def test_row_chain_roundtrip(engine):
                 payload={"step_id": step.id},
             )
         )
-        session.commit()
+        await session.commit()
 
-        assert session.exec(select(Step)).one().assessment_id == assessment.id
-        assert session.exec(select(Evidence)).one().locator == {"line": 12}
-        assert session.exec(select(Audit)).one().payload == {"step_id": step.id}
-        assert session.exec(select(Finding)).one().severity == "info"
+        result = await session.execute(select(Step))
+        assert result.scalars().one().assessment_id == assessment.id
+        result = await session.execute(select(Evidence))
+        assert result.scalars().one().locator == {"line": 12}
+        result = await session.execute(select(Audit))
+        assert result.scalars().one().payload == {"step_id": step.id}
+        result = await session.execute(select(Finding))
+        assert result.scalars().one().severity == "info"
+
+    _run(body)
 
 
 def test_duplicate_finding_key_is_rejected(engine):
-    with Session(engine) as session:
+    async def body(session):
         assessment = Assessment(title="Lab", targets=["127.0.0.1"])
         session.add(assessment)
-        session.commit()
-        session.refresh(assessment)
+        await session.commit()
+        await session.refresh(assessment)
 
         for _ in range(2):
             session.add(
@@ -85,7 +103,9 @@ def test_duplicate_finding_key_is_rejected(engine):
                 )
             )
         with pytest.raises(IntegrityError):
-            session.commit()
+            await session.commit()
+
+    _run(body)
 
 
 def test_logger_writes_stream_and_file(tmp_path, capsys):

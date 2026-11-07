@@ -1,43 +1,53 @@
 """Read models shared by the REST detail endpoint and the event stream."""
 
-from sqlmodel import Session, col, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlmodel import col, select
 
 from app.domain.models import Approval, Assessment, Audit, Evidence, Finding, Step
 from app.api.schema import AssessmentDetail
 
 
-def load_assessment_detail(
-    session: Session, assessment_id: int
+async def load_assessment_detail(
+    session: AsyncSession, assessment_id: int
 ) -> AssessmentDetail | None:
-    assessment = session.get(Assessment, assessment_id)
+    assessment = await session.get(Assessment, assessment_id)
     if assessment is None:
         return None
 
-    steps = session.exec(
+    result = await session.execute(
         select(Step).where(Step.assessment_id == assessment_id).order_by(Step.seq)
-    ).all()
-    findings = session.exec(
+    )
+    steps = list(result.scalars().all())
+
+    result = await session.execute(
         select(Finding)
         .where(Finding.assessment_id == assessment_id)
         .order_by(col(Finding.id).desc())
-    ).all()
-    evidence = session.exec(
+    )
+    findings = list(result.scalars().all())
+
+    result = await session.execute(
         select(Evidence)
         .join(Finding, Evidence.finding_id == Finding.id)
         .where(Finding.assessment_id == assessment_id)
         .order_by(Evidence.id)
-    ).all()
-    approvals = session.exec(
+    )
+    evidence = list(result.scalars().all())
+
+    result = await session.execute(
         select(Approval)
         .where(Approval.assessment_id == assessment_id)
         .order_by(col(Approval.id).desc())
-    ).all()
-    audit = session.exec(
+    )
+    approvals = list(result.scalars().all())
+
+    result = await session.execute(
         select(Audit)
         .where(Audit.assessment_id == assessment_id)
         .order_by(col(Audit.id).desc())
         .limit(100)
-    ).all()
+    )
+    audit = list(result.scalars().all())
 
     return AssessmentDetail(
         **assessment.model_dump(),

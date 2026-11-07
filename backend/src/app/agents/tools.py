@@ -5,8 +5,9 @@ role; every action tool *queues* work behind the shared human gate. No tool
 executes a scanner or touches the target directly.
 
 Roles:
-  recon        scan_services, query_findings, query_steps, handoff
-  discovery    web_scan, query_findings, query_steps, handoff
+  recon        scan_services, nmap_scan, query_findings, query_steps, handoff
+  discovery    web_scan, nikto_scan, sqlmap_scan, dirb_scan, query_findings,
+               query_steps, handoff
   validation   http_probe, invoke_skill, query_findings, query_steps,
                update_finding_status, handoff
 """
@@ -19,14 +20,16 @@ from urllib.parse import urlparse
 
 from langchain_core.tools import tool
 from sqlalchemy import func
-from sqlmodel import Session, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlmodel import select
 
+from app.actions.probe import SAFE_METHODS
+from app.adapters import nikto
 from app.agents.context import current_assessment_id, current_role, current_run_id
 from app.agents.control import ROLES, record_handoff
 from app.agents.gate import queue_step
-from app.actions.probe import SAFE_METHODS
 from app.core.config import settings
-from app.core.db import get_engine
+from app.core.db import get_async_session_ctx
 from app.domain.models import (
     Assessment,
     Audit,
@@ -59,7 +62,9 @@ def _missing_context() -> dict[str, Any]:
     return {"error": "no active assessment run context"}
 
 
-def _audit(session: Session, assessment_id: int, event_type: str, payload: dict) -> None:
+def _audit(
+    session: AsyncSession, assessment_id: int, event_type: str, payload: dict
+) -> None:
     session.add(
         Audit(
             assessment_id=assessment_id,
@@ -98,7 +103,7 @@ def _probe_url(target: str, path: str, assessment: Assessment) -> str:
 
 
 @tool("scan_services")
-def scan_services(target: str, rationale: str = "") -> dict[str, Any]:
+async def scan_services(target: str, rationale: str = "") -> dict[str, Any]:
     """Queue an nmap service/port scan for one authorised target.
 
     Use this first to learn which ports and services exist. The action pauses
@@ -119,11 +124,11 @@ def scan_services(target: str, rationale: str = "") -> dict[str, Any]:
     if refusal:
         return refusal
 
-    with Session(get_engine(), expire_on_commit=False) as session:
-        assessment = session.get(Assessment, assessment_id)
+    async with get_async_session_ctx() as session:
+        assessment = await session.get(Assessment, assessment_id)
         if assessment is None:
             return {"error": f"assessment {assessment_id} not found"}
-        return queue_step(
+        return await queue_step(
             session,
             assessment,
             run_id,
@@ -135,7 +140,7 @@ def scan_services(target: str, rationale: str = "") -> dict[str, Any]:
 
 
 @tool("nmap_scan")
-def nmap_scan(
+async def nmap_scan(
     flags: str,
     ports: str,
     target: str,
@@ -170,11 +175,11 @@ def nmap_scan(
 
     argv = ["nmap"] + flags.strip().split() + ["-p", ports.strip(), "-oX", "-", target]
 
-    with Session(get_engine(), expire_on_commit=False) as session:
-        assessment = session.get(Assessment, assessment_id)
+    async with get_async_session_ctx() as session:
+        assessment = await session.get(Assessment, assessment_id)
         if assessment is None:
             return {"error": f"assessment {assessment_id} not found"}
-        return queue_step(
+        return await queue_step(
             session,
             assessment,
             run_id,
@@ -187,7 +192,7 @@ def nmap_scan(
 
 
 @tool("nikto_scan")
-def nikto_scan(
+async def nikto_scan(
     flags: str,
     target: str,
     rationale: str = "",
@@ -211,8 +216,8 @@ def nikto_scan(
     if refusal:
         return refusal
 
-    with Session(get_engine(), expire_on_commit=False) as session:
-        assessment = session.get(Assessment, assessment_id)
+    async with get_async_session_ctx() as session:
+        assessment = await session.get(Assessment, assessment_id)
         if assessment is None:
             return {"error": f"assessment {assessment_id} not found"}
         if not assessment.ports:
@@ -235,7 +240,7 @@ def nikto_scan(
             "-Format",
             "json",
         ]
-        return queue_step(
+        return await queue_step(
             session,
             assessment,
             run_id,
@@ -248,7 +253,7 @@ def nikto_scan(
 
 
 @tool("sqlmap_scan")
-def sqlmap_scan(
+async def sqlmap_scan(
     flags: str,
     target: str,
     rationale: str = "",
@@ -273,8 +278,8 @@ def sqlmap_scan(
     if refusal:
         return refusal
 
-    with Session(get_engine(), expire_on_commit=False) as session:
-        assessment = session.get(Assessment, assessment_id)
+    async with get_async_session_ctx() as session:
+        assessment = await session.get(Assessment, assessment_id)
         if assessment is None:
             return {"error": f"assessment {assessment_id} not found"}
         if not assessment.ports:
@@ -287,7 +292,7 @@ def sqlmap_scan(
         port = assessment.ports[0]
         url = f"http://{target}:{port}/"
         argv = ["sqlmap", "-u", url] + flags.strip().split()
-        return queue_step(
+        return await queue_step(
             session,
             assessment,
             run_id,
@@ -300,7 +305,7 @@ def sqlmap_scan(
 
 
 @tool("dirb_scan")
-def dirb_scan(
+async def dirb_scan(
     flags: str,
     wordlist: str,
     target: str,
@@ -326,8 +331,8 @@ def dirb_scan(
     if refusal:
         return refusal
 
-    with Session(get_engine(), expire_on_commit=False) as session:
-        assessment = session.get(Assessment, assessment_id)
+    async with get_async_session_ctx() as session:
+        assessment = await session.get(Assessment, assessment_id)
         if assessment is None:
             return {"error": f"assessment {assessment_id} not found"}
         if not assessment.ports:
@@ -340,7 +345,7 @@ def dirb_scan(
         port = assessment.ports[0]
         url = f"http://{target}:{port}/"
         argv = ["dirb", url, wordlist] + flags.strip().split()
-        return queue_step(
+        return await queue_step(
             session,
             assessment,
             run_id,
@@ -353,7 +358,7 @@ def dirb_scan(
 
 
 @tool("web_scan")
-def web_scan(scanner: str, target: str, rationale: str = "") -> dict[str, Any]:
+async def web_scan(scanner: str, target: str, rationale: str = "") -> dict[str, Any]:
     """Queue a web scanner (nikto or zap) against one authorised target.
 
     Nikto is an active web configuration probe; ZAP is a passive baseline.
@@ -379,8 +384,8 @@ def web_scan(scanner: str, target: str, rationale: str = "") -> dict[str, Any]:
     if refusal:
         return refusal
 
-    with Session(get_engine(), expire_on_commit=False) as session:
-        assessment = session.get(Assessment, assessment_id)
+    async with get_async_session_ctx() as session:
+        assessment = await session.get(Assessment, assessment_id)
         if assessment is None:
             return {"error": f"assessment {assessment_id} not found"}
         if not assessment.ports:
@@ -390,7 +395,7 @@ def web_scan(scanner: str, target: str, rationale: str = "") -> dict[str, Any]:
                     "scan_services first to establish what is open"
                 )
             }
-        return queue_step(
+        return await queue_step(
             session,
             assessment,
             run_id,
@@ -402,7 +407,7 @@ def web_scan(scanner: str, target: str, rationale: str = "") -> dict[str, Any]:
 
 
 @tool("http_probe")
-def http_probe(
+async def http_probe(
     method: str,
     url: str,
     headers: dict[str, str] | None = None,
@@ -455,8 +460,8 @@ def http_probe(
     host = parsed.hostname
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
 
-    with Session(get_engine(), expire_on_commit=False) as session:
-        assessment = session.get(Assessment, assessment_id)
+    async with get_async_session_ctx() as session:
+        assessment = await session.get(Assessment, assessment_id)
         if assessment is None:
             return {"error": f"assessment {assessment_id} not found"}
         if host in assessment.exclusions or host not in assessment.targets:
@@ -469,13 +474,13 @@ def http_probe(
                 )
             }
         if finding_id is not None:
-            finding = session.get(Finding, finding_id)
+            finding = await session.get(Finding, finding_id)
             if finding is None or finding.assessment_id != assessment_id:
                 return {
                     "error": f"finding {finding_id} is not in the current assessment"
                 }
 
-        planned = session.exec(
+        result = await session.execute(
             select(Step).where(
                 Step.assessment_id == assessment_id,
                 Step.action == "http_probe",
@@ -487,7 +492,8 @@ def http_probe(
                     ]
                 ),
             )
-        ).all()
+        )
+        planned = list(result.scalars().all())
         if len(planned) >= settings.max_validation_probes:
             return {
                 "error": (
@@ -505,7 +511,7 @@ def http_probe(
             str(expected_status),
             body or "",
         ]
-        return queue_step(
+        return await queue_step(
             session,
             assessment,
             run_id,
@@ -525,7 +531,7 @@ def http_probe(
 
 
 @tool("invoke_skill")
-def invoke_skill(
+async def invoke_skill(
     skill_name: str,
     finding_id: int,
     hypothesis: str,
@@ -554,7 +560,7 @@ def invoke_skill(
     if refusal:
         return refusal
 
-    with Session(get_engine(), expire_on_commit=False) as session:
+    async with get_async_session_ctx() as session:
         allowed = AGENT_SKILL_MAP.get("validation_agent", [])
         if skill_name not in allowed:
             return {
@@ -567,16 +573,17 @@ def invoke_skill(
         if skill is None:
             return {"error": f"unknown skill: {skill_name}"}
 
-        finding = session.get(Finding, finding_id)
+        finding = await session.get(Finding, finding_id)
         if finding is None or finding.assessment_id != assessment_id:
             return {"error": f"finding {finding_id} not found in this assessment"}
-        assessment = session.get(Assessment, assessment_id)
+        assessment = await session.get(Assessment, assessment_id)
         if assessment is None:
             return {"error": "assessment missing"}
 
-        evidence_rows = session.exec(
+        evidence_result = await session.execute(
             select(Evidence).where(Evidence.finding_id == finding.id)
-        ).all()
+        )
+        evidence_rows = list(evidence_result.scalars().all())
         result = skill.generate_probes(
             {
                 "id": finding.id,
@@ -610,7 +617,7 @@ def invoke_skill(
                 "reasoning": result.reasoning[:500],
             },
         )
-        session.commit()
+        await session.commit()
 
         probes = []
         for probe in result.probes:
@@ -642,7 +649,7 @@ def invoke_skill(
 
 
 @tool("query_findings")
-def query_findings(
+async def query_findings(
     status: str | None = None,
     canonical_key_contains: str | None = None,
     limit: int = 20,
@@ -660,11 +667,12 @@ def query_findings(
     assessment_id, _ = ctx
     limit = max(1, min(int(limit or 20), 50))
 
-    with Session(get_engine(), expire_on_commit=False) as session:
+    async with get_async_session_ctx() as session:
         query = select(Finding).where(Finding.assessment_id == assessment_id)
         if status:
             query = query.where(Finding.status == status)
-        rows = session.exec(query).all()
+        result = await session.execute(query)
+        rows = list(result.scalars().all())
         if canonical_key_contains:
             rows = [row for row in rows if canonical_key_contains in row.canonical_key]
         rows.sort(key=lambda row: row.updated_at, reverse=True)
@@ -690,7 +698,7 @@ def query_findings(
 
 
 @tool("query_steps")
-def query_steps(
+async def query_steps(
     action: str | None = None,
     status: str | None = None,
     limit: int = 10,
@@ -711,18 +719,22 @@ def query_steps(
     assessment_id, _ = ctx
     limit = max(1, min(int(limit or 10), 30))
 
-    with Session(get_engine(), expire_on_commit=False) as session:
+    async with get_async_session_ctx() as session:
         query = select(Step).where(Step.assessment_id == assessment_id)
         if action:
             query = query.where(Step.action == action)
         if status:
             query = query.where(Step.status == status)
-        steps = session.exec(query.order_by(Step.seq.desc()).limit(limit)).all()
+        result = await session.execute(
+            query.order_by(Step.seq.desc()).limit(limit)
+        )
+        steps = list(result.scalars().all())
         rows = []
         for step in steps:
-            linked = session.exec(
+            linked_result = await session.execute(
                 select(func.count(Evidence.id)).where(Evidence.step_id == step.id)
-            ).one()
+            )
+            linked = linked_result.scalar()
             rows.append(
                 {
                     "step_id": step.id,
@@ -742,7 +754,7 @@ def query_steps(
 
 
 @tool("update_finding_status")
-def update_finding_status(
+async def update_finding_status(
     finding_id: int,
     status: str,
     reasoning: str,
@@ -773,17 +785,20 @@ def update_finding_status(
     if status not in ("confirmed", "false_positive", "suspected"):
         return {"error": "status must be confirmed, false_positive, or suspected"}
 
-    with Session(get_engine(), expire_on_commit=False) as session:
-        row = session.get(Finding, finding_id)
+    async with get_async_session_ctx() as session:
+        row = await session.get(Finding, finding_id)
         if row is None or row.assessment_id != assessment_id:
             return {"error": f"finding {finding_id} not in current assessment"}
 
         if status in ("confirmed", "false_positive"):
-            evidence = session.exec(
+            evidence_result = await session.execute(
                 select(Evidence).where(Evidence.finding_id == finding_id)
-            ).all()
+            )
+            evidence = list(evidence_result.scalars().all())
             executed = any(
-                (item.locator or {}).get("tool") == "http_probe" for item in evidence
+                (item.locator or {}).get("tool") == "http_probe"
+                and (item.locator or {}).get("http_status") is not None
+                for item in evidence
             )
             if not executed:
                 return {
@@ -812,7 +827,7 @@ def update_finding_status(
                 "reasoning": reasoning,
             },
         )
-        session.commit()
+        await session.commit()
         return {
             "updated": True,
             "finding_id": finding_id,
@@ -830,7 +845,7 @@ NEXT_ROLE_ALLOWED = {
 
 
 @tool("handoff")
-def handoff(
+async def handoff(
     summary: str,
     decisions: list[dict] | None = None,
     finding_ids: list[int] | None = None,
@@ -884,15 +899,15 @@ def handoff(
     finding_ids = [int(item) for item in (finding_ids or [])]
     step_ids = [int(item) for item in (step_ids or [])]
 
-    with Session(get_engine(), expire_on_commit=False) as session:
+    async with get_async_session_ctx() as session:
         for finding_id in finding_ids:
-            finding = session.get(Finding, finding_id)
+            finding = await session.get(Finding, finding_id)
             if finding is None or finding.assessment_id != assessment_id:
                 return {
                     "error": f"finding {finding_id} is not in the current assessment"
                 }
         for step_id in step_ids:
-            step = session.get(Step, step_id)
+            step = await session.get(Step, step_id)
             if step is None or step.assessment_id != assessment_id:
                 return {"error": f"step {step_id} is not in the current assessment"}
 
@@ -923,7 +938,7 @@ def handoff(
                 "summary": summary[:500],
             },
         )
-        session.commit()
+        await session.commit()
         return {
             "handoff_recorded": True,
             "role": role,

@@ -3,6 +3,8 @@
 Resolve the argv, run the tool (or the in-process HTTP probe), keep the
 artifact and persist evidence. A tool failure is recorded on the Step, never
 raised into the graph.
+
+The database layer is fully async: every caller passes an ``AsyncSession``.
 """
 
 from __future__ import annotations
@@ -15,7 +17,24 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from sqlalchemy import func
-from sqlmodel import Session, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+# Registry of in-flight scanner processes keyed by assessment_id, so that
+# stop_run can terminate a child process when an operator cancels a run.
+_active_processes: dict[int, asyncio.Process] = {}
+
+
+def register_process(assessment_id: int, process: asyncio.Process) -> None:
+    """Store a live subprocess so stop_run can terminate it."""
+    _active_processes[assessment_id] = process
+
+
+def terminate_process(assessment_id: int) -> None:
+    """Send SIGTERM to the active process for an assessment, if any."""
+    process = _active_processes.pop(assessment_id, None)
+    if process is not None and process.returncode is None:
+        process.terminate()
+from sqlmodel import select
 
 from app.actions.catalogue import (
     ACTIONS,
@@ -35,7 +54,6 @@ from app.domain.models import (
     Audit,
     Evidence,
     Finding,
-    Severity,
     Step,
     StepStatus,
     utcnow,
@@ -53,30 +71,37 @@ class MCPResult:
 SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
 
-def _next_seq(session: Session, assessment_id: int) -> int:
-    current = session.exec(
+async def _next_seq(session: AsyncSession, assessment_id: int) -> int:
+    result = await session.execute(
         select(func.max(Step.seq)).where(Step.assessment_id == assessment_id)
-    ).one()
+    )
+    current = result.scalar()
     return (current or 0) + 1
 
 
-def _audit(session: Session, assessment_id: int, event_type: str, payload: dict) -> None:
+def _audit(
+    session: AsyncSession, assessment_id: int, event_type: str, payload: dict
+) -> None:
     session.add(Audit(assessment_id=assessment_id, event_type=event_type, payload=payload))
 
 
-def _save_findings(
-    session: Session, assessment_id: int, step: Step, drafts: list[FindingDraft]
+async def _save_findings(
+    session: AsyncSession,
+    assessment_id: int,
+    step: Step,
+    drafts: list[FindingDraft],
 ) -> tuple[int, int]:
     added = 0
     merged = 0
     for draft in drafts:
         key = canonical_key(draft)
-        existing = session.exec(
+        result = await session.execute(
             select(Finding).where(
                 Finding.assessment_id == assessment_id,
                 Finding.canonical_key == key,
             )
-        ).first()
+        )
+        existing = result.scalars().first()
 
         if existing is None:
             finding = Finding(
@@ -97,7 +122,7 @@ def _save_findings(
                 cwe=draft.cwe,
             )
             session.add(finding)
-            session.flush()
+            await session.flush()
             target_finding = finding
             added += 1
         else:
@@ -120,9 +145,10 @@ def _save_findings(
                 target_finding.status = "confirmed"
             merged += 1
 
-        current_evidence = session.exec(
+        evidence_result = await session.execute(
             select(Evidence).where(Evidence.finding_id == target_finding.id)
-        ).all()
+        )
+        current_evidence = list(evidence_result.scalars().all())
         for evidence in draft.evidence:
             duplicate = any(
                 row.step_id == step.id
@@ -161,14 +187,46 @@ def _save_findings(
     return added, merged
 
 
-async def _run(argv: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
-    return await asyncio.to_thread(
-        subprocess.run, argv, capture_output=True, text=True, timeout=timeout
+async def _run(
+    argv: list[str],
+    timeout: int,
+    assessment_id: int | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run a scanner subprocess and register it for possible termination."""
+    process = await asyncio.create_subprocess_exec(
+        *argv,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    if assessment_id is not None:
+        register_process(assessment_id, process)
+
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            process.communicate(), timeout=timeout
+        )
+    except asyncio.TimeoutError:
+        process.terminate()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+        raise
+    finally:
+        if assessment_id is not None:
+            _active_processes.pop(assessment_id, None)
+
+    return subprocess.CompletedProcess(
+        argv,
+        process.returncode,
+        stdout.decode(errors="replace") if stdout else "",
+        stderr.decode(errors="replace") if stderr else "",
     )
 
 
 async def execute_action(
-    session: Session,
+    session: AsyncSession,
     assessment_id: int,
     action: str,
     target: str | None = None,
@@ -177,7 +235,7 @@ async def execute_action(
     step: Step | None = None,
 ) -> Step:
     """Resolve, run and record one catalogued action."""
-    assessment = session.get(Assessment, assessment_id)
+    assessment = await session.get(Assessment, assessment_id)
     if assessment is None:
         raise LookupError(f"assessment {assessment_id} not found")
 
@@ -189,14 +247,14 @@ async def execute_action(
     if step is None:
         step = Step(
             assessment_id=assessment_id,
-            seq=_next_seq(session, assessment_id),
+            seq=await _next_seq(session, assessment_id),
             action=action,
             target=target,
             rationale=rationale,
         )
         session.add(step)
-        session.commit()
-        session.refresh(step)
+        await session.commit()
+        await session.refresh(step)
     else:
         step.rationale = rationale or step.rationale
         step.target = target
@@ -209,8 +267,8 @@ async def execute_action(
     if not step.argv:
         step.argv = resolve_argv(action, assessment, target, step.id or 0)
     step.status = StepStatus.RUNNING.value
-    session.commit()
-    session.refresh(step)
+    await session.commit()
+    await session.refresh(step)
 
     transport = (
         "mcp"
@@ -239,7 +297,7 @@ async def execute_action(
             "argv": step.argv,
         },
     )
-    session.commit()
+    await session.commit()
 
     artifact = _artifact_dir(assessment_id) / f"{step.id}{spec.suffix}"
     try:
@@ -272,9 +330,9 @@ async def execute_action(
                         "arguments": call["arguments"],
                     },
                 )
-            session.commit()
+            await session.commit()
         else:
-            process = await _run(step.argv, timeout)
+            process = await _run(step.argv, timeout, assessment_id=assessment_id)
 
             if process.returncode not in spec.ok_codes:
                 detail = (process.stderr or process.stdout).strip()[-500:]
@@ -295,7 +353,7 @@ async def execute_action(
             step.output_sha256 = hashlib.sha256(artifact.read_bytes()).hexdigest()
 
         drafts = spec.parse(text, target, _web_port(assessment))
-        added, merged = _save_findings(session, assessment_id, step, drafts)
+        added, merged = await _save_findings(session, assessment_id, step, drafts)
         step.status = StepStatus.SUCCEEDED.value
         _audit(
             session,
@@ -339,24 +397,9 @@ async def execute_action(
         )
 
     step.ended_at = utcnow()
-    session.commit()
-    session.refresh(step)
+    await session.commit()
+    await session.refresh(step)
     return step
-
-
-def completed_actions(session: Session, assessment_id: int) -> set[tuple[str, str]]:
-    """Actions already succeeded, keyed by (action, target)."""
-    rows = session.exec(
-        select(Step).where(
-            Step.assessment_id == assessment_id,
-            Step.status == StepStatus.SUCCEEDED.value,
-        )
-    ).all()
-    return {
-        (row.action, row.target or row.argv[-1])
-        for row in rows
-        if row.action in ACTIONS and (row.target or row.argv)
-    }
 
 
 async def _run_http_probe(step: Step, assessment: Assessment) -> str:

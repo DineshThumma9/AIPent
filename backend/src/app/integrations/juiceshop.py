@@ -8,16 +8,17 @@ never fail the run — every call degrades to unknown/None.
 from __future__ import annotations
 
 import json
-import os
-import re
 from pathlib import Path
 from typing import Any
 
 import httpx
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlmodel import select
 
 from app.core.config import settings
+from app.core.db import get_async_session_ctx
 from app.core.log import get_logger
-from app.domain.models import Assessment, Audit, utcnow
+from app.domain.models import Audit
 
 log = get_logger("juiceshop")
 
@@ -25,18 +26,17 @@ ARTIFACT_KEY = "juice_shop_challenges.json"
 
 
 def _base_url() -> str:
-    # Workers inside containers cannot use 127.0.0.1; the lab publishes the
-    # bridge alias. The backend process itself talks to 127.0.0.1.
-    host = settings.lab_target_alias if settings.mcp_enabled else "127.0.0.1"
-    port = 3000
-    return f"http://{host}:{port}/api/Challenges"
+    # The backend talks to Juice Shop directly on the host; only MCP scanner
+    # containers need the bridge alias (from app.agents.gate). Using the alias
+    # here breaks challenge tracking on a host-run backend.
+    return f"{settings.juiceshop_url.rstrip('/')}/api/Challenges"
 
 
-def fetch_solved_challenges(timeout: int = 15) -> dict[str, Any] | None:
+async def fetch_solved_challenges(timeout: int = 15) -> dict[str, Any] | None:
     """Return {'solved_ids': [...], 'total': N} or None when unreachable."""
     try:
-        with httpx.Client(timeout=timeout) as client:
-            response = client.get(_base_url())
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(_base_url())
             response.raise_for_status()
             data = response.json()
         rows = data.get("data") or data.get("challenges") or []
@@ -47,35 +47,35 @@ def fetch_solved_challenges(timeout: int = 15) -> dict[str, Any] | None:
         return None
 
 
-def capture_baseline(session, assessment_id: int) -> None:
-    snapshot = fetch_solved_challenges()
+async def capture_baseline(session: AsyncSession, assessment_id: int) -> None:
+    snapshot = await fetch_solved_challenges()
     if snapshot is None:
         return
-    audit = Audit(
-        assessment_id=assessment_id,
-        event_type="benchmark.juice_shop_baseline",
-        payload={"solved_ids": snapshot["solved_ids"], "total": snapshot["total"]},
+    session.add(
+        Audit(
+            assessment_id=assessment_id,
+            event_type="benchmark.juice_shop_baseline",
+            payload={"solved_ids": snapshot["solved_ids"], "total": snapshot["total"]},
+        )
     )
-    session.add(audit)
-    session.commit()
+    await session.commit()
 
 
-def compute_delta(session, assessment_id: int) -> dict[str, Any] | None:
+async def compute_delta(
+    session: AsyncSession, assessment_id: int
+) -> dict[str, Any] | None:
     """Return {baseline_n, current_n, delta, newly_solved} or None."""
-    from sqlmodel import select
-    from app.domain.models import Assessment
-
-    baseline_rows = session.exec(
+    result = await session.execute(
         select(Audit)
         .where(Audit.assessment_id == assessment_id)
         .order_by(Audit.id)
-    ).all()
+    )
     baseline_payload = None
-    for row in baseline_rows:
+    for row in result.scalars().all():
         if row.event_type == "benchmark.juice_shop_baseline":
             baseline_payload = row.payload
 
-    current = fetch_solved_challenges()
+    current = await fetch_solved_challenges()
     if current is None:
         return None
     if not baseline_payload:
@@ -98,28 +98,26 @@ def compute_delta(session, assessment_id: int) -> dict[str, Any] | None:
     }
 
 
-def latest_delta(assessment_id: int) -> dict[str, Any] | None:
+async def latest_delta(assessment_id: int) -> dict[str, Any] | None:
     """Lift the delta for the supervisor review gate; read-only."""
-    from app.core.db import get_engine
-
-    engine = get_engine()
-    from sqlmodel import Session
-
-    with Session(engine, expire_on_commit=False) as session:
-        return compute_delta(session, assessment_id)
+    async with get_async_session_ctx() as session:
+        return await compute_delta(session, assessment_id)
 
 
-def snapshot_to_artifact(session, assessment_id: int, delta: dict) -> Path | None:
+async def snapshot_to_artifact(
+    session: AsyncSession, assessment_id: int, delta: dict
+) -> Path | None:
     """Persist the delta JSON to artifacts for the report's Juice Shop card."""
     directory = settings.artifacts_path / str(assessment_id)
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / ARTIFACT_KEY
     path.write_text(json.dumps(delta, indent=2), encoding="utf-8")
-    audit = Audit(
-        assessment_id=assessment_id,
-        event_type="benchmark.juice_shop_delta",
-        payload=delta,
+    session.add(
+        Audit(
+            assessment_id=assessment_id,
+            event_type="benchmark.juice_shop_delta",
+            payload=delta,
+        )
     )
-    session.add(audit)
-    session.commit()
+    await session.commit()
     return path

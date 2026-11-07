@@ -137,7 +137,10 @@ export function actionLabel(action: string): string {
   const labels: Record<string, string> = {
     final_review: 'Final findings review',
     recon_services: 'Service and port scan',
+    nmap_scan: 'Nmap scan',
     nikto_scan: 'Nikto web scan',
+    sqlmap_scan: 'sqlmap scan',
+    dirb_scan: 'Directory scan',
     zap_baseline: 'ZAP baseline scan',
     http_probe: 'HTTP probe',
   }
@@ -254,8 +257,14 @@ function handoffsFrom(events: AssessmentDetail['audit']): HandoffView[] {
 
 export function deriveMission(detail: AssessmentDetail): MissionView {
   const { runId, startedAt, events } = runAudit(detail)
+  // The gate always executes the oldest planned step (lowest seq), and
+  // approvals are created in that same order. Show that approval, not the
+  // newest one, so the card never describes a different command than the one
+  // the next resume will run.
   const pendingApproval =
-    detail.approvals.find((approval) => approval.decision === 'pending') ?? null
+    [...detail.approvals]
+      .sort((a, b) => a.id - b.id)
+      .find((approval) => approval.decision === 'pending') ?? null
   const finalReview =
     pendingApproval?.action === 'final_review' ? pendingApproval : null
   const handoffs = handoffsFrom(events)

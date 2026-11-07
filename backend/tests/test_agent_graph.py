@@ -1,11 +1,14 @@
+import asyncio
 import json
 
 import pytest
 from langchain_core.messages import AIMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
-from sqlmodel import Session, select
+from sqlmodel import select
 
+from app.actions import catalogue
+from app.actions.executor import _active_processes, terminate_process
 from app.agents import control
 from app.agents.context import (
     current_assessment_id,
@@ -26,35 +29,45 @@ from app.agents.tools import (
     update_finding_status,
     web_scan,
 )
-from app.actions import catalogue
-from app.core import db
 from app.core.config import settings
-from app.core.db import init_db, make_engine
+from app.core.db import (
+    get_async_session_ctx,
+    init_db,
+    make_engine,
+    set_engine,
+)
 from app.domain.models import (
     Assessment,
+    AssessmentStatus,
     Evidence,
     Finding,
     Step,
     StepStatus,
     utcnow,
 )
+from app.runtime import runner
 
 
 @pytest.fixture
 def engine(tmp_path, monkeypatch):
     engine = make_engine(f"sqlite:///{tmp_path / 'agent.db'}")
-    init_db(engine)
-    monkeypatch.setattr(db, "_engine", engine)
+    asyncio.run(init_db(engine))
+    set_engine(engine)
     monkeypatch.setattr(catalogue, "ARTIFACT_DIR", tmp_path / "artifacts")
-    with Session(engine) as session:
-        assessment = Assessment(
-            title="Three-role lab",
-            request="Authorized loopback lab",
-            targets=["127.0.0.1"],
-            ports=[3000],
-        )
-        session.add(assessment)
-        session.commit()
+
+    async def seed():
+        async with get_async_session_ctx() as session:
+            session.add(
+                Assessment(
+                    title="Three-role lab",
+                    request="Authorized loopback lab",
+                    targets=["127.0.0.1"],
+                    ports=[3000],
+                )
+            )
+            await session.commit()
+
+    asyncio.run(seed())
     return engine
 
 
@@ -96,8 +109,8 @@ def fake_executor(tmp_path):
                 )
                 step.output_path = str(artifact)
                 step.output_sha256 = "deadbeef"
-            session.commit()
-            session.refresh(step)
+            await session.commit()
+            await session.refresh(step)
             return step
 
     return Executor()
@@ -113,13 +126,14 @@ class ScriptedAgent:
         self.invocations = []
         self.results = []
 
-    def invoke(self, payload, config=None):
+    async def ainvoke(self, payload, config=None):
         self.invocations.append(payload)
         index = self.calls
         self.calls += 1
         actions = self.turns[index] if index < len(self.turns) else []
         for tool_object, arguments in actions:
-            self.results.append((tool_object.name, tool_object.invoke(arguments)))
+            result = await tool_object.ainvoke(arguments)
+            self.results.append((tool_object.name, result))
         return {
             "messages": [
                 *payload["messages"],
@@ -147,20 +161,26 @@ def _graph(agents, executor):
 
 
 def _patch_bonus(monkeypatch):
+    async def no_baseline(*args, **kwargs):
+        return None
+
+    async def no_delta(assessment_id):
+        return None
+
     monkeypatch.setattr(
-        "app.integrations.juiceshop.capture_baseline", lambda *args, **kwargs: None
+        "app.integrations.juiceshop.capture_baseline", no_baseline
     )
-    monkeypatch.setattr("app.agents.graph._challenge_delta", lambda assessment_id: None)
+    monkeypatch.setattr("app.agents.graph._challenge_delta", no_delta)
 
 
 def _fake_report(tmp_path, monkeypatch):
-    def report(session, assessment_id):
+    async def report(session, assessment_id):
         path = tmp_path / "report.pdf"
         path.write_bytes(b"%PDF-1.4 fake")
-        assessment = session.get(Assessment, assessment_id)
+        assessment = await session.get(Assessment, assessment_id)
         assessment.report_path = str(path)
         assessment.report_sha256 = "abc123"
-        session.commit()
+        await session.commit()
         return path
 
     monkeypatch.setattr("app.agents.graph.generate_report", report)
@@ -185,42 +205,65 @@ def _require_approval_for_all(monkeypatch):
     _gate_module._policy_cache = None
 
 
+async def _run_db(fn):
+    async with get_async_session_ctx() as session:
+        return await fn(session)
+
+
+def _db(fn):
+    return asyncio.run(_run_db(fn))
+
+
 def _seed_service(engine):
-    with Session(engine) as session:
-        finding = Finding(
-            assessment_id=1,
-            canonical_key="nmap:127.0.0.1:tcp/3000",
-            asset="127.0.0.1",
-            endpoint="tcp/3000",
-            title="Open tcp/3000 (http)",
-            severity="info",
-            status="suspected",
-        )
-        session.add(finding)
-        session.commit()
-        session.refresh(finding)
-        return finding.id
+    async def seed():
+        async with get_async_session_ctx() as session:
+            finding = Finding(
+                assessment_id=1,
+                canonical_key="nmap:127.0.0.1:tcp/3000",
+                asset="127.0.0.1",
+                endpoint="tcp/3000",
+                title="Open tcp/3000 (http)",
+                severity="info",
+                status="suspected",
+            )
+            session.add(finding)
+            await session.commit()
+            await session.refresh(finding)
+            return finding.id
+
+    return asyncio.run(seed())
 
 
 def _seed_finding(engine, status="suspected"):
-    with Session(engine) as session:
-        finding = Finding(
-            assessment_id=1,
-            canonical_key="web:exposed-file:127.0.0.1:3000",
-            asset="127.0.0.1",
-            endpoint="/ftp/acquisitions.md",
-            title="Exposed acquisitions document",
-            severity="high",
-            status=status,
-        )
-        session.add(finding)
-        session.commit()
-        session.refresh(finding)
-        return finding.id
+    async def seed():
+        async with get_async_session_ctx() as session:
+            finding = Finding(
+                assessment_id=1,
+                canonical_key="web:exposed-file:127.0.0.1:3000",
+                asset="127.0.0.1",
+                endpoint="/ftp/acquisitions.md",
+                title="Exposed acquisitions document",
+                severity="high",
+                status=status,
+            )
+            session.add(finding)
+            await session.commit()
+            await session.refresh(finding)
+            return finding.id
+
+    return asyncio.run(seed())
+
+
+def _prepare(actor="tester"):
+    async def run():
+        async with get_async_session_ctx() as session:
+            await prepare_run(session, 1, actor=actor)
+
+    asyncio.run(run())
 
 
 def _resume(graph, decision="approved"):
-    return graph.invoke(
+    return asyncio.run(graph.ainvoke(
         Command(
             resume={
                 "decision": decision,
@@ -229,11 +272,11 @@ def _resume(graph, decision="approved"):
             }
         ),
         graph_config(1),
-    )
+    ))
 
 
 def _interrupt(graph):
-    snapshot = graph.get_state(graph_config(1))
+    snapshot = asyncio.run(graph.aget_state(graph_config(1)))
     return snapshot, snapshot.interrupts[0].value
 
 
@@ -246,8 +289,7 @@ def test_three_roles_run_in_order_with_separate_transcripts(
     service_id = _seed_service(engine)
     finding_id = _seed_finding(engine)
 
-    with Session(engine) as session:
-        prepare_run(session, 1, actor="tester")
+    _prepare()
 
     agents = _agents(
         {
@@ -321,7 +363,7 @@ def test_three_roles_run_in_order_with_separate_transcripts(
         }
     )
     graph = _graph(agents, fake_executor)
-    graph.invoke(initial_state(1, "run-three"), graph_config(1))
+    asyncio.run(graph.ainvoke(initial_state(1, "run-three"), graph_config(1)))
 
     for expected_action in ("recon_services", "nikto_scan", "http_probe"):
         snapshot, pending = _interrupt(graph)
@@ -336,24 +378,27 @@ def test_three_roles_run_in_order_with_separate_transcripts(
     assert pending["gate"] == "review"
     _resume(graph)
 
-    assert graph.get_state(graph_config(1)).next == ()
-    with Session(engine) as session:
-        assessment = session.get(Assessment, 1)
+    assert asyncio.run(graph.aget_state(graph_config(1))).next == ()
+
+    async def check(session):
+        assessment = await session.get(Assessment, 1)
         assert assessment.status == "completed"
         assert assessment.report_path.endswith("report.pdf")
-        history = control.role_history(session, 1, "run-three")
+        history = await control.role_history(session, 1, "run-three")
         assert [row["role"] for row in history] == [
             "recon",
             "discovery",
             "validation",
         ]
-        handoffs = control.handoff_history(session, 1, "run-three")
+        handoffs = await control.handoff_history(session, 1, "run-three")
         assert [row["role"] for row in handoffs] == [
             "recon",
             "discovery",
             "validation",
         ]
         assert handoffs[-1]["next_recommendation"] == "review"
+
+    _db(check)
 
     # Each role gets its own local message list. Discovery and validation must
     # never receive the reconnaissance transcript.
@@ -385,7 +430,7 @@ def test_rejected_action_is_never_executed(engine, fake_executor, tmp_path, monk
         }
     )
     graph = _graph(agents, fake_executor)
-    graph.invoke(initial_state(1, "run-reject"), graph_config(1))
+    asyncio.run(graph.ainvoke(initial_state(1, "run-reject"), graph_config(1)))
 
     pending = _interrupt(graph)[1]
     assert pending["action"] == "recon_services"
@@ -396,10 +441,13 @@ def test_rejected_action_is_never_executed(engine, fake_executor, tmp_path, monk
     assert pending["gate"] == "review"
     assert fake_executor.calls == []
 
-    with Session(engine) as session:
-        step = session.exec(select(Step)).one()
+    async def check(session):
+        result = await session.execute(select(Step))
+        step = result.scalars().one()
         assert step.status == "rejected"
         assert step.error == "test"
+
+    _db(check)
 
 
 def test_each_queued_action_gets_its_own_gate(
@@ -474,7 +522,7 @@ def test_each_queued_action_gets_its_own_gate(
         }
     )
     graph = _graph(agents, fake_executor)
-    graph.invoke(initial_state(1, "run-multi"), graph_config(1))
+    asyncio.run(graph.ainvoke(initial_state(1, "run-multi"), graph_config(1)))
 
     first = _interrupt(graph)[1]
     assert first["action"] == "recon_services"
@@ -497,8 +545,9 @@ def test_each_queued_action_gets_its_own_gate(
     assert "review" in snapshot.next
     assert pending["gate"] == "review"
 
-    with Session(engine) as session:
-        steps = session.exec(select(Step).order_by(Step.seq)).all()
+    async def check(session):
+        result = await session.execute(select(Step).order_by(Step.seq))
+        steps = list(result.scalars().all())
         assert [step.action for step in steps] == [
             "recon_services",
             "nikto_scan",
@@ -509,6 +558,8 @@ def test_each_queued_action_gets_its_own_gate(
         assert steps[1].status == "succeeded"
         assert steps[2].status == "rejected"
         assert steps[2].error == "test"
+
+    _db(check)
 
     assert [call["action"] for call in fake_executor.calls] == [
         "recon_services",
@@ -585,7 +636,7 @@ def test_probe_evidence_unlocks_a_verdict(engine, fake_executor, tmp_path, monke
         }
     )
     graph = _graph(agents, fake_executor)
-    graph.invoke(initial_state(1, "run-verify"), graph_config(1))
+    asyncio.run(graph.ainvoke(initial_state(1, "run-verify"), graph_config(1)))
 
     assert _interrupt(graph)[1]["action"] == "recon_services"
     _resume(graph)
@@ -599,12 +650,15 @@ def test_probe_evidence_unlocks_a_verdict(engine, fake_executor, tmp_path, monke
     assert "review" in snapshot.next
     assert pending["gate"] == "review"
 
-    with Session(engine) as session:
-        finding = session.get(Finding, finding_id)
+    async def check(session):
+        finding = await session.get(Finding, finding_id)
         assert finding.status == "confirmed"
-        evidence = session.exec(select(Evidence)).one()
+        result = await session.execute(select(Evidence))
+        evidence = result.scalars().one()
         assert evidence.locator["tool"] == "http_probe"
         assert evidence.step_id is not None
+
+    _db(check)
 
     results = dict(agents["validation"].results)
     assert results["update_finding_status"]["updated"] is True
@@ -632,17 +686,17 @@ def test_role_tool_sets_are_separate_and_enforced(engine):
     token_r = current_run_id.set("run-policy")
     token_role = current_role.set("recon")
     try:
-        refused = http_probe.invoke(
+        refused = asyncio.run(http_probe.ainvoke(
             {
                 "method": "GET",
                 "url": "http://127.0.0.1:3000/",
             }
-        )
+        ))
         assert "validation role" in refused["error"]
 
-        refused_scan = web_scan.invoke(
+        refused_scan = asyncio.run(web_scan.ainvoke(
             {"scanner": "nikto", "target": "127.0.0.1"}
-        )
+        ))
         assert "discovery role" in refused_scan["error"]
     finally:
         current_role.reset(token_role)
@@ -656,13 +710,13 @@ def test_verdict_requires_executed_probe_evidence(engine):
     token_r = current_run_id.set("run-verdict")
     token_role = current_role.set("validation")
     try:
-        refused = update_finding_status.invoke(
+        refused = asyncio.run(update_finding_status.ainvoke(
             {
                 "finding_id": finding_id,
                 "status": "confirmed",
                 "reasoning": "no probe yet",
             }
-        )
+        ))
         assert "no executed http_probe evidence" in refused["error"]
     finally:
         current_role.reset(token_role)
@@ -676,34 +730,36 @@ def test_handoffs_are_scoped_to_one_run(engine):
 
     try:
         token_r = current_run_id.set("run-a")
-        first = handoff.invoke(
+        first = asyncio.run(handoff.ainvoke(
             {
                 "summary": "Port 3000 is open.",
                 "next_recommendation": "review",
             }
-        )
+        ))
         assert first["handoff_recorded"] is True
         current_run_id.reset(token_r)
 
         token_b = current_run_id.set("run-b")
-        second = handoff.invoke(
+        second = asyncio.run(handoff.ainvoke(
             {
                 "summary": "Nothing else to do.",
                 "next_recommendation": "review",
             }
-        )
+        ))
         assert second["handoff_recorded"] is True
         current_run_id.reset(token_b)
     finally:
         current_role.reset(token_role)
         current_assessment_id.reset(token_a)
 
-    with Session(engine) as session:
-        run_a = control.handoff_history(session, 1, "run-a")
-        run_b = control.handoff_history(session, 1, "run-b")
+    async def check(session):
+        run_a = await control.handoff_history(session, 1, "run-a")
+        run_b = await control.handoff_history(session, 1, "run-b")
         assert [row["summary"] for row in run_a] == ["Port 3000 is open."]
         assert [row["summary"] for row in run_b] == ["Nothing else to do."]
-        assert control.latest_handoff(session, 1, "missing-run") is None
+        assert await control.latest_handoff(session, 1, "missing-run") is None
+
+    _db(check)
 
 
 def test_scope_duplicate_and_budget_refusals(engine, monkeypatch):
@@ -711,27 +767,97 @@ def test_scope_duplicate_and_budget_refusals(engine, monkeypatch):
     token_r = current_run_id.set("run-policy")
     token_role = current_role.set("recon")
     try:
-        out_of_scope = scan_services.invoke(
+        out_of_scope = asyncio.run(scan_services.ainvoke(
             {"target": "10.0.0.1", "rationale": "not authorised"}
-        )
+        ))
         assert "not in scope" in out_of_scope["error"]
 
-        first = scan_services.invoke(
+        first = asyncio.run(scan_services.ainvoke(
             {"target": "127.0.0.1", "rationale": "discovery"}
-        )
+        ))
         assert first["queued"] is True
 
-        duplicate = scan_services.invoke(
+        duplicate = asyncio.run(scan_services.ainvoke(
             {"target": "127.0.0.1", "rationale": "again"}
-        )
+        ))
         assert duplicate["duplicate_of_step"] == first["step_id"]
 
         monkeypatch.setattr(settings, "max_steps", 0)
-        exhausted = scan_services.invoke(
+        exhausted = asyncio.run(scan_services.ainvoke(
             {"target": "127.0.0.1", "rationale": "over budget"}
-        )
+        ))
         assert "budget exhausted" in exhausted["error"]
     finally:
         current_role.reset(token_role)
         current_run_id.reset(token_r)
         current_assessment_id.reset(token_a)
+
+
+def test_stop_run_marks_assessment_cancelled(engine):
+    """stop_run marks a running assessment cancelled and clears state."""
+    async def setup():
+        async with get_async_session_ctx() as session:
+            assessment = Assessment(
+                title="stop test",
+                request="test",
+                targets=["127.0.0.1"],
+                ports=[3000],
+                status=AssessmentStatus.RUNNING.value,
+            )
+            session.add(assessment)
+            await session.commit()
+            await session.refresh(assessment)
+
+    asyncio.run(setup())
+
+    result = asyncio.run(runner.stop_run(1))
+
+    assert result.status == AssessmentStatus.CANCELLED.value
+
+    async def check(session):
+        assessment = await session.get(Assessment, 1)
+        assert assessment.status == AssessmentStatus.CANCELLED.value
+        assert assessment.finished_at is not None
+
+    _db(check)
+
+
+def test_stop_run_terminates_inflight_process(engine, monkeypatch):
+    """stop_run terminates a registered subprocess for the assessment."""
+    async def setup():
+        async with get_async_session_ctx() as session:
+            assessment = Assessment(
+                title="stop proc test",
+                request="test",
+                targets=["127.0.0.1"],
+                ports=[3000],
+                status=AssessmentStatus.RUNNING.value,
+            )
+            session.add(assessment)
+            await session.commit()
+
+    asyncio.run(setup())
+
+    # Register a fake process that is still running
+    class FakeProcess:
+        returncode = None
+
+        def terminate(self):
+            self.terminated = True
+
+        def kill(self):
+            self.killed = True
+
+        async def wait(self):
+            return None
+
+    proc = FakeProcess()
+    proc.terminated = False
+    proc.killed = False
+
+    _active_processes[1] = proc
+
+    asyncio.run(runner.stop_run(1))
+
+    assert proc.terminated is True
+    assert 1 not in _active_processes

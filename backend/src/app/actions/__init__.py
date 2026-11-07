@@ -18,7 +18,7 @@ from app.actions.catalogue import (
     resolve_argv,
     transport_target,
 )
-from app.actions.executor import MCPResult, completed_actions, execute_action
+from app.actions.executor import MCPResult, execute_action
 
 __all__ = [
     "ACTIONS",
@@ -28,7 +28,6 @@ __all__ = [
     "ScopeError",
     "UnknownAction",
     "check_scope",
-    "completed_actions",
     "execute_action",
     "get_action",
     "mcp_command",

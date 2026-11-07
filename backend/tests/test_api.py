@@ -47,8 +47,8 @@ def test_scan_route_marks_assessment_completed(client, monkeypatch):
             exit_code=0,
         )
         session.add(step)
-        session.commit()
-        session.refresh(step)
+        await session.commit()
+        await session.refresh(step)
         return step
 
     monkeypatch.setattr("app.api.routes.run_scan", fake_run_scan)

@@ -66,6 +66,7 @@ class Settings(BaseSettings):
     mcp_timeout: int = 600
     mcp_handshake_timeout: int = 30
     lab_target_alias: str = "host.docker.internal"
+    juiceshop_url: str = "http://127.0.0.1:3000"
 
     # Per-run agent budgets. The LLM chooses actions; these bounds stop a loop.
     max_validation_probes: int = 10
@@ -105,12 +106,6 @@ class Settings(BaseSettings):
     @property
     def huggingface_api_key(self) -> str | None:
         return os.getenv("AIPENT_HUGGINGFACE_API_KEY") or os.getenv("HUGGINGFACE_API_KEY")
-
-    def action_policies(self) -> dict[str, Any]:
-        """Load per-action gate policies from settings JSON override."""
-        from app.core.policy import load_policies_from_json
-
-        return load_policies_from_json(self.action_policies_json)
 
 
 settings = Settings()

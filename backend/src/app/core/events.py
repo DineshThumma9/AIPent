@@ -13,9 +13,8 @@ from typing import Any
 
 from fastapi import Request
 from pydantic import BaseModel, Field
-from sqlalchemy.engine import Engine
-from sqlmodel import Session
 
+from app.core.db import get_async_session_ctx
 from app.core.log import get_logger
 from app.domain.models import Approval, Finding, Step, utcnow
 from app.api.queries import load_assessment_detail
@@ -201,18 +200,17 @@ def format_sse(event: StreamEvent) -> str:
     )
 
 
-def _read_detail(engine: Engine, assessment_id: int) -> AssessmentDetail | None:
-    with Session(engine, expire_on_commit=False) as session:
-        return load_assessment_detail(session, assessment_id)
+async def _read_detail(assessment_id: int) -> AssessmentDetail | None:
+    async with get_async_session_ctx() as session:
+        return await load_assessment_detail(session, assessment_id)
 
 
 async def stream_assessment_events(
-    engine: Engine,
     assessment_id: int,
     request: Request,
     once: bool = False,
 ):
-    detail = await asyncio.to_thread(_read_detail, engine, assessment_id)
+    detail = await _read_detail(assessment_id)
     if detail is None:
         return
 
@@ -230,7 +228,7 @@ async def stream_assessment_events(
                 return
             await asyncio.sleep(POLL_SECONDS)
 
-            detail = await asyncio.to_thread(_read_detail, engine, assessment_id)
+            detail = await _read_detail(assessment_id)
             if detail is None:
                 return
 

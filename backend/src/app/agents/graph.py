@@ -9,28 +9,32 @@ Each specialist is a real graph node with its own prompt, tool list and local
 message history. The action gate is still the only place an action executes and
 is shared by all three roles. Routing is owned by Python and driven by typed
 handoffs; no role can call another role's tools or jump a stage.
+
+Every node and every database helper is async: the graph runs under
+``AsyncSqliteSaver`` and only ``AsyncSession`` is used.
 """
 from __future__ import annotations
-from langchain_huggingface import ChatHuggingFace
-from langchain_openrouter import ChatOpenRouter
-from langchain_ollama import ChatOllama
-from langchain_google_genai import ChatGoogleGenerativeAI as ChatGoogleGenAI
 
-from langchain_mistralai import ChatMistralAI
-from langchain_groq import ChatGroq
-
+import asyncio
 import json
-import sqlite3
+import os
 from typing import Any, Callable, TypedDict
 from uuid import uuid4
 
 from langchain.agents import create_agent
 from langchain_core.messages import AnyMessage, HumanMessage
-from langgraph.checkpoint.sqlite import SqliteSaver
+from langchain_groq import ChatGroq
+from langchain_google_genai import ChatGoogleGenerativeAI as ChatGoogleGenAI
+from langchain_huggingface import ChatHuggingFace
+from langchain_mistralai import ChatMistralAI
+from langchain_ollama import ChatOllama
+from langchain_openrouter import ChatOpenRouter
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 from sqlalchemy import func
-from sqlmodel import Session, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlmodel import select
 
 from app.agents.control import (
     ROLE_TURN_CAPS,
@@ -40,20 +44,18 @@ from app.agents.control import (
     role_event_count,
     role_history,
 )
-from app.agents.gate import run_gate_step
+from app.agents.gate import ACTIVE_STATES, run_gate_step
 from app.agents.middleware import middleware_setup
 from app.agents.prompts import ROLE_PROMPTS
 from app.agents.tools import ROLE_TOOLS
 from app.core.config import settings
-from app.core.db import get_engine
+from app.core.db import get_async_session_ctx
 from app.core.log import get_logger
 from app.domain.models import (
     Approval,
     Assessment,
     AssessmentStatus,
-    Audit,
     Decision,
-    Evidence,
     Finding,
     Step,
     StepStatus,
@@ -89,7 +91,9 @@ class AssessmentState(TypedDict, total=False):
     last_message: str
 
 
-def _audit(session: Session, assessment_id: int, event_type: str, payload: dict) -> None:
+def _audit(
+    session: AsyncSession, assessment_id: int, event_type: str, payload: dict
+) -> None:
     audit(session, assessment_id, event_type, payload, actor="system")
 
 
@@ -129,28 +133,26 @@ def _last_ai_text(messages: list) -> str:
     return ""
 
 
-def _is_cancelled(assessment_id: int) -> bool:
-    with Session(get_engine(), expire_on_commit=False) as session:
-        assessment = session.get(Assessment, assessment_id)
+async def _is_cancelled(assessment_id: int) -> bool:
+    async with get_async_session_ctx() as session:
+        assessment = await session.get(Assessment, assessment_id)
         return (
             assessment is not None
             and assessment.status == AssessmentStatus.CANCELLED.value
         )
 
 
-def _has_planned(assessment_id: int) -> bool:
-    with Session(get_engine(), expire_on_commit=False) as session:
-        return (
-            session.exec(
-                select(Step.id)
-                .where(
-                    Step.assessment_id == assessment_id,
-                    Step.status == StepStatus.PLANNED.value,
-                )
-                .limit(1)
-            ).first()
-            is not None
+async def _has_planned(assessment_id: int) -> bool:
+    async with get_async_session_ctx() as session:
+        result = await session.execute(
+            select(Step.id)
+            .where(
+                Step.assessment_id == assessment_id,
+                Step.status == StepStatus.PLANNED.value,
+            )
+            .limit(1)
         )
+        return result.scalars().first() is not None
 
 
 def _finding_row(row: Finding) -> dict[str, Any]:
@@ -199,33 +201,43 @@ def _rank_candidates(rows: list[Finding]) -> list[Finding]:
     )
 
 
-def _role_digest(state: AssessmentState, role: str) -> str:
+async def _role_digest(state: AssessmentState, role: str) -> str:
     """Build a bounded, priority-ranked digest for one role."""
     assessment_id = state["assessment_id"]
     run_id = state["run_id"]
-    with Session(get_engine(), expire_on_commit=False) as session:
-        assessment = session.get(Assessment, assessment_id)
+    async with get_async_session_ctx() as session:
+        assessment = await session.get(Assessment, assessment_id)
         if assessment is None:
             raise LookupError(f"assessment {assessment_id} not found")
 
-        findings = session.exec(
+        result = await session.execute(
             select(Finding).where(Finding.assessment_id == assessment_id)
-        ).all()
-        steps = session.exec(
+        )
+        findings = list(result.scalars().all())
+        result = await session.execute(
             select(Step)
             .where(Step.assessment_id == assessment_id)
             .order_by(Step.seq.desc())
             .limit(8)
-        ).all()
-        queued = role_event_count(
+        )
+        steps = list(result.scalars().all())
+        queued = await role_event_count(
             session, assessment_id, run_id, role, "action.queued"
         )
-        last_handoff = latest_handoff(session, assessment_id, run_id)
-        history = role_history(session, assessment_id, run_id)
+        last_handoff = await latest_handoff(session, assessment_id, run_id)
+        history = await role_history(session, assessment_id, run_id)
 
     services = _services(findings)
     candidates = _rank_candidates(_candidates(findings))
-    probes_used = sum(1 for step in steps if step.action == "http_probe")
+    probes_used = (
+        await session.execute(
+            select(func.count(Step.id)).where(
+                Step.assessment_id == assessment_id,
+                Step.action == "http_probe",
+                Step.status.in_(ACTIVE_STATES),
+            )
+        )
+    ).scalar() or 0
 
     if role == "recon":
         findings_payload = services[:12]
@@ -276,9 +288,27 @@ def _role_digest(state: AssessmentState, role: str) -> str:
         "Use only your role's tools. Read the observations before deciding. "
         "If a tool refuses an action, adapt once and hand off. Never claim an "
         "action ran unless it appears in recent_steps with a terminal status. "
-        "Call handoff when this role has finished its work."
+        "A queued action runs only after this turn ends; do not poll for its "
+        "result. Call handoff immediately after queueing the action you need."
     )
 
+
+def _ollama_kwargs() -> dict[str, Any]:
+    """Connection options for Ollama, local or cloud.
+
+    ``AIPENT_LLM_BASE_URL`` selects the endpoint (for example
+    ``https://ollama.com``). When ``OLLAMA_API_KEY`` is present it is sent as a
+    bearer token, which is what the hosted service requires.
+    """
+    kwargs: dict[str, Any] = {}
+    if settings.llm_base_url:
+        kwargs["base_url"] = settings.llm_base_url
+    client_kwargs: dict[str, Any] = {"timeout": settings.llm_timeout}
+    api_key = os.getenv("OLLAMA_API_KEY")
+    if api_key:
+        client_kwargs["headers"] = {"Authorization": f"Bearer {api_key}"}
+    kwargs["client_kwargs"] = client_kwargs
+    return kwargs
 
 
 models = {
@@ -289,7 +319,9 @@ models = {
         max_tokens=settings.llm_max_tokens,
     ),
     "ollama": lambda model_name: ChatOllama(
-        name=model_name or settings.ollama_model,
+        model=model_name or settings.ollama_model,
+        num_predict=settings.llm_max_tokens,
+        **_ollama_kwargs(),
     ),
     "mistralai": lambda model_name: ChatMistralAI(
         model=model_name,
@@ -317,19 +349,6 @@ models = {
     ),
 }
 
-# Fallback models per provider, used when the primary model hits a token limit.
-# Loaded from settings; defaults to smaller/cheaper variants of each provider.
-FALLBACK_MODELS: dict[str, str] = {
-    "groq": settings.groq_model or "ALLaM-2-7b",
-    "ollama": settings.ollama_model,
-    "mistralai": settings.mistral_model,
-    "mistral": settings.mistral_model,
-    "gemini": settings.gemini_model,
-    "openrouter": settings.openrouter_model,
-    "huggingface_model": settings.huggingface_model,
-    "huggingface": settings.huggingface_model,
-}
-
 
 def _build_model():
     provider = settings.llm_provider.lower()
@@ -337,17 +356,6 @@ def _build_model():
     if provider not in models:
         raise ValueError(f"Provider {provider!r} not available")
     return models[provider](model_name)
-
-
-def _build_fallback_model():
-    """Build the fallback model for the configured provider (token-limit fallback)."""
-    provider = settings.llm_provider.lower()
-    fallback_name = FALLBACK_MODELS.get(provider)
-    if not fallback_name:
-        return None
-    if provider not in models:
-        return None
-    return models[provider](fallback_name)
 
 
 def create_role_agent(role: str):
@@ -366,8 +374,10 @@ def create_role_agent(role: str):
     )
 
 
-def _pending_review(session: Session, assessment_id: int) -> Approval | None:
-    return session.exec(
+async def _pending_review(
+    session: AsyncSession, assessment_id: int
+) -> Approval | None:
+    result = await session.execute(
         select(Approval)
         .where(
             Approval.assessment_id == assessment_id,
@@ -375,7 +385,8 @@ def _pending_review(session: Session, assessment_id: int) -> Approval | None:
             Approval.decision == Decision.PENDING.value,
         )
         .order_by(Approval.id)
-    ).first()
+    )
+    return result.scalars().first()
 
 
 def _read_decision(decision: Any) -> tuple[bool, str, str]:
@@ -386,30 +397,30 @@ def _read_decision(decision: Any) -> tuple[bool, str, str]:
     return approved, payload.get("actor") or "analyst", payload.get("reason") or ""
 
 
-def _challenge_delta(assessment_id: int) -> dict | None:
+async def _challenge_delta(assessment_id: int) -> dict | None:
     from app.integrations.juiceshop import latest_delta
 
     try:
-        return latest_delta(assessment_id)
+        return await latest_delta(assessment_id)
     except Exception as exc:  # noqa: BLE001 - the delta is a bonus, not a gate
         log.debug("challenge delta unavailable: %s", exc)
         return None
 
 
-def _discovery_eligible(assessment_id: int) -> bool:
+async def _discovery_eligible(assessment_id: int) -> bool:
     """At least one service finding or a completed recon scan exists."""
-    with Session(get_engine(), expire_on_commit=False) as session:
-        service = session.exec(
+    async with get_async_session_ctx() as session:
+        result = await session.execute(
             select(Finding.id)
             .where(
                 Finding.assessment_id == assessment_id,
                 Finding.canonical_key.like("nmap:%"),
             )
             .limit(1)
-        ).first()
-        if service is not None:
+        )
+        if result.scalars().first() is not None:
             return True
-        recon = session.exec(
+        result = await session.execute(
             select(Step.id)
             .where(
                 Step.assessment_id == assessment_id,
@@ -417,25 +428,26 @@ def _discovery_eligible(assessment_id: int) -> bool:
                 Step.status == StepStatus.SUCCEEDED.value,
             )
             .limit(1)
-        ).first()
-        return recon is not None
+        )
+        return result.scalars().first() is not None
 
 
-def _validation_eligible(assessment_id: int) -> bool:
-    with Session(get_engine(), expire_on_commit=False) as session:
-        rows = session.exec(
+async def _validation_eligible(assessment_id: int) -> bool:
+    async with get_async_session_ctx() as session:
+        result = await session.execute(
             select(Finding).where(Finding.assessment_id == assessment_id)
-        ).all()
+        )
+        rows = list(result.scalars().all())
     return bool(_candidates(rows))
 
 
-def _next_route(state: AssessmentState) -> str:
+async def _next_route(state: AssessmentState) -> str:
     assessment_id = state["assessment_id"]
     run_id = state["run_id"]
     role = state.get("role", "recon")
 
-    with Session(get_engine(), expire_on_commit=False) as session:
-        handoff = latest_handoff(session, assessment_id, run_id, role)
+    async with get_async_session_ctx() as session:
+        handoff = await latest_handoff(session, assessment_id, run_id, role)
 
     if handoff:
         recommendation = str(handoff.get("next_recommendation") or "review")
@@ -443,16 +455,16 @@ def _next_route(state: AssessmentState) -> str:
         # about its recommended next step. The operator's approve/reject
         # decision at the gate serves as the answer — we don't override the
         # recommendation just because input was requested.
-        if recommendation == "discovery" and _discovery_eligible(assessment_id):
+        if recommendation == "discovery" and await _discovery_eligible(assessment_id):
             return "discovery"
-        if recommendation == "validation" and _validation_eligible(assessment_id):
+        if recommendation == "validation" and await _validation_eligible(assessment_id):
             return "validation"
         # Safety net: if discovery recommended review but there are unvalidated
         # suspected findings, route to validation so they get tested (e.g. via
         # http_probe) before the run concludes. Don't loop if validation itself
         # just recommended review.
         last_role = handoff.get("role")
-        if last_role != "validation" and _validation_eligible(assessment_id):
+        if last_role != "validation" and await _validation_eligible(assessment_id):
             return "validation"
         return "review"
 
@@ -460,7 +472,7 @@ def _next_route(state: AssessmentState) -> str:
     if turns < ROLE_TURN_CAPS[role]:
         return role
 
-    with Session(get_engine(), expire_on_commit=False) as session:
+    async with get_async_session_ctx() as session:
         _audit(
             session,
             assessment_id,
@@ -472,7 +484,7 @@ def _next_route(state: AssessmentState) -> str:
                 "reason": "role did not hand off before the turn cap",
             },
         )
-        session.commit()
+        await session.commit()
     return "review"
 
 
@@ -495,11 +507,11 @@ def build_assessment_graph(
             agents[role] = make_agent(role)
         return agents[role]
 
-    def intake(state: AssessmentState) -> dict:
+    async def intake(state: AssessmentState) -> dict:
         assessment_id = state["assessment_id"]
         run_id = state["run_id"]
-        with Session(get_engine(), expire_on_commit=False) as session:
-            assessment = session.get(Assessment, assessment_id)
+        async with get_async_session_ctx() as session:
+            assessment = await session.get(Assessment, assessment_id)
             if assessment is None:
                 raise LookupError(f"assessment {assessment_id} not found")
             if not assessment.targets:
@@ -524,11 +536,11 @@ def build_assessment_graph(
                     "roles": list(ROLE_ORDER),
                 },
             )
-            history = role_history(session, assessment_id, run_id)
+            history = await role_history(session, assessment_id, run_id)
             if not history:
                 record_role(session, assessment_id, run_id, "recon", "run start")
-                history = role_history(session, assessment_id, run_id)
-            session.commit()
+                history = await role_history(session, assessment_id, run_id)
+            await session.commit()
 
         return {
             "role": "recon",
@@ -545,7 +557,7 @@ def build_assessment_graph(
             "last_message": "Intake accepted; recon is choosing the first action.",
         }
 
-    def role_node(state: AssessmentState, role: str) -> dict:
+    async def role_node(state: AssessmentState, role: str) -> dict:
         from app.agents.context import (
             current_assessment_id,
             current_role,
@@ -558,17 +570,17 @@ def build_assessment_graph(
         token_run = current_run_id.set(run_id)
         token_role = current_role.set(role)
         try:
-            if _is_cancelled(assessment_id):
+            if await _is_cancelled(assessment_id):
                 return {"finished": True, "last_message": "Run cancelled."}
 
             turns = dict(state.get("turns", {}))
             turn_number = int(turns.get(role, 0))
-            with Session(get_engine(), expire_on_commit=False) as session:
-                assessment = session.get(Assessment, assessment_id)
+            async with get_async_session_ctx() as session:
+                assessment = await session.get(Assessment, assessment_id)
                 if assessment is None:
                     raise LookupError(f"assessment {assessment_id} not found")
                 assessment.status = AssessmentStatus.RUNNING.value
-                history = role_history(session, assessment_id, run_id)
+                history = await role_history(session, assessment_id, run_id)
                 if not history or history[-1].get("role") != role:
                     record_role(
                         session,
@@ -578,25 +590,26 @@ def build_assessment_graph(
                         "role turn",
                         from_role=state.get("role"),
                     )
-                    history = role_history(session, assessment_id, run_id)
-                session.commit()
+                    history = await role_history(session, assessment_id, run_id)
+                await session.commit()
 
-            digest = _role_digest(state, role)
+            digest = await _role_digest(state, role)
             history_messages = list(
                 state.get("role_messages", {}).get(role, [])
             )[-6:]
             prompt = HumanMessage(content=digest)
             payload = {"messages": [*history_messages, prompt]}
             config = {"recursion_limit": settings.agent_recursion_limit}
-            result = get_agent(role).invoke(payload, config=config)
+            result = await get_agent(role).ainvoke(payload, config=config)
             new_messages = _new_messages(history_messages, prompt, result)
             last_message = _last_ai_text(new_messages)
             if not last_message:
                 last_message = _last_ai_text(result.get("messages", []))
 
             turns[role] = turn_number + 1
-            with Session(get_engine(), expire_on_commit=False) as session:
-                history = role_history(session, assessment_id, run_id)
+
+            async with get_async_session_ctx() as session:
+                history = await role_history(session, assessment_id, run_id)
                 _audit(
                     session,
                     assessment_id,
@@ -608,7 +621,7 @@ def build_assessment_graph(
                         "message": last_message[:500],
                     },
                 )
-                session.commit()
+                await session.commit()
 
             return {
                 "role": role,
@@ -627,30 +640,31 @@ def build_assessment_graph(
             current_run_id.reset(token_run)
             current_assessment_id.reset(token_assessment)
 
-    def recon_node(state: AssessmentState) -> dict:
-        return role_node(state, "recon")
+    async def recon_node(state: AssessmentState) -> dict:
+        return await role_node(state, "recon")
 
-    def discovery_node(state: AssessmentState) -> dict:
-        return role_node(state, "discovery")
+    async def discovery_node(state: AssessmentState) -> dict:
+        return await role_node(state, "discovery")
 
-    def validation_node(state: AssessmentState) -> dict:
-        return role_node(state, "validation")
+    async def validation_node(state: AssessmentState) -> dict:
+        return await role_node(state, "validation")
 
-    def gate_node(state: AssessmentState) -> dict:
+    async def gate_node(state: AssessmentState) -> dict:
         assessment_id = state["assessment_id"]
-        if _is_cancelled(assessment_id):
+        if await _is_cancelled(assessment_id):
             return {"last_message": "Run cancelled."}
 
         role = state.get("role", "recon")
-        result = run_gate_step(assessment_id, role, interrupt, executor=executor)
+        result = await run_gate_step(assessment_id, role, interrupt, executor=executor)
         results = [result] if result else []
 
-        with Session(get_engine(), expire_on_commit=False) as session:
-            count = session.exec(
+        async with get_async_session_ctx() as session:
+            count_result = await session.execute(
                 select(func.count(Step.id)).where(
                     Step.assessment_id == assessment_id
                 )
-            ).one()
+            )
+            count = count_result.scalar()
 
         new_plan = [
             {
@@ -668,45 +682,48 @@ def build_assessment_graph(
             "steps": count or 0,
         }
 
-    def route_after_role(state: AssessmentState) -> str:
+    async def route_after_role(state: AssessmentState) -> str:
         assessment_id = state["assessment_id"]
-        if _is_cancelled(assessment_id):
+        if await _is_cancelled(assessment_id):
             return END
-        if _has_planned(assessment_id):
+        if await _has_planned(assessment_id):
             return "gate"
-        return _next_route(state)
+        return await _next_route(state)
 
-    def route_after_gate(state: AssessmentState) -> str:
+    async def route_after_gate(state: AssessmentState) -> str:
         assessment_id = state["assessment_id"]
-        if _is_cancelled(assessment_id):
+        if await _is_cancelled(assessment_id):
             return END
-        if _has_planned(assessment_id):
+        if await _has_planned(assessment_id):
             return "gate"
-        return _next_route(state)
+        return await _next_route(state)
 
-    def review(state: AssessmentState) -> dict:
+    async def review(state: AssessmentState) -> dict:
         assessment_id = state["assessment_id"]
-        with Session(get_engine(), expire_on_commit=False) as session:
-            assessment = session.get(Assessment, assessment_id)
+        async with get_async_session_ctx() as session:
+            assessment = await session.get(Assessment, assessment_id)
             if assessment is None:
                 raise LookupError(f"assessment {assessment_id} not found")
-            findings = session.exec(
+            result = await session.execute(
                 select(Finding).where(Finding.assessment_id == assessment_id)
-            ).all()
+            )
+            findings = list(result.scalars().all())
             summary = summarize(findings)
-            refresh_risk(session, assessment_id)
+            await refresh_risk(session, assessment_id)
 
-            challenge_delta = _challenge_delta(assessment_id)
+            challenge_delta = await _challenge_delta(assessment_id)
             if challenge_delta:
                 try:
                     from app.integrations.juiceshop import snapshot_to_artifact
 
-                    snapshot_to_artifact(session, assessment_id, challenge_delta)
+                    await snapshot_to_artifact(
+                        session, assessment_id, challenge_delta
+                    )
                 except Exception as exc:  # noqa: BLE001 - bonus feature
                     log.debug("challenge snapshot unavailable: %s", exc)
 
-            history = role_history(session, assessment_id, state["run_id"])
-            approval = _pending_review(session, assessment_id)
+            history = await role_history(session, assessment_id, state["run_id"])
+            approval = await _pending_review(session, assessment_id)
             if approval is None:
                 approval = Approval(
                     assessment_id=assessment_id,
@@ -723,7 +740,7 @@ def build_assessment_graph(
                 )
                 session.add(approval)
             assessment.status = AssessmentStatus.AWAITING_APPROVAL.value
-            session.commit()
+            await session.commit()
 
             digest = {
                 "risk_score": summary["score"],
@@ -736,8 +753,8 @@ def build_assessment_graph(
         decision = interrupt({"gate": "review", "digest": digest, "role": "review"})
         approved, actor, reason = _read_decision(decision)
 
-        with Session(get_engine(), expire_on_commit=False) as session:
-            approval = _pending_review(session, assessment_id)
+        async with get_async_session_ctx() as session:
+            approval = await _pending_review(session, assessment_id)
             if approval is not None:
                 approval.decision = (
                     Decision.APPROVED.value if approved else Decision.REJECTED.value
@@ -752,14 +769,14 @@ def build_assessment_graph(
                 "review." + ("approved" if approved else "rejected"),
                 {"actor": actor, "reason": reason},
             )
-            assessment = session.get(Assessment, assessment_id)
+            assessment = await session.get(Assessment, assessment_id)
             if assessment is not None:
                 if approved:
                     assessment.status = AssessmentStatus.RUNNING.value
                 else:
                     assessment.status = AssessmentStatus.CANCELLED.value
                     assessment.finished_at = utcnow()
-            session.commit()
+            await session.commit()
 
         return {
             "review_approved": approved,
@@ -770,28 +787,20 @@ def build_assessment_graph(
             ),
         }
 
-    def report(state: AssessmentState) -> dict:
+    async def report(state: AssessmentState) -> dict:
         assessment_id = state["assessment_id"]
-        if not state.get("review_approved"):
-            with Session(get_engine(), expire_on_commit=False) as session:
-                assessment = session.get(Assessment, assessment_id)
-                if assessment is not None:
-                    assessment.status = AssessmentStatus.CANCELLED.value
-                    assessment.finished_at = utcnow()
-                    session.commit()
-            return {"finished": True}
 
-        with Session(get_engine(), expire_on_commit=False) as session:
-            assessment = session.get(Assessment, assessment_id)
+        async with get_async_session_ctx() as session:
+            assessment = await session.get(Assessment, assessment_id)
             if assessment is None:
                 raise LookupError(f"assessment {assessment_id} not found")
             assessment.status = AssessmentStatus.REPORTING.value
-            session.commit()
+            await session.commit()
             try:
-                path = generate_report(session, assessment_id)
+                path = await generate_report(session, assessment_id)
                 assessment.status = AssessmentStatus.COMPLETED.value
                 assessment.finished_at = utcnow()
-                session.commit()
+                await session.commit()
                 return {
                     "finished": True,
                     "report_path": str(path),
@@ -807,7 +816,7 @@ def build_assessment_graph(
                     "report.failed",
                     {"error": str(exc)[:500]},
                 )
-                session.commit()
+                await session.commit()
                 return {
                     "finished": True,
                     "error": str(exc)[:500],
@@ -908,9 +917,11 @@ def graph_config(assessment_id: int) -> dict:
     }
 
 
-def prepare_run(session: Session, assessment_id: int, actor: str = "analyst") -> None:
+async def prepare_run(
+    session: AsyncSession, assessment_id: int, actor: str = "analyst"
+) -> None:
     """Clean stale control rows before a fresh loop invocation."""
-    assessment = session.get(Assessment, assessment_id)
+    assessment = await session.get(Assessment, assessment_id)
     if assessment is None:
         raise LookupError(f"assessment {assessment_id} not found")
 
@@ -919,9 +930,10 @@ def prepare_run(session: Session, assessment_id: int, actor: str = "analyst") ->
     assessment.report_path = None
     assessment.report_sha256 = None
 
-    for step in session.exec(
+    result = await session.execute(
         select(Step).where(Step.assessment_id == assessment_id)
-    ).all():
+    )
+    for step in result.scalars().all():
         if step.status == StepStatus.RUNNING.value:
             step.status = StepStatus.FAILED.value
             step.error = "interrupted by restart"
@@ -931,12 +943,13 @@ def prepare_run(session: Session, assessment_id: int, actor: str = "analyst") ->
             step.error = "superseded by a new run"
             step.ended_at = utcnow()
 
-    for approval in session.exec(
+    result = await session.execute(
         select(Approval).where(
             Approval.assessment_id == assessment_id,
             Approval.decision == Decision.PENDING.value,
         )
-    ).all():
+    )
+    for approval in result.scalars().all():
         approval.decision = Decision.REJECTED.value
         approval.outcome = "superseded"
         approval.decided_at = utcnow()
@@ -944,7 +957,7 @@ def prepare_run(session: Session, assessment_id: int, actor: str = "analyst") ->
     from app.integrations.juiceshop import capture_baseline
 
     try:
-        capture_baseline(session, assessment_id)
+        await capture_baseline(session, assessment_id)
     except Exception as exc:  # noqa: BLE001 - bonus feature
         log.debug("challenge baseline unavailable: %s", exc)
 
@@ -954,23 +967,26 @@ def prepare_run(session: Session, assessment_id: int, actor: str = "analyst") ->
         "run.requested",
         {"actor": actor, "mode": "three_role_loop"},
     )
-    session.commit()
+    await session.commit()
 
 
-_graph = None
+_graph: Any = None
+_graph_conn: Any = None
+_graph_lock = asyncio.Lock()
 
 
-def get_assessment_graph():
-    global _graph
+async def get_assessment_graph():
+    """Return the compiled graph backed by one AsyncSqliteSaver connection."""
+    global _graph, _graph_conn
     if _graph is None:
-        graph_path = settings.graph_path
-        graph_path.parent.mkdir(parents=True, exist_ok=True)
-        saver = SqliteSaver(sqlite3.connect(graph_path, check_same_thread=False))
-        saver.setup()
-        _graph = build_assessment_graph(checkpointer=saver)
+        async with _graph_lock:
+            if _graph is None:
+                graph_path = settings.graph_path
+                graph_path.parent.mkdir(parents=True, exist_ok=True)
+                import aiosqlite
+
+                _graph_conn = await aiosqlite.connect(str(graph_path))
+                saver = AsyncSqliteSaver(_graph_conn)
+                await saver.setup()
+                _graph = build_assessment_graph(checkpointer=saver)
     return _graph
-
-
-def reset_assessment_graph() -> None:
-    global _graph
-    _graph = None
