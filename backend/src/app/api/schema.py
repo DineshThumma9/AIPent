@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlmodel import SQLModel
 
 from app.domain.models import Approval, Assessment, Audit, Evidence, Finding, Step
@@ -27,6 +27,8 @@ class DecisionIn(BaseModel):
 
 
 class MessageOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     assessment_id: int
     role: str

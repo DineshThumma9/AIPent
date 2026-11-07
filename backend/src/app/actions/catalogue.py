@@ -8,7 +8,7 @@ thing that runs.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal
 
@@ -29,6 +29,13 @@ class UnknownAction(ValueError):
 
 
 @dataclass(frozen=True)
+class NmapParams:
+    profile: Literal["host_discovery", "fast", "service", "full_tcp", "full_service"] = "fast"
+    ports: Literal["top100", "top1000", "all"] | list[int] = "top100"
+    timing: int = 4
+
+
+@dataclass(frozen=True)
 class ActionSpec:
     name: str
     tool: str
@@ -36,8 +43,9 @@ class ActionSpec:
     output: Literal["stdout", "file"]
     transport: Literal["local", "docker", "mcp", "http"]
     ok_codes: tuple[int, ...]
-    build_argv: Callable[[Assessment, str, Path], list[str]]
+    build_argv: Callable[[Assessment, str, Path, dict[str, Any] | None], list[str]]
     parse: Callable[[str, str, int], list[FindingDraft]]
+    param_hints: dict[str, str] = field(default_factory=dict)
 
 
 def _web_port(assessment: Assessment) -> int:
@@ -50,25 +58,46 @@ def _artifact_dir(assessment_id: int) -> Path:
     return directory
 
 
-def _nmap_argv(assessment: Assessment, target: str, _output: Path) -> list[str]:
+def _nmap_argv(
+    assessment: Assessment, target: str, _output: Path, params: dict[str, Any] | None = None
+) -> list[str]:
+    p = NmapParams(**(params or {}))
+    if p.profile == "host_discovery":
+        return nmap.argv(target, [], host_discovery=True)
+    if p.profile == "fast":
+        return nmap.fast_scan(target, p.ports, timing=p.timing)
+    if p.profile == "service":
+        return nmap.service_scan(target, p.ports, timing=p.timing)
+    if p.profile == "full_tcp":
+        return nmap.full_tcp(target, timing=p.timing)
+    if p.profile == "full_service":
+        return nmap.full_service(target, timing=p.timing)
     return nmap.argv(target, assessment.ports or [3000])
 
 
-def _nmap_scan_argv(assessment: Assessment, target: str, _output: Path) -> list[str]:
-    """Nmap scan with agent-supplied argv stored on the step.
+def _nmap_scan_argv(
+    assessment: Assessment, target: str, _output: Path, params: dict[str, Any] | None = None
+) -> list[str]:
+    """Nmap scan with agent-supplied params stored on the step.
 
-    The nmap_scan tool builds the full command (flags, ports, target) and the
-    gate approves it exactly. This resolver is only a fallback when argv is not
-    already set on the step.
+    The agent chooses a profile and port set; Python renders the exact argv.
+    This resolver is only a fallback when argv is not already set on the step.
     """
-    return nmap.argv(target, assessment.ports or [3000])
+    return _nmap_argv(assessment, target, _output, params)
 
 
-def _nikto_argv(assessment: Assessment, target: str, output: Path) -> list[str]:
+def _nikto_argv(
+    assessment: Assessment, target: str, output: Path, params: dict[str, Any] | None = None
+) -> list[str]:
     return nikto.argv(target, _web_port(assessment), str(output))
 
 
-def _zap_argv(assessment: Assessment, target: str, output: Path) -> list[str]:
+def _zap_argv(
+    assessment: Assessment,
+    target: str,
+    output: Path,
+    params: dict[str, Any] | None = None,
+) -> list[str]:
     return zap.argv(
         target,
         _web_port(assessment),
@@ -77,7 +106,9 @@ def _zap_argv(assessment: Assessment, target: str, output: Path) -> list[str]:
     )
 
 
-def _sqlmap_argv(assessment: Assessment, target: str, _output: Path) -> list[str]:
+def _sqlmap_argv(
+    assessment: Assessment, target: str, _output: Path, params: dict[str, Any] | None = None
+) -> list[str]:
     return [
         "sqlmap",
         "-u",
@@ -87,7 +118,9 @@ def _sqlmap_argv(assessment: Assessment, target: str, _output: Path) -> list[str
     ]
 
 
-def _dirb_argv(assessment: Assessment, target: str, output: Path) -> list[str]:
+def _dirb_argv(
+    assessment: Assessment, target: str, output: Path, params: dict[str, Any] | None = None
+) -> list[str]:
     return [
         "dirb",
         f"http://{target}:{_web_port(assessment)}/",
@@ -108,6 +141,11 @@ ACTIONS: dict[str, ActionSpec] = {
         ok_codes=(0,),
         build_argv=_nmap_argv,
         parse=lambda text, host, _port: nmap.scan(text, host_override=host),
+        param_hints={
+            "profile": "Scan profile: host_discovery, fast, service, full_tcp, full_service",
+            "ports": "Port set: top100, top1000, all, or list of port numbers",
+            "timing": "Nmap timing template (0-5, default 4)",
+        },
     ),
     "nmap_scan": ActionSpec(
         name="nmap_scan",
@@ -118,6 +156,11 @@ ACTIONS: dict[str, ActionSpec] = {
         ok_codes=(0,),
         build_argv=_nmap_scan_argv,
         parse=lambda text, host, _port: nmap.scan(text, host_override=host),
+        param_hints={
+            "profile": "Scan profile: host_discovery, fast, service, full_tcp, full_service",
+            "ports": "Port set: top100, top1000, all, or list of port numbers",
+            "timing": "Nmap timing template (0-5, default 4)",
+        },
     ),
     "nikto_scan": ActionSpec(
         name="nikto_scan",
@@ -166,7 +209,7 @@ ACTIONS: dict[str, ActionSpec] = {
         output="file",
         transport="http",
         ok_codes=(0,),
-        build_argv=lambda assessment, target, _output: [
+        build_argv=lambda assessment, target, _output, params=None: [
             "http_probe",
             "GET",
             f"http://{target}:{_web_port(assessment)}/",
@@ -194,7 +237,10 @@ def transport_target(target: str) -> str:
 
 
 def mcp_tool_call(
-    action: str, assessment: Assessment, target: str
+    action: str,
+    assessment: Assessment,
+    target: str,
+    params: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """The single mapping from semantic action to gateway tool and arguments.
 
@@ -204,9 +250,15 @@ def mcp_tool_call(
     alias = transport_target(target)
     port = _web_port(assessment)
     if action == "recon_services":
+        p = NmapParams(**(params or {}))
+        if isinstance(p.ports, list):
+            return "nmap_scan", {
+                "target": alias,
+                "flags": nmap.mcp_flags(ports=p.ports, timing=p.timing),
+            }
         return "nmap_scan", {
             "target": alias,
-            "flags": nmap.mcp_flags(assessment.ports or [3000]),
+            "flags": nmap.mcp_flags(top_ports=p.ports, timing=p.timing),
         }
     if action == "nikto_scan":
         return "nikto_scan", {"target_url": f"http://{alias}:{port}"}
@@ -225,8 +277,13 @@ def mcp_tool_call(
     raise UnknownAction(action)
 
 
-def mcp_command(action: str, assessment: Assessment, target: str) -> list[str]:
-    tool, arguments = mcp_tool_call(action, assessment, target)
+def mcp_command(
+    action: str,
+    assessment: Assessment,
+    target: str,
+    params: dict[str, Any] | None = None,
+) -> list[str]:
+    tool, arguments = mcp_tool_call(action, assessment, target, params=params)
     return ["mcp", tool, json.dumps(arguments, sort_keys=True)]
 
 
@@ -238,13 +295,17 @@ def get_action(name: str) -> ActionSpec:
 
 
 def resolve_argv(
-    action: str, assessment: Assessment, target: str, step_id: int
+    action: str,
+    assessment: Assessment,
+    target: str,
+    step_id: int,
+    params: dict[str, Any] | None = None,
 ) -> list[str]:
     if settings.mcp_enabled and settings.mcp_transport == "gateway":
-        return mcp_command(action, assessment, target)
+        return mcp_command(action, assessment, target, params=params)
     spec = get_action(action)
     output = _artifact_dir(assessment.id or 0) / f"{step_id}{spec.suffix}"
-    return spec.build_argv(assessment, target, output)
+    return spec.build_argv(assessment, target, output, params)
 
 
 def check_scope(assessment: Assessment, target: str) -> None:

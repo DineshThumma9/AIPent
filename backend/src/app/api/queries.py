@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col, select
 
 from app.domain.models import Approval, Assessment, Audit, Evidence, Finding, Message, Step
-from app.api.schema import AssessmentDetail
+from app.api.schema import AssessmentDetail, MessageOut
 from app.persistence import AuditRepo, AssessmentRepo, FindingRepo, StepRepo
 
 
@@ -45,7 +45,7 @@ async def load_assessment_detail(
         .where(Message.assessment_id == assessment_id)
         .order_by(Message.created_at)
     )
-    messages = list(messages.scalars().all())
+    messages = [MessageOut.model_validate(m) for m in messages.scalars().all()]
 
     return AssessmentDetail(
         **assessment.model_dump(),

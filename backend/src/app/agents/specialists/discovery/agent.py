@@ -6,18 +6,24 @@ against which open web services. It returns a typed handoff.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, TYPE_CHECKING
 
 from langchain_core.messages import HumanMessage
+from langgraph.errors import GraphRecursionError
 from langgraph.types import Command
 
 from app.agents.control import audit, record_role, role_history
-from app.agents.graph.state import AssessmentState
 from app.agents.model import build_role_agent
 from app.agents.prompts import DISCOVERY_PROMPT
 from app.agents.tools import set_context
 from app.core.db import get_async_session_ctx
-from app.persistence import AssessmentRepo, StepRepo
+from app.core.log import get_logger
+from app.persistence import AssessmentRepo, FindingRepo, StepRepo
+
+log = get_logger("agent.discovery")
+
+if TYPE_CHECKING:
+    from app.agents.graph.state import AssessmentState
 
 
 async def agent_node(state: dict) -> Command[Literal["__end__"]]:
@@ -45,7 +51,27 @@ async def agent_node(state: dict) -> Command[Literal["__end__"]]:
 
     agent = build_role_agent(role)
     targets = state.get("targets", [])
-    services = state.get("recon_state", {}).get("services", [])
+
+    # Read services from DB (nmap findings created by the gate after recon's step executed)
+    # instead of the empty recon_state scratchpad. By the time discovery runs,
+    # the gate has already executed recon's nmap step and created Finding rows.
+    async with get_async_session_ctx() as session:
+        finding_repo = FindingRepo(session)
+        service_findings = await finding_repo.get_services(assessment_id)
+        services = [
+            {
+                "id": f.id,
+                "canonical_key": f.canonical_key,
+                "title": f.title[:100] if f.title else "",
+                "severity": f.severity,
+                "status": f.status,
+                "confidence": f.confidence,
+                "endpoint": f.endpoint,
+                "asset": f.asset,
+                "origin": f.origin,
+            }
+            for f in service_findings
+        ]
 
     services_summary = "\n".join(
         f"- {s.get('endpoint', 'unknown')} on {s.get('asset', 'unknown')}"
@@ -63,10 +89,17 @@ async def agent_node(state: dict) -> Command[Literal["__end__"]]:
         f"When finished, call handoff with your recommendation."
     )
 
-    result = await agent.ainvoke(
-        {"messages": [HumanMessage(content=digest)]},
-        config={"recursion_limit": 10},
-    )
+    try:
+        result = await agent.ainvoke(
+            {"messages": [HumanMessage(content=digest)]},
+            config={"recursion_limit": 50},
+        )
+    except GraphRecursionError as exc:
+        log.warning(
+            "Discovery agent hit recursion limit (%s); proceeding with whatever steps were queued",
+            exc,
+        )
+        result = {"messages": []}
 
     messages = result.get("messages", [])
     last_text = ""
@@ -81,7 +114,7 @@ async def agent_node(state: dict) -> Command[Literal["__end__"]]:
         steps = await step_repo.get_all(assessment_id)
         discovery_steps = [
             s for s in steps
-            if s.action in ("nikto_scan", "zap_baseline")
+            if s.action in ("dirb_scan", "nikto_scan", "zap_baseline")
         ]
 
     # Emit handoff.created audit event

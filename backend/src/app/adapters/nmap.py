@@ -28,18 +28,41 @@ class NmapPort(BaseModel):
     service: str | None = None
 
 
-def argv(target: str, ports: list[int]) -> list[str]:
-    return [
-        "nmap",
-        "-sV",
-        "-Pn",
-        "-T3",
-        "-p",
-        ",".join(map(str, ports)),
-        "-oX",
-        "-",
-        target,
-    ]
+def argv(
+    target: str,
+    ports: list[int] | str = "top100",
+    timing: int = 4,
+    host_discovery: bool = False,
+) -> list[str]:
+    if host_discovery:
+        return ["nmap", "-sn", "-Pn", f"-T{timing}", "-oX", "-", target]
+    parts: list[str] = ["nmap", "-sV", "-Pn", f"-T{timing}"]
+    if ports == "top100":
+        parts.extend(["--top-ports", "100"])
+    elif ports == "top1000":
+        parts.extend(["--top-ports", "1000"])
+    elif ports == "all":
+        parts.extend(["-p-"])
+    else:
+        parts.extend(["-p", ",".join(map(str, ports))])
+    parts.extend(["-oX", "-", target])
+    return parts
+
+
+def fast_scan(target: str, ports: list[int] | str = "top100", timing: int = 4) -> list[str]:
+    return argv(target, ports=ports, timing=timing)
+
+
+def service_scan(target: str, ports: list[int] | str = "top100", timing: int = 3) -> list[str]:
+    return argv(target, ports=ports, timing=timing)
+
+
+def full_tcp(target: str, timing: int = 4) -> list[str]:
+    return argv(target, ports="all", timing=timing)
+
+
+def full_service(target: str, timing: int = 3) -> list[str]:
+    return argv(target, ports="all", timing=timing)
 
 
 def parse(xml_text: str) -> list[NmapPort]:
@@ -110,8 +133,18 @@ def to_drafts(records: list[NmapPort]) -> list[FindingDraft]:
     return drafts
 
 
-def mcp_flags(ports: list[int]) -> str:
-    return f"-sV -Pn -T3 -p {','.join(map(str, ports))} -oX -"
+def mcp_flags(ports: list[int] | None = None, timing: int = 4, top_ports: str | None = None) -> str:
+    parts = ["-sV", "-Pn", f"-T{timing}"]
+    if top_ports == "top100":
+        parts.extend(["--top-ports", "100"])
+    elif top_ports == "top1000":
+        parts.extend(["--top-ports", "1000"])
+    elif top_ports == "all":
+        parts.append("-p-")
+    elif ports:
+        parts.extend(["-p", ",".join(map(str, ports))])
+    parts.extend(["-oX", "-"])
+    return " ".join(parts)
 
 
 def _xml_only(text: str) -> str:

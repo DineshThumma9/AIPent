@@ -6,9 +6,9 @@ about. The LLM never supplies raw argv — it names an action and a target;
 Python resolves the exact command through the action catalogue.
 
 Tools are grouped by role:
-- Recon: scan_services, dirb_scan
-- Discovery: nikto_scan, zap_baseline
-- Validation: http_probe, sqlmap_scan
+- Recon: scan_services (nmap service discovery)
+- Discovery: dirb_scan, nikto_scan, zap_baseline (web scanners)
+- Validation: http_probe, sqlmap_scan (probes and vuln testing)
 """
 
 from __future__ import annotations
@@ -30,12 +30,17 @@ def _queue_step_tool(action: str):
     async def _queued_tool(
         target: str,
         rationale: str,
+        params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Queue a planned security action against ``target``.
 
         Returns a dict with ``step_id``, ``action``, ``target``, ``status``
         and ``note``. The step is not executed until the human gate approves
         it.
+
+        ``params`` are typed scan parameters (for example nmap profile/ports)
+        that Python renders into the exact argv. The LLM never supplies raw
+        flags.
         """
         assessment_id = _current_assessment_id
         run_id = _current_run_id
@@ -76,6 +81,7 @@ def _queue_step_tool(action: str):
                 action=action,
                 target=target,
                 rationale=rationale,
+                params=params,
             )
 
             if result.get("error"):
@@ -128,9 +134,9 @@ def set_context(
 ROLE_TOOLS: dict[str, list] = {
     "recon": [
         _queue_step_tool("recon_services"),  # nmap service scan
-        _queue_step_tool("dirb_scan"),       # directory brute force
     ],
     "discovery": [
+        _queue_step_tool("dirb_scan"),       # directory brute force
         _queue_step_tool("nikto_scan"),      # web server scanner
         _queue_step_tool("zap_baseline"),    # ZAP passive baseline
     ],

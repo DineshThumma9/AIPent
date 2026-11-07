@@ -1,6 +1,7 @@
 """OWASP ZAP baseline adapter: Docker argv, typed JSON parse."""
 
 import json
+import re
 from pathlib import Path
 from typing import Literal
 
@@ -26,6 +27,8 @@ class ZapAlert(BaseModel):
     confidence: str = "1"
     desc: str = ""
     solution: str = ""
+    cweid: str = ""
+    reference: str = ""
     instances: list[ZapInstance] = Field(default_factory=list)
 
 
@@ -49,6 +52,17 @@ SEVERITY: dict[str, Severity] = {
 }
 
 CONFIDENCE: dict[str, float] = {"3": 0.9, "2": 0.7, "1": 0.5, "0": 0.4}
+
+_CVE_RE = re.compile(r"CVE-\d{4}-\d{4,}")
+_CWE_RE = re.compile(r"CWE-\d+")
+
+
+def _extract_cves(text: str) -> list[str]:
+    return sorted(set(_CVE_RE.findall(text or "")))
+
+
+def _extract_cwes(text: str) -> list[str]:
+    return sorted(set(_CWE_RE.findall(text or "")))
 
 
 def argv(
@@ -103,6 +117,13 @@ def to_drafts(host: str, port: int, alerts: list[ZapAlert]) -> list[FindingDraft
             )
             for instance in alert.instances[:3]
         ]
+        cve_list = _extract_cves(alert.reference or "")
+        cwe_list = _extract_cwes(alert.cweid or "")
+        if alert.cweid and not cwe_list:
+            # Some ZAP versions put just "CWE-79" in cweid; capture it directly.
+            m = re.match(r"CWE-(\d+)", alert.cweid.strip())
+            if m:
+                cwe_list = [f"CWE-{m.group(1)}"]
         drafts.append(
             FindingDraft(
                 canonical_key=f"web:{alert.alert.lower()}:{host}:{port}",
@@ -114,6 +135,8 @@ def to_drafts(host: str, port: int, alerts: list[ZapAlert]) -> list[FindingDraft
                 confidence=CONFIDENCE.get(alert.confidence, 0.5),
                 status=FindingStatus.SUSPECTED,
                 remediation=solution,
+                cve=cve_list,
+                cwe=cwe_list,
                 evidence=evidence,
             )
         )

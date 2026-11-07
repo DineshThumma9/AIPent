@@ -51,6 +51,7 @@ from app.core.config import settings
 from app.domain.correlate import canonical_key
 from app.domain.models import (
     Assessment,
+    Approval,
     Audit,
     Evidence,
     Finding,
@@ -265,7 +266,18 @@ async def execute_action(
     # approved. Only resolve from the closed catalogue when no argv was
     # stored (e.g. legacy recon_services without custom flags).
     if not step.argv:
-        step.argv = resolve_argv(action, assessment, target, step.id or 0)
+        # Recover params from the approval detail if available.
+        params: dict[str, Any] | None = None
+        result = await session.execute(
+            select(Approval).where(
+                Approval.assessment_id == assessment_id,
+                Approval.step_id == step.id,
+            ).order_by(Approval.id.desc())
+        )
+        approval = result.scalars().first()
+        if approval and approval.detail:
+            params = approval.detail.get("params")
+        step.argv = resolve_argv(action, assessment, target, step.id or 0, params=params)
     step.status = StepStatus.RUNNING.value
     await session.commit()
     await session.refresh(step)

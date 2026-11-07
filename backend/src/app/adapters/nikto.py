@@ -12,6 +12,13 @@ from app.adapters.base import EvidenceDraft, FindingDraft
 from app.core.config import settings
 from app.domain.models import FindingStatus, Severity
 
+_CVE_RE = re.compile(r"CVE-\d{4}-\d{4,}")
+
+
+def _extract_cves(text: str) -> list[str]:
+    return sorted(set(_CVE_RE.findall(text or "")))
+
+
 VENDORED = Path(__file__).resolve().parents[3] / "bin" / "nikto" / "program"
 
 
@@ -108,6 +115,7 @@ def to_drafts(host: str, port: int, items: list[NiktoItem]) -> list[FindingDraft
         title = clean_msg.split(". ")[0][:160].strip()
         if not title:
             continue
+        cve_list = _extract_cves(clean_msg)
         drafts.append(
             FindingDraft(
                 canonical_key=f"web:{title.lower()}:{host}:{port}",
@@ -118,6 +126,7 @@ def to_drafts(host: str, port: int, items: list[NiktoItem]) -> list[FindingDraft
                 severity=_severity(clean_msg),
                 confidence=0.6,
                 status=FindingStatus.SUSPECTED,
+                cve=cve_list,
                 evidence=[
                     EvidenceDraft(
                         locator={

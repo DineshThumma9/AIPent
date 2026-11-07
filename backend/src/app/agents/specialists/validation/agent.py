@@ -6,18 +6,24 @@ and whether sqlmap_scan is warranted. It returns verdicts and a handoff.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, TYPE_CHECKING
 
 from langchain_core.messages import HumanMessage
+from langgraph.errors import GraphRecursionError
 from langgraph.types import Command
 
 from app.agents.control import audit, record_role, role_history
-from app.agents.graph.state import AssessmentState
 from app.agents.model import build_role_agent
 from app.agents.prompts import VALIDATION_PROMPT
 from app.agents.tools import set_context
 from app.core.db import get_async_session_ctx
+from app.core.log import get_logger
 from app.persistence import AssessmentRepo, StepRepo
+
+log = get_logger("agent.validation")
+
+if TYPE_CHECKING:
+    from app.agents.graph.state import AssessmentState
 
 
 async def agent_node(state: dict) -> Command[Literal["__end__"]]:
@@ -66,10 +72,17 @@ async def agent_node(state: dict) -> Command[Literal["__end__"]]:
         f"When finished, call handoff with your recommendation."
     )
 
-    result = await agent.ainvoke(
-        {"messages": [HumanMessage(content=digest)]},
-        config={"recursion_limit": 10},
-    )
+    try:
+        result = await agent.ainvoke(
+            {"messages": [HumanMessage(content=digest)]},
+            config={"recursion_limit": 50},
+        )
+    except GraphRecursionError as exc:
+        log.warning(
+            "Validation agent hit recursion limit (%s); proceeding with whatever steps were queued",
+            exc,
+        )
+        result = {"messages": []}
 
     messages = result.get("messages", [])
     last_text = ""

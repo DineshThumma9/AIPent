@@ -46,6 +46,7 @@ class StepRepo(BaseRepo):
         rationale: str,
         *,
         argv: list[str] | None = None,
+        params: dict[str, Any] | None = None,
         detail: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Create a planned Step plus a pending Approval bound to its argv.
@@ -109,7 +110,7 @@ class StepRepo(BaseRepo):
         await self.session.flush()
 
         if argv is None:
-            argv = resolve_argv(action, assessment, target, step.id or 0)
+            argv = resolve_argv(action, assessment, target, step.id or 0, params=params)
         elif spec.output == "file":
             output_path = str(_artifact_dir(assessment_id) / f"{step.id}{spec.suffix}")
             argv = inject_output_path(list(argv), output_path, spec)
@@ -120,6 +121,7 @@ class StepRepo(BaseRepo):
             "phase": role,
             "rationale": rationale,
             "tool": spec.tool,
+            "params": params or {},
             "plan": [
                 {"action": action, "target": target, "rationale": rationale},
             ],

@@ -6,18 +6,21 @@ against which targets. It returns a typed handoff with recommendations.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, TYPE_CHECKING
 
 from langchain_core.messages import HumanMessage
+from langgraph.errors import GraphRecursionError
 from langgraph.types import Command
 
 from app.agents.control import audit, record_role, role_history
-from app.agents.graph.state import AssessmentState
 from app.agents.model import build_role_agent
 from app.agents.prompts import RECON_PROMPT
 from app.agents.tools import set_context
 from app.core.db import get_async_session_ctx
 from app.persistence import AssessmentRepo, StepRepo
+
+if TYPE_CHECKING:
+    from app.agents.graph.state import AssessmentState
 
 
 async def agent_node(state: AssessmentState) -> Command[Literal["__end__"]]:
@@ -61,10 +64,17 @@ async def agent_node(state: AssessmentState) -> Command[Literal["__end__"]]:
         f"When finished, call handoff with your recommendation."
     )
 
-    result = await agent.ainvoke(
-        {"messages": [HumanMessage(content=digest)]},
-        config={"recursion_limit": 10},
-    )
+    try:
+        result = await agent.ainvoke(
+            {"messages": [HumanMessage(content=digest)]},
+            config={"recursion_limit": 50},
+        )
+    except GraphRecursionError as exc:
+        log.warning(
+            "Recon agent hit recursion limit (%s); proceeding with whatever steps were queued",
+            exc,
+        )
+        result = {"messages": []}
 
     messages = result.get("messages", [])
     last_text = ""
@@ -81,7 +91,7 @@ async def agent_node(state: AssessmentState) -> Command[Literal["__end__"]]:
         steps = await step_repo.get_all(assessment_id)
         recon_steps = [
             s for s in steps
-            if s.action in ("recon_services", "dirb_scan")
+            if s.action == "recon_services"
         ]
 
     # Emit handoff.created audit event

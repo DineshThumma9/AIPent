@@ -6,6 +6,7 @@ The supervisor invokes this via ainvoke() with a slice of shared state.
 
 from langgraph.graph import END, START, StateGraph
 
+from app.core.config import settings
 from app.agents.specialists.recon.agent import agent_node
 from app.agents.specialists.recon.state import ReconState
 
@@ -25,5 +26,5 @@ def recon_graph_config(assessment_id: int) -> dict:
     """LangGraph config for the recon sub-graph."""
     return {
         "configurable": {"thread_id": f"recon-{assessment_id}"},
-        "recursion_limit": 20,
+        "recursion_limit": settings.agent_recursion_limit,
     }

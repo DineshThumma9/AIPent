@@ -374,11 +374,13 @@ async def run_gate_step(
         await _set_status(assessment_id, AssessmentStatus.RUNNING.value)
         return None
 
+    decision = None
+    effective_step_id = step["step_id"]
+
     approval = await _approval_snapshot(step["step_id"])
     if approval is None:
         approval = await _fallback_approval(assessment_id, step)
 
-    decision = None
     if approval["decision"] == Decision.PENDING.value:
         policy = _policy_for(step["action"])
         if not policy.requires_approval:
@@ -410,6 +412,12 @@ async def run_gate_step(
                 }
             )
 
+    # When resuming from a human decision, the decision payload carries the
+    # step_id of the gate card the analyst saw. Honor it so the binding
+    # between the approved card and the executed step is exact.
+    if decision and decision.get("step_id"):
+        effective_step_id = decision["step_id"]
+
     return await _decide_and_execute(
-        assessment_id, step["step_id"], decision, executor=executor
+        assessment_id, effective_step_id, decision, executor=executor
     )

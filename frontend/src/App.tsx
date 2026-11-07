@@ -8,7 +8,6 @@ import { useAssessmentStream } from './hooks/useAssessmentStream'
 import {
   createAssessment,
   createMessage,
-  getAssessment,
   listAssessments,
   listMessages,
   resumeAgent,
@@ -337,8 +336,6 @@ export default function App() {
     setActionError(null)
     try {
       await updateAssessmentRequest(detail.id, text)
-      const refreshed = await getAssessment(detail.id)
-      stream.replace(refreshed)
       await runAgent(detail.id)
       // Do not fetch the assessment here. The graph starts in a background
       // task and the first gate may not be reached yet. Let the SSE stream

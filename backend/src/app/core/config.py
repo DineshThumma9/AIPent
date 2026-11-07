@@ -31,18 +31,18 @@ class Settings(BaseSettings):
 
     max_steps: int = 12
     max_agent_turns: int = 12
-    agent_recursion_limit: int = 40
+    agent_recursion_limit: int = 30
     scan_timeout: int = 300
     run_timeout: int = 900
 
     nikto_bin: str = ""
     zap_image: str = "ghcr.io/zaproxy/zaproxy:stable"
 
-    llm_provider: str = "groq"
-    llm_model: str = "openai/gpt-oss-120b"
+    llm_provider: str = "ollama"
+    llm_model: str = "beam:cloud"
     summarization_llm: str = "openai/gpt-oss-20b"
     llm_base_url: str | None = None
-    llm_timeout: int = 30
+    llm_timeout: int = 120
     llm_max_tokens: int = 4000
     model_exit_behavior: Literal["end", "error"] = "end"
     tool_exit_behaviour: Literal["continue", "error", "end"] = "continue"
@@ -55,6 +55,9 @@ class Settings(BaseSettings):
     gemini_model: str | None = None
     openrouter_model: str | None = None
     huggingface_model: str | None = None
+
+    # Ollama Cloud base URL (e.g. https://ollama.com). If unset, uses local Ollama.
+    ollama_base_url: str | None = os.getenv("OLLAMA_BASE_URL")
 
     # Action policy: per-action gate requirements. JSON string or dict.
     # Example: AIPENT_ACTION_POLICIES='{"sqlmap_scan":{"approve":true},"nmap_scan":{"approve":false}}'
@@ -94,6 +97,10 @@ class Settings(BaseSettings):
     @property
     def mistral_api_key(self) -> str | None:
         return os.getenv("AIPENT_MISTRAL_API_KEY") or os.getenv("MISTRALAI_API_KEY")
+
+    @property
+    def ollama_api_key(self) -> str | None:
+        return os.getenv("AIPENT_OLLAMA_API_KEY") or os.getenv("OLLAMA_API_KEY")
 
     @property
     def gemini_api_key(self) -> str | None:
