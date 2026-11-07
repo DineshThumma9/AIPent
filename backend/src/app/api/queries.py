@@ -3,7 +3,7 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col, select
 
-from app.domain.models import Approval, Assessment, Audit, Evidence, Finding, Step
+from app.domain.models import Approval, Assessment, Audit, Evidence, Finding, Message, Step
 from app.api.schema import AssessmentDetail
 from app.persistence import AuditRepo, AssessmentRepo, FindingRepo, StepRepo
 
@@ -40,6 +40,13 @@ async def load_assessment_detail(
 
     audit = await audit_repo.get_all_for_assessment(assessment_id, limit=100)
 
+    messages = await audit_repo.session.execute(
+        select(Message)
+        .where(Message.assessment_id == assessment_id)
+        .order_by(Message.created_at)
+    )
+    messages = list(messages.scalars().all())
+
     return AssessmentDetail(
         **assessment.model_dump(),
         steps=steps,
@@ -47,4 +54,5 @@ async def load_assessment_detail(
         evidence=evidence,
         approvals=approvals,
         audit=audit,
+        messages=messages,
     )

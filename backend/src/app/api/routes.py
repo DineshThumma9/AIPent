@@ -161,6 +161,14 @@ async def assessment_events(
 
 @router.post("/assessments/{assessment_id}/scan", response_model=AssessmentDetail)
 async def scan(assessment_id: int, session: AsyncSession = Depends(get_session)):
+    """Manual nmap scan — operator bypass of the human gate.
+
+    This is a deliberate shortcut for operators who want to run a quick nmap
+    scan without going through the full agent loop. It runs run_scan() directly
+    and does not pass through the action gate. If every action must be
+    human-approved, set AIPENT_ACTION_POLICIES to require approval for
+    nmap_scan/recon_services and avoid this endpoint.
+    """
     repo = AssessmentRepo(session)
     assessment = await repo.get(assessment_id)
     if assessment is None:

@@ -130,6 +130,10 @@ export const DecisionInputSchema = z.object({
   decision: z.enum(['approved', 'rejected']),
   actor: z.string().min(1),
   reason: z.string(),
+  // Bind the decision to the specific gate card the analyst saw, so the
+  // backend can reject stale approval cards (approval.argv must match step.argv).
+  approval_id: z.number().int().optional(),
+  step_id: z.number().int().optional(),
 })
 
 export const MessageSchema = z.object({

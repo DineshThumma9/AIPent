@@ -51,7 +51,7 @@ export function AssessmentRail({
                 title={`#${pad(item.id)}: ${item.title} (${item.status})`}
               >
                 <span className="mono">#{pad(item.id)}</span>
-                <StatusMark status={item.status} />
+                <span className={`status-dot status-dot-${item.status}`} aria-hidden="true" />
               </button>
             ))}
           </div>

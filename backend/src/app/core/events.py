@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 
 from app.core.db import get_async_session_ctx
 from app.core.log import get_logger
-from app.domain.models import Approval, Finding, Step, utcnow
+from app.domain.models import Approval, Finding, Message, Step, utcnow
 from app.api.queries import load_assessment_detail
 from app.api.schema import AssessmentDetail
 
@@ -80,6 +80,14 @@ def _approval_key(approval: Approval) -> tuple:
     )
 
 
+def _message_key(message: Message) -> tuple:
+    return (
+        message.role,
+        message.text,
+        message.created_at,
+    )
+
+
 class StreamState:
     """Keeps the last emitted shape of each row and emits only changes."""
 
@@ -101,6 +109,11 @@ class StreamState:
         self._audit_id = max((row.id or 0 for row in detail.audit), default=0)
         self._status = detail.status
         self._report = (detail.report_path, detail.report_sha256)
+        self._messages = {
+            message.id: _message_key(message)
+            for message in detail.messages
+            if message.id is not None
+        }
 
     @staticmethod
     def _evidence_ids(detail: AssessmentDetail, finding_id: int | None) -> tuple[int, ...]:
@@ -159,6 +172,14 @@ class StreamState:
             if self._approvals.get(approval.id) != key:
                 self._approvals[approval.id] = key
                 emit(EventType.APPROVAL, {"approval": approval.model_dump()})
+
+        for message in detail.messages:
+            if message.id is None:
+                continue
+            key = _message_key(message)
+            if self._messages.get(message.id) != key:
+                self._messages[message.id] = key
+                emit(EventType.MESSAGE, {"message": message.model_dump()})
 
         new_audit = sorted(
             (row for row in detail.audit if (row.id or 0) > self._audit_id),

@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     summarization_llm: str = "openai/gpt-oss-20b"
     llm_base_url: str | None = None
     llm_timeout: int = 30
-    llm_max_tokens: int = 900
+    llm_max_tokens: int = 4000
     model_exit_behavior: Literal["end", "error"] = "end"
     tool_exit_behaviour: Literal["continue", "error", "end"] = "continue"
 

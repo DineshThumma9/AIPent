@@ -307,6 +307,23 @@ button {
   color: var(--oxide-deep);
 }
 
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  margin-top: 2px;
+}
+
+.status-dot-completed { background: var(--moss); }
+.status-dot-failed { background: var(--oxide); }
+.status-dot-running { background: var(--ink); }
+.status-dot-planning { background: var(--ink-muted); }
+.status-dot-reporting { background: var(--ink-muted); }
+.status-dot-cancelled { background: var(--ink-muted); }
+.status-dot-draft { background: var(--ink-muted); }
+.status-dot-awaiting_approval { background: var(--amber); }
+
 .rail-collapsed-new {
   width: 28px;
   height: 28px;

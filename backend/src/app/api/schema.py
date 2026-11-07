@@ -86,3 +86,4 @@ class AssessmentDetail(BaseModel):
     evidence: list[Evidence] = Field(default_factory=list)
     approvals: list[Approval] = Field(default_factory=list)
     audit: list[Audit] = Field(default_factory=list)
+    messages: list[MessageOut] = Field(default_factory=list)

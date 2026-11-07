@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { AssessmentRail } from './components/AssessmentRail'
 import { BriefWorkspace } from './components/BriefWorkspace'
 import { MissionConversation } from './components/MissionConversation'
@@ -194,7 +194,9 @@ export default function App() {
     setAgentBusy(true)
     try {
       await runAgent(detail.id)
-      stream.replace(await getAssessment(detail.id))
+      // Do not fetch the assessment here. The graph starts in a background
+      // task and the first gate may not be reached yet. Let the SSE stream
+      // push the updated state as it happens.
       await pushMessage(
         detail.id,
         'assistant',
@@ -221,7 +223,8 @@ export default function App() {
     setAgentBusy(true)
     try {
       await stopAgent(detail.id)
-      stream.replace(await getAssessment(detail.id))
+      // Do not fetch the assessment here. Let the SSE stream push the
+      // updated state as the stop is processed.
       await pushMessage(
         detail.id,
         'assistant',
@@ -240,11 +243,14 @@ export default function App() {
     }
   }
 
+  const resumeRef = useRef(false)
+
   async function handleDecision(decision: 'approved' | 'rejected') {
-    if (!detail) return
+    if (!detail || resumeRef.current) return
     const pending = mission?.pendingApproval ?? null
     setActionError(null)
     setAgentBusy(true)
+    resumeRef.current = true
     try {
       await resumeAgent(detail.id, {
         decision,
@@ -253,8 +259,18 @@ export default function App() {
           decision === 'approved'
             ? 'Approved from the mission desk'
             : 'Rejected from the mission desk',
+        // The backend enforces approval.argv == step.argv integrity when the
+        // gate executes, so the human approves exactly what runs. The IDs are
+        // echoed for audit traceability; the gate resolves the pending step
+        // itself (oldest planned step wins).
+        approval_id: pending?.id ?? undefined,
+        step_id: pending?.step_id ?? undefined,
       })
-      stream.replace(await getAssessment(detail.id))
+      // Do not fetch the assessment here. The graph resumes in a background
+      // task and the DB may not reflect the new state yet. Let the SSE
+      // stream push the updated state (gate, step, report, status) as it
+      // happens. Fetching immediately returns stale data and can cause
+      // double-submit errors if the user clicks again.
       await pushMessage(
         detail.id,
         'assistant',
@@ -275,6 +291,7 @@ export default function App() {
         `I could not submit that decision: ${message}. Check the stream, then try again.`,
       )
     } finally {
+      resumeRef.current = false
       setAgentBusy(false)
     }
   }
@@ -323,7 +340,9 @@ export default function App() {
       const refreshed = await getAssessment(detail.id)
       stream.replace(refreshed)
       await runAgent(detail.id)
-      stream.replace(await getAssessment(detail.id))
+      // Do not fetch the assessment here. The graph starts in a background
+      // task and the first gate may not be reached yet. Let the SSE stream
+      // push the updated state as it happens.
       await pushMessage(
         detail.id,
         'assistant',
