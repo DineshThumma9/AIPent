@@ -27,8 +27,8 @@ ARTIFACT_KEY = "juice_shop_challenges.json"
 
 def _base_url() -> str:
     # The backend talks to Juice Shop directly on the host; only MCP scanner
-    # containers need the bridge alias (from app.agents.gate). Using the alias
-    # here breaks challenge tracking on a host-run backend.
+    # containers need the bridge alias. Using the alias here breaks challenge
+    # tracking on a host-run backend.
     return f"{settings.juiceshop_url.rstrip('/')}/api/Challenges"
 
 

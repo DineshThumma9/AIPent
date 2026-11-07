@@ -15,18 +15,19 @@ from typing import Any
 from langgraph.types import Command
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.actions.executor import terminate_process
 from app.agents.graph import (
     get_assessment_graph,
     graph_config,
     initial_state,
     prepare_run,
 )
-from app.actions.executor import terminate_process
 from app.api.schema import AgentView
 from app.core.config import settings
 from app.core.db import get_async_session_ctx
 from app.core.log import get_logger
-from app.domain.models import Assessment, AssessmentStatus, Audit, utcnow
+from app.domain.models import Assessment, AssessmentStatus, utcnow
+from app.persistence import AssessmentRepo, AuditRepo
 
 log = get_logger("runner")
 
@@ -129,11 +130,13 @@ async def get_view(
 
     if session is None:
         async with get_async_session_ctx() as own_session:
-            assessment = await own_session.get(Assessment, assessment_id)
+            repo = AssessmentRepo(own_session)
+            assessment = await repo.get(assessment_id)
             status = assessment.status if assessment else "missing"
             risk_score = assessment.risk_score if assessment else None
     else:
-        assessment = await session.get(Assessment, assessment_id)
+        repo = AssessmentRepo(session)
+        assessment = await repo.get(assessment_id)
         status = assessment.status if assessment else "missing"
         risk_score = assessment.risk_score if assessment else None
 
@@ -146,7 +149,7 @@ async def get_view(
         plan=plan,
         plan_source=values.get("plan_source", "") or "",
         pending=pending,
-        steps=values.get("steps", 0) or 0,
+        steps=values.get("step_count", 0) or 0,
         last_message=content,
         risk_score=risk_score,
     )
@@ -161,18 +164,18 @@ async def _invoke(assessment_id: int, payload: Any) -> None:
     except Exception as exc:  # noqa: BLE001 - a run failure is recorded, not fatal
         log.exception("agent run failed assessment=%s", assessment_id)
         async with get_async_session_ctx() as session:
-            assessment = await session.get(Assessment, assessment_id)
+            repo = AssessmentRepo(session)
+            audit_repo = AuditRepo(session)
+            assessment = await repo.get(assessment_id)
             if assessment is not None:
                 assessment.status = AssessmentStatus.FAILED.value
                 assessment.finished_at = utcnow()
-                session.add(
-                    Audit(
-                        assessment_id=assessment_id,
-                        event_type="agent.failed",
-                        payload={"error": str(exc)[:500]},
-                    )
+                await audit_repo.add(
+                    assessment_id=assessment_id,
+                    event_type="agent.failed",
+                    payload={"error": str(exc)[:500]},
                 )
-                await session.commit()
+                await repo.session.commit()
     finally:
         _tasks.pop(assessment_id, None)
 
@@ -197,7 +200,8 @@ async def start_run(
             # If the assessment is cancelled or failed, the old checkpoint state
             # is stale. Reset it and start fresh instead of erroring.
             async with get_async_session_ctx() as session:
-                assessment = await session.get(Assessment, assessment_id)
+                repo = AssessmentRepo(session)
+                assessment = await repo.get(assessment_id)
                 if assessment is None:
                     raise LookupError(f"assessment {assessment_id} not found")
                 if assessment.status in (
@@ -211,7 +215,8 @@ async def start_run(
                     )
 
         async with get_async_session_ctx() as session:
-            assessment = await session.get(Assessment, assessment_id)
+            repo = AssessmentRepo(session)
+            assessment = await repo.get(assessment_id)
             if assessment is None:
                 raise LookupError(f"assessment {assessment_id} not found")
             await prepare_run(session, assessment_id, actor=actor)
@@ -261,19 +266,19 @@ async def stop_run(
         await reset_graph_checkpoint(assessment_id)
 
         async with get_async_session_ctx() as session:
-            assessment = await session.get(Assessment, assessment_id)
+            repo = AssessmentRepo(session)
+            audit_repo = AuditRepo(session)
+            assessment = await repo.get(assessment_id)
             if assessment is None:
                 raise LookupError(f"assessment {assessment_id} not found")
             assessment.status = AssessmentStatus.CANCELLED.value
             assessment.finished_at = utcnow()
-            session.add(
-                Audit(
-                    assessment_id=assessment_id,
-                    actor=actor,
-                    event_type="agent.stopped",
-                    payload={"reason": "stopped by operator"},
-                )
+            await audit_repo.add(
+                assessment_id=assessment_id,
+                actor=actor,
+                event_type="agent.stopped",
+                payload={"reason": "stopped by operator"},
             )
-            await session.commit()
+            await repo.session.commit()
 
         return await get_view(assessment_id, running=False)

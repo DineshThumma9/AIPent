@@ -5,49 +5,40 @@ from sqlmodel import col, select
 
 from app.domain.models import Approval, Assessment, Audit, Evidence, Finding, Step
 from app.api.schema import AssessmentDetail
+from app.persistence import AuditRepo, AssessmentRepo, FindingRepo, StepRepo
 
 
 async def load_assessment_detail(
     session: AsyncSession, assessment_id: int
 ) -> AssessmentDetail | None:
-    assessment = await session.get(Assessment, assessment_id)
+    repo = AssessmentRepo(session)
+    assessment = await repo.get(assessment_id)
     if assessment is None:
         return None
 
-    result = await session.execute(
-        select(Step).where(Step.assessment_id == assessment_id).order_by(Step.seq)
-    )
-    steps = list(result.scalars().all())
+    step_repo = StepRepo(session)
+    steps = await step_repo.get_all(assessment_id)
 
-    result = await session.execute(
-        select(Finding)
-        .where(Finding.assessment_id == assessment_id)
-        .order_by(col(Finding.id).desc())
-    )
-    findings = list(result.scalars().all())
+    finding_repo = FindingRepo(session)
+    findings = await finding_repo.get_all(assessment_id, limit=10000)
 
-    result = await session.execute(
+    audit_repo = AuditRepo(session)
+    evidence = await audit_repo.session.execute(
         select(Evidence)
         .join(Finding, Evidence.finding_id == Finding.id)
         .where(Finding.assessment_id == assessment_id)
         .order_by(Evidence.id)
     )
-    evidence = list(result.scalars().all())
+    evidence = list(evidence.scalars().all())
 
-    result = await session.execute(
+    approvals = await audit_repo.session.execute(
         select(Approval)
         .where(Approval.assessment_id == assessment_id)
         .order_by(col(Approval.id).desc())
     )
-    approvals = list(result.scalars().all())
+    approvals = list(approvals.scalars().all())
 
-    result = await session.execute(
-        select(Audit)
-        .where(Audit.assessment_id == assessment_id)
-        .order_by(col(Audit.id).desc())
-        .limit(100)
-    )
-    audit = list(result.scalars().all())
+    audit = await audit_repo.get_all_for_assessment(assessment_id, limit=100)
 
     return AssessmentDetail(
         **assessment.model_dump(),

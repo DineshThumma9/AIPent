@@ -18,16 +18,7 @@ from typing import Any, Callable
 from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
-from ..domain.models import Audit 
-from app.actions import (
-    ActionSpec,
-    ScopeError,
-    _artifact_dir,
-    check_scope,
-    execute_action,
-    get_action,
-    resolve_argv,
-)
+from app.actions import execute_action
 from app.core.config import settings
 from app.core.db import get_async_session_ctx
 from app.core.log import get_logger
@@ -38,7 +29,6 @@ from app.domain.models import (
     AssessmentStatus,
     Decision,
     Evidence,
-    Finding,
     Step,
     StepStatus,
     utcnow,
@@ -88,185 +78,6 @@ async def _next_seq(session: AsyncSession, assessment_id: int) -> int:
     )
     current = result.scalar()
     return (current or 0) + 1
-
-
-async def queue_step(
-    session: AsyncSession,
-    assessment: Assessment,
-    run_id: str,
-    role: str,
-    action: str,
-    target: str,
-    rationale: str,
-    *,
-    argv: list[str] | None = None,
-    detail: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Create a planned Step plus the pending Approval bound to its argv.
-
-    Returns a dict the tool can hand straight to the LLM. Policy refusals are
-    returned, not raised, so the agent can adapt in the same turn.
-    """
-    assessment_id = assessment.id or 0
-    spec = get_action(action)
-
-    try:
-        check_scope(assessment, target)
-    except ScopeError as exc:
-        return {"error": str(exc)}
-
-    result = await session.execute(
-        select(Audit)
-        .where(
-            Audit.assessment_id == assessment_id,
-            Audit.event_type == "action.queued",
-        )
-    )
-    events = result.scalars().all()
-    queued_count = sum(
-        1 for event in events if (event.payload or {}).get("run_id") == run_id
-    )
-    if queued_count >= settings.max_steps:
-        return {
-            "error": (
-                f"action budget exhausted ({settings.max_steps} queued actions "
-                "for this run); hand off and let the analyst review what ran"
-            )
-        }
-
-    result = await session.execute(
-        select(Step).where(
-            Step.assessment_id == assessment_id,
-            Step.action == action,
-            Step.status.in_(ACTIVE_STATES),
-        )
-    )
-    existing = result.scalars().all()
-    for row in existing:
-        duplicate = row.argv == argv if argv is not None else row.target == target
-        if duplicate:
-            return {
-                "queued": True,
-                "duplicate_of_step": row.id,
-                "status": row.status,
-                "note": "this action is already queued or executed; not resent",
-            }
-
-    step = Step(
-        assessment_id=assessment_id,
-        seq=await _next_seq(session, assessment_id),
-        action=action,
-        target=target,
-        rationale=rationale,
-        status=StepStatus.PLANNED.value,
-    )
-    session.add(step)
-    await session.flush()
-
-    if argv is None:
-        argv = resolve_argv(action, assessment, target, step.id or 0)
-    elif spec.output == "file":
-        # Inject artifact output path into agent-supplied argv.
-        output_path = str(_artifact_dir(assessment_id) / f"{step.id}{spec.suffix}")
-        argv = _inject_output_path(list(argv), output_path, spec)
-    step.argv = argv
-
-    approval_detail: dict[str, Any] = {
-        "role": role,
-        # Kept as an alias for the current dashboard read model.
-        "phase": role,
-        "rationale": rationale,
-        "tool": spec.tool,
-        "plan": [
-            {"action": action, "target": target, "rationale": rationale},
-        ],
-    }
-    if detail:
-        approval_detail.update(detail)
-
-    approval = Approval(
-        assessment_id=assessment_id,
-        step_id=step.id,
-        action=action,
-        argv=argv,
-        detail=approval_detail,
-    )
-    session.add(approval)
-    await session.flush()
-    audit(
-        session,
-        assessment_id,
-        "action.queued",
-        {
-            "run_id": run_id,
-            "role": role,
-            "step_id": step.id,
-            "action": action,
-            "target": target,
-            "argv": argv,
-        },
-    )
-    await session.commit()
-
-    return {
-        "queued": True,
-        "step_id": step.id,
-        "approval_id": approval.id,
-        "action": action,
-        "target": target,
-        "argv": argv,
-        "gate": "action",
-        "note": (
-            "Queued, not executed. The gate runs this action after your turn "
-            "ends; its result appears in the next observation. Do not poll "
-            "query_steps/query_findings waiting for it — call handoff now."
-        ),
-    }
-
-
-def _inject_output_path(argv: list[str], output_path: str, spec: ActionSpec) -> list[str]:
-    """Ensure agent-supplied argv writes to the artifact output path.
-
-    Different scanners use different flags for their output destination:
-
-    - dirb: ``-o <path>``
-    - sqlmap: ``--output-dir <directory>``
-    - nikto: ``-output <path>``
-    - http_probe: no file flag injected (writes its own artifact)
-
-    Replaces an existing matching flag, or appends one, so the executor
-    finds the artifact where it expects it.
-    """
-    from pathlib import Path
-
-    result = list(argv)
-    if spec.tool == "dirb":
-        try:
-            idx = result.index("-o")
-            if idx + 1 < len(result):
-                result[idx + 1] = output_path
-        except ValueError:
-            result.extend(["-o", output_path])
-    elif spec.tool == "sqlmap":
-        output_dir = str(Path(output_path).parent)
-        try:
-            idx = result.index("--output-dir")
-            if idx + 1 < len(result):
-                result[idx + 1] = output_dir
-        except ValueError:
-            result.extend(["--output-dir", output_dir])
-    elif spec.tool == "http_probe":
-        return result
-    else:
-        try:
-            idx = result.index("-output")
-            if idx + 1 < len(result):
-                result[idx + 1] = output_path
-        except ValueError:
-            result.extend(["-output", output_path])
-    return result
-
-
 async def _step_snapshot(assessment_id: int) -> dict[str, Any] | None:
     async with get_async_session_ctx() as session:
         result = await session.execute(

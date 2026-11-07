@@ -250,3 +250,44 @@ def resolve_argv(
 def check_scope(assessment: Assessment, target: str) -> None:
     if target in assessment.exclusions or target not in assessment.targets:
         raise ScopeError(f"{target} is not in scope for assessment {assessment.id}")
+
+
+def inject_output_path(argv: list[str], output_path: str, spec: ActionSpec) -> list[str]:
+    """Ensure agent-supplied argv writes to the artifact output path.
+
+    Different scanners use different flags for their output destination:
+
+    - dirb: ``-o <path>``
+    - sqlmap: ``--output-dir <directory>``
+    - nikto: ``-output <path>``
+    - http_probe: no file flag injected (writes its own artifact)
+
+    Replaces an existing matching flag, or appends one, so the executor
+    finds the artifact where it expects it.
+    """
+    result = list(argv)
+    if spec.tool == "dirb":
+        try:
+            idx = result.index("-o")
+            if idx + 1 < len(result):
+                result[idx + 1] = output_path
+        except ValueError:
+            result.extend(["-o", output_path])
+    elif spec.tool == "sqlmap":
+        output_dir = str(Path(output_path).parent)
+        try:
+            idx = result.index("--output-dir")
+            if idx + 1 < len(result):
+                result[idx + 1] = output_dir
+        except ValueError:
+            result.extend(["--output-dir", output_dir])
+    elif spec.tool == "http_probe":
+        return result
+    else:
+        try:
+            idx = result.index("-output")
+            if idx + 1 < len(result):
+                result[idx + 1] = output_path
+        except ValueError:
+            result.extend(["-output", output_path])
+    return result

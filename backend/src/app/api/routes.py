@@ -16,17 +16,17 @@ from app.api.schema import (
     MessageIn,
     MessageOut,
 )
-from app.core.db import get_session
+from app.core.db import get_session, get_async_session_ctx
 from app.core.events import stream_assessment_events
 from app.domain.models import (
     Assessment,
     AssessmentStatus,
-    Audit,
     Message,
     StepStatus,
     utcnow,
 )
 from app.domain.risk import refresh_risk
+from app.persistence import AssessmentRepo, AuditRepo
 from app.runtime import runner
 from app.runtime.scan import ScopeError, run_scan
 
@@ -35,8 +35,9 @@ router = APIRouter()
 
 @router.get("/assessments", response_model=list[Assessment])
 async def list_assessments(session: AsyncSession = Depends(get_session)):
-    result = await session.execute(
-        select(Assessment).order_by(col(Assessment.id).desc())
+    repo = AssessmentRepo(session)
+    result = await repo.session.execute(
+        select(Assessment).order_by(Assessment.id.desc())
     )
     return list(result.scalars().all())
 
@@ -45,19 +46,13 @@ async def list_assessments(session: AsyncSession = Depends(get_session)):
 async def create_assessment(
     payload: AssessmentCreate, session: AsyncSession = Depends(get_session)
 ):
-    assessment = Assessment(**payload.model_dump())
-    session.add(assessment)
-    await session.flush()
-    session.add(
-        Audit(
-            assessment_id=assessment.id,
-            event_type="assessment.created",
-            payload={"title": assessment.title, "targets": assessment.targets},
-        )
+    repo = AssessmentRepo(session)
+    return await repo.create(
+        title=payload.title,
+        request=payload.request,
+        targets=payload.targets,
+        ports=payload.ports,
     )
-    await session.commit()
-    await session.refresh(assessment)
-    return assessment
 
 
 @router.get("/assessments/{assessment_id}", response_model=AssessmentDetail)
@@ -76,7 +71,8 @@ async def update_assessment_request(
     payload: AssessmentRequestUpdate,
     session: AsyncSession = Depends(get_session),
 ):
-    assessment = await session.get(Assessment, assessment_id)
+    repo = AssessmentRepo(session)
+    assessment = await repo.get(assessment_id)
     if assessment is None:
         raise HTTPException(404, "assessment not found")
 
@@ -90,16 +86,15 @@ async def update_assessment_request(
         raise HTTPException(409, "cannot change the objective while a run is active")
 
     assessment.request = payload.request.strip()
-    session.add(
-        Audit(
-            assessment_id=assessment_id,
-            actor="analyst",
-            event_type="assessment.request_updated",
-            payload={"request": assessment.request[:500]},
-        )
+    repo = AuditRepo(session)
+    await repo.add(
+        assessment_id=assessment_id,
+        event_type="assessment.request_updated",
+        payload={"request": assessment.request[:500]},
+        actor="analyst",
     )
-    await session.commit()
-    await session.refresh(assessment)
+    await repo.session.commit()
+    await repo.session.refresh(assessment)
     return assessment
 
 
@@ -108,7 +103,8 @@ async def list_messages(
     assessment_id: int,
     session: AsyncSession = Depends(get_session),
 ):
-    if await session.get(Assessment, assessment_id) is None:
+    assessment = await session.get(Assessment, assessment_id)
+    if assessment is None:
         raise HTTPException(404, "assessment not found")
     result = await session.execute(
         select(Message)
@@ -124,7 +120,8 @@ async def create_message(
     payload: MessageIn,
     session: AsyncSession = Depends(get_session),
 ):
-    if await session.get(Assessment, assessment_id) is None:
+    assessment = await session.get(Assessment, assessment_id)
+    if assessment is None:
         raise HTTPException(404, "assessment not found")
 
     message = Message(
@@ -143,12 +140,12 @@ async def assessment_events(
     assessment_id: int,
     request: Request,
     once: bool = Query(False, include_in_schema=False),
+    
 ):
     """Replay a snapshot, then stream database changes until the client leaves."""
-    from app.core.db import get_async_session_ctx
-
     async with get_async_session_ctx() as session:
-        if await session.get(Assessment, assessment_id) is None:
+        repo = AssessmentRepo(session)
+        if await repo.get(assessment_id) is None:
             raise HTTPException(404, "assessment not found")
 
     return StreamingResponse(
@@ -164,14 +161,15 @@ async def assessment_events(
 
 @router.post("/assessments/{assessment_id}/scan", response_model=AssessmentDetail)
 async def scan(assessment_id: int, session: AsyncSession = Depends(get_session)):
-    assessment = await session.get(Assessment, assessment_id)
+    repo = AssessmentRepo(session)
+    assessment = await repo.get(assessment_id)
     if assessment is None:
         raise HTTPException(404, f"assessment {assessment_id} not found")
 
     previous_status = assessment.status
     assessment.status = AssessmentStatus.RUNNING.value
     assessment.finished_at = None
-    await session.commit()
+    await repo.session.commit()
 
     try:
         step = await run_scan(session, assessment_id)
@@ -179,7 +177,7 @@ async def scan(assessment_id: int, session: AsyncSession = Depends(get_session))
         raise HTTPException(404, str(exc)) from exc
     except ScopeError as exc:
         assessment.status = previous_status
-        await session.commit()
+        await repo.session.commit()
         raise HTTPException(400, str(exc)) from exc
 
     assessment.status = (
@@ -189,7 +187,7 @@ async def scan(assessment_id: int, session: AsyncSession = Depends(get_session))
     )
     assessment.finished_at = utcnow()
     await refresh_risk(session, assessment_id)
-    await session.commit()
+    await repo.session.commit()
 
     detail = await load_assessment_detail(session, assessment_id)
     if detail is None:
