@@ -47,17 +47,41 @@
   ] else [
     Every step is recorded with its exact argv, output artifact and SHA-256.
   ]
+  #if "cve_snapshot" in data [
+    \
+    #text(size: 8pt, fill: luma(110))[CVE data snapshot: #data.cve_snapshot]
+  ]
+]
+
+#if data.narrative.methodology != "" [
+  = Methodology
+
+  #data.narrative.methodology
+]
+
+#if data.narrative.risk_overview != "" [
+  = Risk overview
+
+  #data.narrative.risk_overview
 ]
 
 = Executive summary
 
-#if data.findings.len() == 0 [
-  No findings were recorded. This is a coverage statement for the actions below,
-  not proof that the target is free of vulnerabilities.
+#if data.narrative.executive_summary != "" [
+  #data.narrative.executive_summary
 ] else [
-  #data.findings.len() findings were recorded across #data.tool_count tool(s).
-  The highest deterministic risk score is #data.risk.score / 10.
-  #if data.risk.confirmed > 0 [ #data.risk.confirmed finding(s) are corroborated by more than one tool. ]
+  #if data.findings.len() == 0 [
+    No findings were recorded. This is a coverage statement for the actions below,
+    not proof that the target is free of vulnerabilities.
+  ] else [
+    #data.findings.len() findings were recorded across #data.tool_count tool(s).
+    The highest deterministic risk score is #data.risk.score / 10.
+    #if data.risk.confirmed > 0 [ #data.risk.confirmed finding(s) are corroborated by more than one tool. ]
+  ]
+  #if data.narrative_source == "evidence-only" [
+    #v(4pt)
+    #text(size: 8.5pt, fill: luma(100))[_Narrative generation was unavailable; this report is evidence-only._]
+  ]
 ]
 
 #v(6pt)
@@ -108,11 +132,39 @@
     )
 
     #v(4pt)
-    #f.description
+    #if f.narrative != none [
+      *Technical analysis.* #f.narrative.technical_analysis
 
-    #if f.remediation != "" [
-      *Remediation.* #f.remediation
-      #v(3pt)
+      #v(2pt)
+      *Impact.* #f.narrative.impact
+
+      #v(2pt)
+      *Remediation.* #f.narrative.remediation
+
+      #v(2pt)
+      *Confidence.* #f.narrative.confidence_statement
+
+      #v(2pt)
+      *Observed vs inferred.* #f.narrative.observed_vs_inferred
+    ] else [
+      #f.description
+
+      #if f.remediation != "" [
+        #v(2pt)
+        *Remediation.* #f.remediation
+      ]
+    ]
+
+    #v(4pt)
+    #if "finding_cves" in f and f.finding_cves.len() > 0 [
+      *CVE Citations & Upstream Advisories.*
+      #for fc in f.finding_cves [
+        - #text(font: "DejaVu Sans Mono")[#fc.cve_id] (#fc.source, #fc.match_reason) #if fc.source_url != "" [ · #text(size: 7.5pt)[#fc.source_url] ]
+      ]
+      #v(2pt)
+    ] else if f.cve.len() == 0 and f.endpoint != "" and f.endpoint != "/" [
+      #text(size: 8pt, fill: luma(120))[_CVE enrichment not possible; version not exposed._]
+      #v(2pt)
     ]
 
     #if f.evidence.len() > 0 [
@@ -148,24 +200,69 @@
 
 = Limitations
 
+#if data.narrative.limitations != "" [
+  #data.narrative.limitations
+  #v(4pt)
+]
+
 - This is a time-boxed, non-exploiting assessment. It does not prove absence of
   vulnerabilities.
 - Tool output can contain false positives; suspected findings are labelled.
 - No credentials, destructive tests, denial of service, or out-of-scope targets
   were used.
-- nmap, Nikto and OWASP ZAP baseline were the only live tools.
+
+#let gaps = data.steps.filter(s => s.status == "rejected" or s.status == "failed" or s.status == "timeout")
+#if gaps.len() > 0 [
+  #v(4pt)
+  *Coverage gaps and rejected actions:*
+  #for g in gaps [
+    - Step #g.seq (#g.action): status is #g.status#if g.target != "" [ on #g.target].
+  ]
+]
+
+#let rejected_approvals = data.approvals.filter(a => a.decision == "rejected")
+#if rejected_approvals.len() > 0 [
+  #v(4pt)
+  *Rejected approvals:*
+  #for ra in rejected_approvals [
+    - #ra.action was rejected by #ra.actor#if ra.reason != "" [ (#ra.reason)].
+  ]
+]
+
+#if data.narrative.recommendations.len() > 0 [
+  = Recommendations
+
+  #for r in data.narrative.recommendations [
+    - #r
+  ]
+]
+
+#if data.narrative.conclusion != "" [
+  = Conclusion
+
+  #data.narrative.conclusion
+]
 
 = Evidence index
 
-#table(
-  columns: (auto, 1fr, auto, 1fr),
-  inset: 5pt,
-  stroke: 0.4pt + luma(200),
-  [*Step*], [*Artifact*], [*SHA-256*], [*Target*],
-  ..data.artifacts.map(a => (
-    [#a.seq],
-    [#a.path],
-    [#text(size: 7pt)[#a.sha]],
-    [#a.target],
-  )).flatten(),
-)
+#if data.artifacts.len() == 0 [
+  No artifact files recorded.
+] else [
+  #table(
+    columns: (auto, 1fr, auto, 1fr),
+    inset: 5pt,
+    stroke: 0.4pt + luma(200),
+    [*Step*], [*Artifact*], [*SHA-256*], [*Target*],
+    ..data.artifacts.map(a => (
+      [#a.seq],
+      [#a.path],
+      [#text(size: 7pt)[#a.sha]],
+      [#a.target],
+    )).flatten(),
+  )
+]
+
+#v(14pt)
+#align(center)[
+  #text(size: 8pt, fill: luma(120))[Narrative source: #data.narrative_source]
+]

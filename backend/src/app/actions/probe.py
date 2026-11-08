@@ -1,4 +1,4 @@
-"""http_probe action: safe non-destructive HTTP verification probe.
+"""curl_tool action: safe non-destructive HTTP request verification.
 
 Added to the closed ACTIONS catalogue so a human action gate binds to the exact
 argv (method + url + headers) before the network call happens. This action is
@@ -19,7 +19,7 @@ from app.domain.models import Severity, FindingStatus
 
 SAFE_METHODS = ("GET", "HEAD", "POST")
 MAX_TIMEOUT_S = 30
-PROBE_MARKER = "http_probe"
+PROBE_MARKER = "curl_tool"
 
 
 class ProbeResult(BaseModel):
@@ -46,7 +46,7 @@ def build_argv(
 ) -> list[str]:
     """Descriptor stored in step.argv so approval binds to these exact args.
 
-    Format: ["http_probe", METHOD, URL, headers_json, expected_status, body]
+    Format: ["curl_tool", METHOD, URL, headers_json, expected_status, body]
     """
     headers = headers or {}
     if not url.startswith(("http://", "https://")):
@@ -62,7 +62,7 @@ def build_argv(
     ]
 
 
-async def run_probe(
+async def run_curl(
     method: str,
     url: str,
     headers: dict[str, str],
@@ -70,9 +70,9 @@ async def run_probe(
     expected_status: int = 200,
     timeout: int = 15,
 ) -> ProbeResult:
-    """Execute the actual probe and return the response snapshot.
+    """Execute the actual HTTP request (curl) and return the response snapshot.
 
-    The agent cannot mutate the target: DELETE/PUT/PPATCH is placed behind the
+    The agent cannot mutate the target: DELETE/PUT/PATCH is placed behind the
     executor and stripped before this function is called from a planned step.
     """
     import httpx
@@ -111,7 +111,7 @@ def parse(
 ) -> list[FindingDraft]:
     """Read the stored probe artifact and decide if a new finding is necessary.
 
-    http_probe does not create findings automatically; instead the calling
+    curl_tool does not create findings automatically; instead the calling
     skill's evaluate() consumes the stored descriptor. We emit a draft only for
     an explicitly recorded success/failure interesting enough to keep.
     """
@@ -120,7 +120,7 @@ def parse(
     except (TypeError, json.JSONDecodeError):
         return []
 
-    probe = payload.get("probe_result", {})
+    probe = payload.get("curl_result") or payload.get("probe_result") or {}
     code = probe.get("status_code")
     if code not in (200, 201, 301, 302, 403):
         return []
@@ -147,7 +147,7 @@ def parse(
             status=FindingStatus.SUSPECTED,
             evidence=[
                 EvidenceDraft(
-                    locator={"tool": "http_probe", "url": probe.get("url")},
+                    locator={"tool": "curl_tool", "url": probe.get("url"), "http_status": code},
                     excerpt=(probe.get("body_preview") or "")[:600],
                 )
             ],

@@ -60,6 +60,7 @@ from app.domain.models import (
 from app.persistence.finding_repo import FindingRepo
 from app.persistence.steering_repo import SteeringRepo
 from app.persistence.step_repo import StepRepo
+from app.reporting.narrative import build_narrative_context, write_narrative_result
 from app.reporting.report import generate_report
 
 
@@ -508,7 +509,7 @@ async def prepare_node(state: AssessmentState) -> Command:
                 params["ports"] = str(ports_val)
 
         action_name = spec.action or spec.name
-        if action_name in ("curl_tool", "http_probe"):
+        if action_name == "curl_tool":
             probe_res = await session.execute(
                 select(Audit).where(
                     Audit.assessment_id == state["assessment_id"],
@@ -518,7 +519,7 @@ async def prepare_node(state: AssessmentState) -> Command:
             probe_events = [
                 e for e in probe_res.scalars().all()
                 if (e.payload or {}).get("run_id") == state["run_id"]
-                and (e.payload or {}).get("action") in ("curl_tool", "http_probe")
+                and (e.payload or {}).get("action") == "curl_tool"
             ]
             if len(probe_events) >= settings.max_validation_probes:
                 obs = error_observation(
@@ -526,6 +527,119 @@ async def prepare_node(state: AssessmentState) -> Command:
                     target,
                     f"Validation probe budget exhausted ({settings.max_validation_probes} probes per run).",
                 )
+                return Command(
+                    update={
+                        "messages": [
+                            *state["messages"],
+                            ToolMessage(
+                                tool_call_id=tool_call["id"],
+                                name=tool_call["name"],
+                                status="error",
+                                content=obs.model_dump_json(),
+                            ),
+                        ]
+                    },
+                    goto="model",
+                )
+
+        if action_name == "hashcat_crack":
+            base = settings.artifacts_path / str(assessment_id)
+            base.mkdir(parents=True, exist_ok=True)
+            source_step_id = getattr(args, "source_step_id", None)
+            hash_val = getattr(args, "hash_value", None)
+            hash_file = getattr(args, "hash_file", None)
+
+            if hash_val:
+                source_step = await session.get(Step, source_step_id)
+                if source_step is None or source_step.assessment_id != assessment_id:
+                    obs = error_observation(action_name, target, f"source_step_id {source_step_id} not found")
+                    return Command(
+                        update={
+                            "messages": [
+                                *state["messages"],
+                                ToolMessage(
+                                    tool_call_id=tool_call["id"],
+                                    name=tool_call["name"],
+                                    status="error",
+                                    content=obs.model_dump_json(),
+                                ),
+                            ]
+                        },
+                        goto="model",
+                    )
+                if not source_step.output_path or not Path(source_step.output_path).exists():
+                    obs = error_observation(action_name, target, f"source_step_id {source_step_id} has no artifact file")
+                    return Command(
+                        update={
+                            "messages": [
+                                *state["messages"],
+                                ToolMessage(
+                                    tool_call_id=tool_call["id"],
+                                    name=tool_call["name"],
+                                    status="error",
+                                    content=obs.model_dump_json(),
+                                ),
+                            ]
+                        },
+                        goto="model",
+                    )
+                text = Path(source_step.output_path).read_text(errors="replace")
+                if hash_val.lower() not in text.lower():
+                    obs = error_observation(action_name, target, "hash_value does not appear in that artifact")
+                    return Command(
+                        update={
+                            "messages": [
+                                *state["messages"],
+                                ToolMessage(
+                                    tool_call_id=tool_call["id"],
+                                    name=tool_call["name"],
+                                    status="error",
+                                    content=obs.model_dump_json(),
+                                ),
+                            ]
+                        },
+                        goto="model",
+                    )
+                input_path = base / f"hashcat-input-{source_step_id}.txt"
+                input_path.write_text(hash_val.strip() + "\n")
+                params["input_path"] = str(input_path)
+            elif hash_file:
+                input_path = (base / hash_file).resolve()
+                if not input_path.is_relative_to(base):
+                    obs = error_observation(action_name, target, "hash_file must stay inside the assessment artifact directory")
+                    return Command(
+                        update={
+                            "messages": [
+                                *state["messages"],
+                                ToolMessage(
+                                    tool_call_id=tool_call["id"],
+                                    name=tool_call["name"],
+                                    status="error",
+                                    content=obs.model_dump_json(),
+                                ),
+                            ]
+                        },
+                        goto="model",
+                    )
+                if not input_path.exists():
+                    obs = error_observation(action_name, target, f"hash_file {hash_file} does not exist")
+                    return Command(
+                        update={
+                            "messages": [
+                                *state["messages"],
+                                ToolMessage(
+                                    tool_call_id=tool_call["id"],
+                                    name=tool_call["name"],
+                                    status="error",
+                                    content=obs.model_dump_json(),
+                                ),
+                            ]
+                        },
+                        goto="model",
+                    )
+                params["input_path"] = str(input_path)
+            else:
+                obs = error_observation(action_name, target, "hashcat_crack needs source_step_id + hash_value or hash_file")
                 return Command(
                     update={
                         "messages": [
@@ -1075,9 +1189,50 @@ async def review_node(state: AssessmentState) -> Command:
 
 
 async def report_writer_node(state: AssessmentState) -> Command:
-    """Report narrative generator node (stubbed for Phase 1, passthrough to report)."""
+    """Report narrative generator node (LLM structured output + Python validation)."""
+    assessment_id = state["assessment_id"]
+    narrative_data = None
+    async with get_async_session_ctx() as session:
+        try:
+            context = await build_narrative_context(session, assessment_id)
+            narrative, err = await write_narrative_result(context)
+            if narrative is not None:
+                narrative_data = narrative.model_dump()
+                session.add(
+                    Audit(
+                        assessment_id=assessment_id,
+                        event_type="report.narrative_generated",
+                        payload={
+                            "findings_count": len(narrative.findings),
+                            "executive_summary_len": len(narrative.executive_summary),
+                        },
+                    )
+                )
+            else:
+                session.add(
+                    Audit(
+                        assessment_id=assessment_id,
+                        event_type="report.narrative_fallback",
+                        payload={
+                            "reason": "validation_failed_or_model_error",
+                            "error": err or "unknown",
+                        },
+                    )
+                )
+            await session.commit()
+        except Exception as exc:
+            log.exception("report_writer_node unexpected exception: %s", exc)
+            session.add(
+                Audit(
+                    assessment_id=assessment_id,
+                    event_type="report.narrative_fallback",
+                    payload={"reason": "exception", "error": str(exc)},
+                )
+            )
+            await session.commit()
+
     return Command(
-        update={"report_narrative": None},
+        update={"report_narrative": narrative_data},
         goto="report",
     )
 
@@ -1085,8 +1240,9 @@ async def report_writer_node(state: AssessmentState) -> Command:
 async def report_node(state: AssessmentState) -> Command:
     """Compile PDF report and finish run."""
     assessment_id = state["assessment_id"]
+    narrative = state.get("report_narrative")
     async with get_async_session_ctx() as session:
-        report_path = await generate_report(session, assessment_id)
+        report_path = await generate_report(session, assessment_id, narrative=narrative)
         assessment = await session.get(Assessment, assessment_id)
         if assessment:
             assessment.status = AssessmentStatus.COMPLETED.value

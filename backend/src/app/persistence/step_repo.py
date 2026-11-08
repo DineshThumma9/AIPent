@@ -45,7 +45,7 @@ def _step_matches(
     """
     if row.target != target:
         return False
-    if row.action != "http_probe":
+    if row.action != "curl_tool":
         return True
     probe = params or {}
     method = str(probe.get("method", "GET")).upper()
@@ -110,11 +110,11 @@ class StepRepo(BaseRepo):
                 )
             }
 
-        if action == "http_probe":
+        if action == "curl_tool":
             probes = sum(
                 1
                 for event in run_events
-                if (event.payload or {}).get("action") == "http_probe"
+                if (event.payload or {}).get("action") == "curl_tool"
             )
             if probes >= settings.max_validation_probes:
                 return {
@@ -271,7 +271,7 @@ class StepRepo(BaseRepo):
         result = await self.session.execute(
             select(func.count(Step.id)).where(
                 Step.assessment_id == assessment_id,
-                Step.action == "http_probe",
+                Step.action == "curl_tool",
                 Step.status.in_(ACTIVE_STATES),
             )
         )

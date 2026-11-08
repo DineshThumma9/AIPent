@@ -55,14 +55,18 @@ models =   {
 
 
 thinkings_levels = {
-    "supervisor":ThinkingLevel.HIGH,
-    "recon":ThinkingLevel.MEDIUM,
-    "validation":ThinkingLevel.MEDIUM,
-    "discovery":ThinkingLevel.MEDIUM
+    "supervisor": ThinkingLevel.HIGH,
+    "recon": ThinkingLevel.MEDIUM,
+    "validation": ThinkingLevel.MEDIUM,
+    "discovery": ThinkingLevel.MEDIUM,
+    "report": ThinkingLevel.HIGH,
+    "coordinator": ThinkingLevel.LOW,
 }
-def _build_model() -> BaseChatModel:
+
+
+def _build_model(override_model: str | None = None) -> BaseChatModel:
     provider = settings.llm_provider.lower()
-    model_name = settings.llm_model
+    model_name = override_model or settings.llm_model
 
     if provider not in models:
         raise ValueError(f"{provider} not available")
@@ -71,8 +75,14 @@ def _build_model() -> BaseChatModel:
 
 
 def build_role_model(role: str) -> BaseChatModel:
-    """Return the configured chat model for a role."""
-    return _build_model()
+    """Return the configured chat model for a role, with per-role override support."""
+    override = getattr(settings, f"{role}_model", None)
+    return _build_model(override)
+
+
+def build_report_model() -> BaseChatModel:
+    """Build the LLM for report narrative generation (strongest configured model)."""
+    return _build_model(settings.report_model)
 
 
 def build_role_agent(role: str):

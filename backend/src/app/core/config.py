@@ -62,6 +62,19 @@ class Settings(BaseSettings):
     openrouter_model: str | None = None
     huggingface_model: str | None = None
 
+    # Phase 5 reporting settings and per-role model overrides (§11.3)
+    report_model: str | None = None
+    report_thinking: str = "high"
+    recon_model: str | None = None
+    discovery_model: str | None = None
+    validation_model: str | None = None
+    supervisor_model: str | None = None
+    coordinator_model: str | None = None
+
+    # Phase 5.5 Vulnify CVE catalog settings
+    vulnify_db_path: str = "vulnify.db"
+    vulnify_release: str = "vulnify v2026.11.02"
+
     # Ollama Cloud base URL (e.g. https://ollama.com). If unset, uses local Ollama.
     ollama_base_url: str | None = os.getenv("OLLAMA_BASE_URL")
 

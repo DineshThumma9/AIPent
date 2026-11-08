@@ -169,7 +169,7 @@ async def observation_from_step(session: AsyncSession, step: Step) -> Observatio
             next_hint="Discovered paths may expose sensitive resources or APIs. Test endpoints for access control.",
         )
 
-    if step.action in ("http_probe", "curl_tool"):
+    if step.action == "curl_tool":
         http_status = None
         body_excerpt = ""
         from pathlib import Path
@@ -177,12 +177,12 @@ async def observation_from_step(session: AsyncSession, step: Step) -> Observatio
             try:
                 import json
                 p_data = json.loads(Path(step.output_path).read_text(encoding="utf-8", errors="replace"))
-                res = p_data.get("probe_result") or {}
+                res = p_data.get("curl_result") or p_data.get("probe_result") or {}
                 http_status = res.get("status_code")
-                body_excerpt = (res.get("body") or "")[:200]
+                body_excerpt = (res.get("body_preview") or res.get("body") or "")[:200]
             except Exception:
                 pass
-        status_part = f"HTTP {http_status}" if http_status is not None else "Probe succeeded"
+        status_part = f"HTTP {http_status}" if http_status is not None else "HTTP request succeeded"
         body_part = f" - excerpt: {body_excerpt!r}" if body_excerpt else ""
         summary_str = f"{status_part}{body_part}"
         return Observation(
@@ -198,6 +198,61 @@ async def observation_from_step(session: AsyncSession, step: Step) -> Observatio
             artifact=artifact_info,
             errors=[],
             next_hint="Compare observed HTTP status and response against expected_observation and would_falsify.",
+        )
+
+    if step.action == "whatweb":
+        count = len(findings)
+        summary_str = f"WhatWeb scan completed; {count} technology findings recorded."
+        return Observation(
+            ok=True,
+            status="succeeded",
+            action=step.action,
+            target=step.target,
+            step_id=step.id,
+            summary=summary_str,
+            findings_created=created_ids,
+            findings_updated=updated_ids,
+            evidence_ids=evidence_ids,
+            artifact=artifact_info,
+            errors=[],
+            next_hint="Technologies detected can be correlated against known CVEs or used to form hypotheses.",
+        )
+
+    if step.action == "sslscan":
+        count = len(findings)
+        summary_str = f"sslscan completed; {count} TLS/SSL protocol/certificate facts identified."
+        return Observation(
+            ok=True,
+            status="succeeded",
+            action=step.action,
+            target=step.target,
+            step_id=step.id,
+            summary=summary_str,
+            findings_created=created_ids,
+            findings_updated=updated_ids,
+            evidence_ids=evidence_ids,
+            artifact=artifact_info,
+            errors=[],
+            next_hint="Evaluate deprecated SSL/TLS protocols or certificate validity.",
+        )
+
+    if step.action == "hashcat_crack":
+        # Strict redaction per §9.1: Plaintext passwords are NEVER returned or stored in observation
+        cracked = len(findings) > 0
+        summary_str = f"{len(findings)} hash(es) cracked; plaintext redacted." if cracked else "0 hashes cracked; password candidates exhausted."
+        return Observation(
+            ok=True,
+            status="succeeded",
+            action=step.action,
+            target=step.target,
+            step_id=step.id,
+            summary=summary_str,
+            findings_created=created_ids,
+            findings_updated=updated_ids,
+            evidence_ids=evidence_ids,
+            artifact=artifact_info,
+            errors=[],
+            next_hint="Assess whether weak credential policy impacts assessment risk.",
         )
 
     if step.action == "sqlmap_scan":

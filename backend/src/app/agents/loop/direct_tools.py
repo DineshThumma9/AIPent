@@ -175,6 +175,208 @@ async def update_finding_status(
     )
 
 
+async def lookup_cve_direct(
+    session: AsyncSession,
+    assessment_id: int,
+    cve_id: str | None = None,
+    vendor: str | None = None,
+    product: str | None = None,
+    version: str | None = None,
+    cpe: str | None = None,
+) -> Observation:
+    from app.intel.cve import get_cve_catalog
+
+    catalog = get_cve_catalog()
+    if not catalog.is_available:
+        return Observation(
+            ok=True,
+            status="succeeded",
+            action="lookup_cve",
+            target=cve_id or f"{vendor}:{product}",
+            summary="CVE intelligence disabled (catalog not available).",
+            facts={"available": False, "cve": None, "candidates": []},
+        )
+
+    if cve_id:
+        record = catalog.hydrate(cve_id)
+        if not record:
+            return Observation(
+                ok=True,
+                status="succeeded",
+                action="lookup_cve",
+                target=cve_id,
+                summary=f"CVE {cve_id} not found in catalog.",
+                facts={"available": True, "found": False, "cve_id": cve_id},
+            )
+        summary = (
+            f"CVE {record.cve_id}: CVSS {record.cvss_score or 'N/A'} ({record.cvss_severity or 'unknown'}). "
+            f"KEV listed: {record.kev}. EPSS: {record.epss_score or 'N/A'}. "
+            f"{record.summary[:200]}"
+        )
+        return Observation(
+            ok=True,
+            status="succeeded",
+            action="lookup_cve",
+            target=record.cve_id,
+            summary=summary,
+            facts={
+                "available": True,
+                "found": True,
+                "cve_id": record.cve_id,
+                "title": record.title,
+                "cvss_score": record.cvss_score,
+                "cvss_severity": record.cvss_severity,
+                "cwe": record.cwe,
+                "kev": record.kev,
+                "epss_score": record.epss_score,
+                "references": [r.url for r in record.references[:5]],
+            },
+        )
+
+    # Candidate search
+    candidates = catalog.candidates(vendor=vendor or "", product=product or "", version=version, cpe=cpe)
+    if not candidates:
+        target = cpe or f"{vendor}:{product}:{version or '*'}"
+        return Observation(
+            ok=True,
+            status="succeeded",
+            action="lookup_cve",
+            target=target,
+            summary=f"No grounded CVE candidates found for {target}.",
+            facts={"available": True, "candidates": []},
+        )
+
+    cve_list = [c.cve_id for c in candidates[:10]]
+    summary = f"Found {len(candidates)} candidate CVEs (top: {', '.join(cve_list[:5])})."
+    return Observation(
+        ok=True,
+        status="succeeded",
+        action="lookup_cve",
+        target=cpe or f"{vendor}:{product}",
+        summary=summary,
+        facts={
+            "available": True,
+            "candidates": [
+                {
+                    "cve_id": c.cve_id,
+                    "cvss_score": c.cvss_score,
+                    "cvss_severity": c.cvss_severity,
+                    "confidence": c.confidence,
+                    "match_reason": c.match_reason,
+                    "source_url": c.source_url,
+                }
+                for c in candidates[:10]
+            ],
+        },
+    )
+
+
+async def hash_identify_direct(
+    session: AsyncSession,
+    assessment_id: int,
+    hash_value: str,
+    source_step_id: int,
+) -> Observation:
+    """Identify the hash type using local heuristics, verifying it appears in the artifact."""
+    from app.domain.models import Audit
+
+    step = await session.get(Step, source_step_id)
+    if step is None or step.assessment_id != assessment_id:
+        return Observation(
+            ok=False,
+            status="error",
+            action="hash_identify",
+            target=hash_value[:16],
+            summary=f"Source step {source_step_id} not found in this assessment.",
+            errors=[f"step {source_step_id} not found"],
+        )
+
+    if not step.output_path or not Path(step.output_path).exists():
+        return Observation(
+            ok=False,
+            status="error",
+            action="hash_identify",
+            target=hash_value[:16],
+            summary=f"Source step {source_step_id} has no artifact file.",
+            errors=["artifact file not found"],
+        )
+
+    text = Path(step.output_path).read_text(errors="replace")
+    clean_val = hash_value.strip()
+    if clean_val.lower() not in text.lower():
+        return Observation(
+            ok=False,
+            status="rejected",
+            action="hash_identify",
+            target=clean_val[:16],
+            summary="Hash identification rejected: hash_value does not appear in the source step artifact.",
+            errors=["hash_value not present in artifact"],
+        )
+
+    # Local Python heuristics per §9.1
+    candidates: list[dict[str, Any]] = []
+    confidence = "medium"
+
+    if clean_val.startswith(("$2a$", "$2b$", "$2y$")):
+        candidates.append({"mode": 3200, "name": "bcrypt"})
+        confidence = "high"
+    elif clean_val.startswith("$6$"):
+        candidates.append({"mode": 1800, "name": "sha512crypt"})
+        confidence = "high"
+    elif clean_val.startswith("$5$"):
+        candidates.append({"mode": 7400, "name": "sha256crypt"})
+        confidence = "high"
+    elif clean_val.startswith("$1$"):
+        candidates.append({"mode": 500, "name": "md5crypt"})
+        confidence = "high"
+    elif len(clean_val) == 32 and all(c in "0123456789abcdefABCDEF" for c in clean_val):
+        candidates.append({"mode": 0, "name": "MD5"})
+        candidates.append({"mode": 2600, "name": "md5(md5($pass))"})
+        confidence = "medium"
+    elif len(clean_val) == 40 and all(c in "0123456789abcdefABCDEF" for c in clean_val):
+        candidates.append({"mode": 100, "name": "SHA-1"})
+        candidates.append({"mode": 110, "name": "sha1($pass.$salt)"})
+        confidence = "medium"
+    elif len(clean_val) == 64 and all(c in "0123456789abcdefABCDEF" for c in clean_val):
+        candidates.append({"mode": 1400, "name": "SHA-256"})
+        confidence = "medium"
+    else:
+        confidence = "low"
+
+    session.add(
+        Audit(
+            assessment_id=assessment_id,
+            event_type="hash.identified",
+            payload={
+                "source_step_id": source_step_id,
+                "candidates": candidates,
+                "confidence": confidence,
+            },
+        )
+    )
+    await session.commit()
+
+    cand_names = [c["name"] for c in candidates]
+    summary = (
+        f"Identified {len(candidates)} candidate algorithm(s): {', '.join(cand_names)} (confidence: {confidence})."
+        if candidates
+        else f"Could not determine hash format for {clean_val[:16]}... (confidence: low)."
+    )
+
+    return Observation(
+        ok=True,
+        status="succeeded",
+        action="hash_identify",
+        target=f"step:{source_step_id}",
+        summary=summary,
+        facts={
+            "candidates": candidates,
+            "confidence": confidence,
+            "source_step_id": source_step_id,
+        },
+    )
+
+
 async def run_direct(
     session: AsyncSession,
     spec: ToolSpec,
@@ -192,6 +394,10 @@ async def run_direct(
         return await list_services(session, assessment_id, **args)
     if spec.name == "list_findings":
         return await list_findings(session, assessment_id, **args)
+    if spec.name == "lookup_cve":
+        return await lookup_cve_direct(session, assessment_id, **args)
+    if spec.name == "hash_identify":
+        return await hash_identify_direct(session, assessment_id, **args)
     if spec.name == "record_hypothesis":
         return await record_hypothesis(
             session=session,

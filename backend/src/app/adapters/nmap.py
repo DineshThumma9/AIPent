@@ -33,10 +33,13 @@ def argv(
     ports: list[int] | str = "top100",
     timing: int = 4,
     host_discovery: bool = False,
+    scripts: list[str] | None = None,
 ) -> list[str]:
     if host_discovery:
         return ["nmap", "-sn", "-Pn", f"-T{timing}", "-oX", "-", target]
     parts: list[str] = ["nmap", "-sV", "-Pn", f"-T{timing}"]
+    if scripts:
+        parts.extend(["--script", ",".join(scripts)])
     if ports == "top100":
         parts.extend(["--top-ports", "100"])
     elif ports == "top1000":
@@ -49,20 +52,38 @@ def argv(
     return parts
 
 
-def fast_scan(target: str, ports: list[int] | str = "top100", timing: int = 4) -> list[str]:
-    return argv(target, ports=ports, timing=timing)
+def fast_scan(
+    target: str,
+    ports: list[int] | str = "top100",
+    timing: int = 4,
+    scripts: list[str] | None = None,
+) -> list[str]:
+    return argv(target, ports=ports, timing=timing, scripts=scripts)
 
 
-def service_scan(target: str, ports: list[int] | str = "top100", timing: int = 3) -> list[str]:
-    return argv(target, ports=ports, timing=timing)
+def service_scan(
+    target: str,
+    ports: list[int] | str = "top100",
+    timing: int = 3,
+    scripts: list[str] | None = None,
+) -> list[str]:
+    return argv(target, ports=ports, timing=timing, scripts=scripts)
 
 
-def full_tcp(target: str, timing: int = 4) -> list[str]:
-    return argv(target, ports="all", timing=timing)
+def full_tcp(
+    target: str,
+    timing: int = 4,
+    scripts: list[str] | None = None,
+) -> list[str]:
+    return argv(target, ports="all", timing=timing, scripts=scripts)
 
 
-def full_service(target: str, timing: int = 3) -> list[str]:
-    return argv(target, ports="all", timing=timing)
+def full_service(
+    target: str,
+    timing: int = 3,
+    scripts: list[str] | None = None,
+) -> list[str]:
+    return argv(target, ports="all", timing=timing, scripts=scripts)
 
 
 def parse(xml_text: str) -> list[NmapPort]:
@@ -133,8 +154,15 @@ def to_drafts(records: list[NmapPort]) -> list[FindingDraft]:
     return drafts
 
 
-def mcp_flags(ports: list[int] | None = None, timing: int = 4, top_ports: str | None = None) -> str:
+def mcp_flags(
+    ports: list[int] | None = None,
+    timing: int = 4,
+    top_ports: str | None = None,
+    scripts: list[str] | None = None,
+) -> str:
     parts = ["-sV", "-Pn", f"-T{timing}"]
+    if scripts:
+        parts.extend(["--script", ",".join(scripts)])
     if top_ports == "top100":
         parts.extend(["--top-ports", "100"])
     elif top_ports == "top1000":

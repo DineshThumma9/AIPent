@@ -17,7 +17,7 @@ class ValidationState(TypedDict, total=False):
     candidates: list[dict]        # candidate findings to validate
 
     # Validation's own working memory
-    probes_used: int              # http_probe count this turn
+    probes_used: int              # curl_tool count this turn
     verdicts: list[dict]          # confirmed / suspected / false_positive
     steps: list[dict]             # step ids + actions queued this turn
 

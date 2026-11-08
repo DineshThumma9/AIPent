@@ -76,6 +76,19 @@ services:
     volumes:
       - ./reports:/zap/wrk
       - mcp-launch-safety:/var/lib/mcp-zap/scan-launch-safety
+  
+
+  vulnify-mcp:
+    build:
+      context: ../../vulnify-mcp 
+      dockerfile: Dockerfile.vulnify
+    restart: unless-stopped 
+    volumes:
+      - ../../vulnify.db:/data/vulnify.db:ro 
+    environment:
+      - VULNIFY_SQLITE_PATH=/data/vulnify.db 
+    ports:
+      - "127.0.0.1:7457:7547"
 
 volumes:
   mcp-launch-safety:

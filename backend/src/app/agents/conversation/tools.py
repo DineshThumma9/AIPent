@@ -228,6 +228,31 @@ async def add_steering_note(text: str) -> dict[str, Any]:
         return {"ok": True, "note_id": note.id, "text": text}
 
 
+@tool("lookup_cve_intel")
+async def lookup_cve_intel(cve_id: str) -> dict[str, Any]:
+    """Look up grounded CVE intelligence from the catalog (CVSS, CWE, KEV status, EPSS, references).
+
+    The coordinator may use this tool to answer operator questions, but CANNOT use it to write findings.
+    """
+    from app.intel.cve import get_cve_catalog
+
+    catalog = get_cve_catalog()
+    rec = catalog.hydrate(cve_id)
+    if not rec:
+        return {"error": f"CVE {cve_id} not found in catalog or catalog unavailable"}
+    return {
+        "cve_id": rec.cve_id,
+        "title": rec.title,
+        "summary": rec.summary,
+        "cvss_score": rec.cvss_score,
+        "cvss_severity": rec.cvss_severity,
+        "cwe": rec.cwe,
+        "kev_listed": rec.kev,
+        "epss_score": rec.epss_score,
+        "references": [r.url for r in rec.references[:5]],
+    }
+
+
 COORDINATOR_TOOLS = [
     get_mission_status,
     list_findings,
@@ -238,4 +263,5 @@ COORDINATOR_TOOLS = [
     start_run,
     stop_run,
     add_steering_note,
+    lookup_cve_intel,
 ]

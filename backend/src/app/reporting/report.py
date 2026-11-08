@@ -20,7 +20,8 @@ from app.domain import risk
 from app.actions import ACTIONS, ARTIFACT_DIR
 from app.adapters.base import strip_html
 from app.core.log import get_logger
-from app.domain.models import Approval, Assessment, Audit, Evidence, Finding, Step
+from app.domain.models import Approval, Assessment, Audit, Evidence, Finding, FindingCve, Step
+from app.reporting.narrative import ReportNarrative
 
 log = get_logger("report")
 
@@ -49,7 +50,11 @@ def _clean_text(text: str | None) -> str:
     return text.strip()
 
 
-async def build_report_data(session: AsyncSession, assessment: Assessment) -> dict:
+async def build_report_data(
+    session: AsyncSession,
+    assessment: Assessment,
+    narrative: ReportNarrative | None = None,
+) -> dict:
     assessment_id = assessment.id or 0
     result = await session.execute(
         select(Finding)
@@ -80,6 +85,16 @@ async def build_report_data(session: AsyncSession, assessment: Assessment) -> di
     )
     approvals = list(result.scalars().all())
 
+    result = await session.execute(
+        select(FindingCve)
+        .join(Finding, FindingCve.finding_id == Finding.id)
+        .where(Finding.assessment_id == assessment_id)
+    )
+    finding_cves = list(result.scalars().all())
+    cves_by_finding: dict[int, list[FindingCve]] = {}
+    for fc in finding_cves:
+        cves_by_finding.setdefault(fc.finding_id, []).append(fc)
+
     scores = {finding.id: risk.finding_score(finding) for finding in findings}
     ordered = sorted(
         findings,
@@ -100,16 +115,28 @@ async def build_report_data(session: AsyncSession, assessment: Assessment) -> di
         step for step in executed_steps if step.argv and step.argv[0] == "mcp"
     ]
 
+    by_id = {item.finding_id: item for item in (narrative.findings if narrative else [])}
     finding_rows = []
     for finding in ordered:
         score = scores[finding.id]
         rows = [row for row in evidence if row.finding_id == finding.id]
         clean_title = _clean_text(finding.title)
+        item = by_id.get(finding.id)
+        fc_rows = cves_by_finding.get(finding.id, [])
+        corroborating = sorted(
+            list(
+                {
+                    (row.locator.get("tool") if isinstance(row.locator, dict) else None) or "nmap"
+                    for row in rows
+                }
+            )
+        )
         finding_rows.append(
             {
                 "id": finding.id,
                 "title": clean_title,
                 "severity": finding.severity,
+                "cvss": finding.cvss,
                 "score": score["score"],
                 "confidence": round(finding.confidence, 2),
                 "status": finding.status,
@@ -120,16 +147,34 @@ async def build_report_data(session: AsyncSession, assessment: Assessment) -> di
                 "remediation": _clean_text(finding.remediation),
                 "cve": finding.cve,
                 "cwe": finding.cwe,
+                "corroborating_tools": corroborating,
+                "finding_cves": [
+                    {
+                        "cve_id": fc.cve_id,
+                        "source": fc.source,
+                        "source_url": fc.source_url,
+                        "catalog_release": fc.catalog_release,
+                        "match_reason": fc.match_reason,
+                        "confidence": fc.confidence,
+                    }
+                    for fc in fc_rows
+                ],
+                "narrative": item.model_dump() if item else None,
                 "evidence": [
                     {
-                        "tool": row.locator.get("tool", "nmap"),
+                        "tool": (row.locator.get("tool") if isinstance(row.locator, dict) else "nmap") or "nmap",
                         "excerpt": _clean_text(row.excerpt[:500]),
-                        "locator": json.dumps(row.locator, sort_keys=True),
+                        "locator": json.dumps(row.locator, sort_keys=True) if isinstance(row.locator, dict) else str(row.locator),
                     }
                     for row in rows
                 ],
             }
         )
+
+    from app.core.config import settings
+    from app.intel.cve import get_cve_catalog
+    catalog = get_cve_catalog()
+    cve_snapshot = f"{settings.vulnify_release} (2026-11-02)" if catalog.is_available else "CVE enrichment disabled"
 
     return {
         "assessment": {
@@ -151,6 +196,7 @@ async def build_report_data(session: AsyncSession, assessment: Assessment) -> di
         "tool_count": len(tools),
         "mcp": bool(mcp_steps),
         "mcp_only": bool(executed_steps) and len(mcp_steps) == len(executed_steps),
+        "cve_snapshot": cve_snapshot,
         "findings": finding_rows,
         "steps": [
             {
@@ -159,6 +205,7 @@ async def build_report_data(session: AsyncSession, assessment: Assessment) -> di
                 "target": step.target or (step.argv[-1] if step.argv else ""),
                 "status": step.status,
                 "exit_code": step.exit_code if step.exit_code is not None else "",
+                "error": step.error or "",
             }
             for step in steps
         ],
@@ -181,24 +228,54 @@ async def build_report_data(session: AsyncSession, assessment: Assessment) -> di
             }
             for approval in approvals
         ],
+        "narrative": (
+            narrative.model_dump()
+            if narrative
+            else {
+                "executive_summary": "",
+                "methodology": "",
+                "risk_overview": "",
+                "findings": [],
+                "limitations": "",
+                "recommendations": [],
+                "conclusion": "",
+            }
+        ),
+        "narrative_source": "llm" if narrative else "evidence-only",
     }
 
 
-async def generate_report(session: AsyncSession, assessment_id: int) -> Path:
+async def generate_report(
+    session: AsyncSession,
+    assessment_id: int,
+    narrative: ReportNarrative | dict | None = None,
+) -> Path:
     assessment = await session.get(Assessment, assessment_id)
     if assessment is None:
         raise LookupError(f"assessment {assessment_id} not found")
 
+    if isinstance(narrative, dict):
+        try:
+            narrative = ReportNarrative.model_validate(narrative)
+        except Exception as exc:
+            log.warning("failed to parse narrative dict; falling back: %s", exc)
+            narrative = None
+
     directory = ARTIFACT_DIR / str(assessment_id)
     directory.mkdir(parents=True, exist_ok=True)
     data_path = directory / "report-data.json"
+    narrative_path = directory / "report-narrative.json"
     typ_path = directory / f"report-{assessment_id}.typ"
     pdf_path = directory / f"report-{assessment_id}.pdf"
 
-    data_path.write_text(
-        json.dumps(await build_report_data(session, assessment), indent=2),
-        encoding="utf-8",
-    )
+    if narrative:
+        narrative_path.write_text(
+            json.dumps(narrative.model_dump(), indent=2),
+            encoding="utf-8",
+        )
+
+    data = await build_report_data(session, assessment, narrative=narrative)
+    data_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
     shutil.copyfile(TEMPLATE, typ_path)
 
     final = typ_path
@@ -207,15 +284,35 @@ async def generate_report(session: AsyncSession, assessment_id: int) -> Path:
             typst.compile, str(typ_path), output=str(pdf_path), root=str(directory)
         )
         final = pdf_path
-    except Exception:  # noqa: BLE001 - keep the source even if PDF fails
-        log.exception("Typst compilation failed assessment=%s", assessment_id)
-        session.add(
-            Audit(
-                assessment_id=assessment_id,
-                event_type="report.compile_failed",
-                payload={"source": str(typ_path)},
+    except Exception as exc:
+        log.warning("Typst compilation failed assessment=%s error=%s", assessment_id, exc)
+        # Fallback to evidence-only if compilation failed with LLM narrative
+        if narrative is not None:
+            try:
+                log.info("Attempting fallback Typst compilation with narrative=None")
+                fallback_data = await build_report_data(session, assessment, narrative=None)
+                data_path.write_text(json.dumps(fallback_data, indent=2), encoding="utf-8")
+                await asyncio.to_thread(
+                    typst.compile, str(typ_path), output=str(pdf_path), root=str(directory)
+                )
+                final = pdf_path
+            except Exception:
+                log.exception("Typst fallback compilation also failed assessment=%s", assessment_id)
+                session.add(
+                    Audit(
+                        assessment_id=assessment_id,
+                        event_type="report.compile_failed",
+                        payload={"source": str(typ_path)},
+                    )
+                )
+        else:
+            session.add(
+                Audit(
+                    assessment_id=assessment_id,
+                    event_type="report.compile_failed",
+                    payload={"source": str(typ_path)},
+                )
             )
-        )
 
     digest = hashlib.sha256(final.read_bytes()).hexdigest()
     assessment.report_path = str(final)

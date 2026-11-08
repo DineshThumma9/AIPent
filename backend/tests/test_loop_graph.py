@@ -152,7 +152,7 @@ async def test_recon_discovery_validation_end_to_end_with_approval(engine, monke
             ev = Evidence(assessment_id=a_id, step_id=step.id, finding_id=f.id, category="vulnerability")
             session.add(ev)
 
-        elif action in ("http_probe", "curl_tool"):
+        elif action == "curl_tool":
             # Probe evidence linking to the ZAP finding
             target_finding_id = created_finding_ids[-1]
             ev = Evidence(
@@ -318,7 +318,7 @@ async def test_recon_discovery_validation_end_to_end_with_approval(engine, monke
     state = await graph.aget_state(config)
     assert state.next == ("approve",)
     pending_curl = state.tasks[0].interrupts[0].value
-    assert pending_curl["action"] == "http_probe"
+    assert pending_curl["action"] == "curl_tool"
 
     # Resume with approval for curl_tool
     await graph.ainvoke(

@@ -179,7 +179,7 @@ async def test_decision_recorded_in_prepare_node(engine):
         records = res.scalars().all()
         assert len(records) >= 1
         payload = records[-1].payload
-        assert payload["action"] in ("http_probe", "curl_tool")
+        assert payload["action"] == "curl_tool"
         assert payload["hypothesis_id"] == "H-2"
         assert payload["would_falsify"] == "HTTP 401 with generic invalid credentials message"
         assert payload["outcome"] == "prepared"
@@ -188,7 +188,7 @@ async def test_decision_recorded_in_prepare_node(engine):
         board = await build_evidence_board(session, assessment_id)
         assert len(board.decisions) >= 1
         d = board.decisions[-1]
-        assert d.action in ("http_probe", "curl_tool")
+        assert d.action == "curl_tool"
         assert d.hypothesis_id == "H-2"
 
 

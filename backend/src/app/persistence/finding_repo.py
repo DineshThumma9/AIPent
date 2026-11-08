@@ -9,6 +9,7 @@ from app.domain.models import (
     Audit,
     Evidence,
     Finding,
+    FindingCve,
     utcnow,
 )
 from app.persistence.base import BaseRepo
@@ -53,7 +54,75 @@ class FindingRepo(BaseRepo):
         await self.session.flush()
         await self.session.commit()
         await self.session.refresh(finding)
+
+        if cve and finding.id:
+            for item in cve:
+                await self.record_finding_cve(
+                    finding_id=finding.id,
+                    cve_id=item,
+                    source="scanner_reference",
+                    match_reason="scanner_reference",
+                )
+
         return finding
+
+    async def record_finding_cve(
+        self,
+        finding_id: int,
+        cve_id: str,
+        source: str = "nvd",
+        source_url: str = "",
+        match_reason: str = "cpe_exact",
+        confidence: str = "high",
+        catalog_release: str | None = None,
+    ) -> FindingCve:
+        from app.core.config import settings
+        from app.intel.cve import get_cve_catalog
+
+        clean_cve = cve_id.strip().upper()
+        if not source_url:
+            catalog = get_cve_catalog()
+            refs = catalog.references(clean_cve)
+            source_url = refs[0].url if refs else f"https://nvd.nist.gov/vuln/detail/{clean_cve}"
+
+        # Check existing row
+        existing = await self.session.execute(
+            select(FindingCve).where(
+                FindingCve.finding_id == finding_id,
+                FindingCve.cve_id == clean_cve,
+            )
+        )
+        row = existing.scalars().first()
+        if row:
+            return row
+
+        fc = FindingCve(
+            finding_id=finding_id,
+            cve_id=clean_cve,
+            source=source,
+            source_url=source_url,
+            catalog_release=catalog_release or settings.vulnify_release,
+            match_reason=match_reason,
+            confidence=confidence,
+        )
+        self.session.add(fc)
+        await self.session.commit()
+        await self.session.refresh(fc)
+        return fc
+
+    async def get_cves_for_finding(self, finding_id: int) -> list[FindingCve]:
+        result = await self.session.execute(
+            select(FindingCve).where(FindingCve.finding_id == finding_id)
+        )
+        return list(result.scalars().all())
+
+    async def get_all_cves(self, assessment_id: int) -> list[FindingCve]:
+        result = await self.session.execute(
+            select(FindingCve)
+            .join(Finding, FindingCve.finding_id == Finding.id)
+            .where(Finding.assessment_id == assessment_id)
+        )
+        return list(result.scalars().all())
 
     async def get(self, finding_id: int) -> Finding | None:
         return await self.session.get(Finding, finding_id)
@@ -135,7 +204,7 @@ class FindingRepo(BaseRepo):
         """Update finding status with audit trail.
 
         CONFIRMED and FALSE_POSITIVE require at least one executed
-        http_probe evidence row with a non-null http_status.
+        curl_tool evidence row with a non-null http_status.
         """
         from app.agents.control import audit
 
@@ -152,16 +221,16 @@ class FindingRepo(BaseRepo):
             )
             evidence = list(evidence_result.scalars().all())
             executed = any(
-                (item.locator or {}).get("tool") in ("http_probe", "curl_tool")
+                (item.locator or {}).get("tool") == "curl_tool"
                 and (item.locator or {}).get("http_status") is not None
                 for item in evidence
             )
             if not executed:
                 return {
                     "error": (
-                        "verdict blocked: no executed http_probe evidence is "
-                        "linked to this finding. Queue probes with "
-                        "http_probe(..., finding_id=...) and wait for the action "
+                        "verdict blocked: no executed curl_tool evidence is "
+                        "linked to this finding. Queue requests with "
+                        "curl_tool(..., finding_id=...) and wait for the action "
                         "gate to execute them."
                     )
                 }

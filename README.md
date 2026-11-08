@@ -8,19 +8,19 @@ AIPENT runs an authorized VAPT against scoped targets through three specialist r
 
 | Role | Mission | Tools |
 |------|---------|-------|
-| **Recon** | Map live ports and service facts | `recon_services` |
+| **Recon** | Map live ports and service facts | `recon_services`, `whatweb`, `sslscan` |
 | **Discovery** | Turn service facts into candidate findings | `dirb_scan`, `nikto_scan`, `zap_baseline` |
-| **Validation** | Test hypotheses with safe probes | `http_probe`, `sqlmap_scan` |
+| **Validation** | Test hypotheses with safe probes | `curl_tool`, `sqlmap_scan`, `hashcat_crack` |
 
-Every action the agent wants to run is **queued as a Step first**. Gate policy then decides whether it pauses for a human or executes on agent authority (see [`AIPENT_ACTION_POLICIES`](#environment-variables)). High-risk actions — `sqlmap_scan`, `http_probe`, `zap_baseline` — pause by default. Nothing touches the target before it has been queued, and every approved command runs exactly as shown in the approval card.
+Every action the agent wants to run is **queued as a Step first**. Gate policy then decides whether it pauses for a human or executes on agent authority (see [`AIPENT_ACTION_POLICIES`](#environment-variables)). High-risk actions — `sqlmap_scan`, `curl_tool`, `zap_baseline`, `hashcat_crack` — pause by default. Nothing touches the target before it has been queued, and every approved command runs exactly as shown in the approval card.
 
 ## Architecture
 
 ```
 ┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐
 │   Recon         │      │   Discovery     │      │   Validation    │
-│ (recon_services)│─────▶│ (nikto/zap/dirb)│─────▶│ (http_probe/    │
-│                 │      │                 │      │  sqlmap_scan)   │
+│ (recon/whatweb/ │─────▶│ (nikto/zap/dirb)│─────▶│ (curl_tool/     │
+│  sslscan)       │      │                 │      │  sqlmap/hashcat)│
 └─────────────────┘      └─────────────────┘      └─────────────────┘
          │                         │                         │
          ▼                         ▼                         ▼
@@ -119,7 +119,7 @@ AIPENT_LAB_TARGET_ALIAS=host.docker.internal
 Optional policy override (which actions need human approval):
 
 ```
-AIPENT_ACTION_POLICIES='{"sqlmap_scan":{"approve":true},"nmap_scan":{"approve":false},"nikto_scan":{"approve":false},"dirb_scan":{"approve":false},"zap_baseline":{"approve":true},"http_probe":{"approve":true}}'
+AIPENT_ACTION_POLICIES='{"sqlmap_scan":{"approve":true},"nmap_scan":{"approve":false},"nikto_scan":{"approve":false},"dirb_scan":{"approve":false},"zap_baseline":{"approve":true},"curl_tool":{"approve":true},"hashcat_crack":{"approve":true}}'
 ```
 
 ### 5. Start the Backend

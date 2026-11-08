@@ -146,7 +146,7 @@ export function ApprovalPanel({
   return (
     <section className="panel" aria-labelledby="approval-title">
       <div className="panel-head">
-        <h2 id="approval-title">Approval gates</h2>
+        <h2 id="approval-title">Approvals</h2>
         <span className="panel-meta">
           {pending.length ? `${pending.length} pending` : 'clear'}
         </span>
@@ -154,7 +154,7 @@ export function ApprovalPanel({
 
       {approvals.length === 0 ? (
         <p className="empty small">
-          No gate has been raised. The agent pauses here before an action, before
+          No action has needed approval yet. The agent pauses here before an action, before
           the final review, and before the report.
         </p>
       ) : (

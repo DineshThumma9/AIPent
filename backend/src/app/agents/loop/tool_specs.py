@@ -92,6 +92,28 @@ class DirbArgs(ActionReasoning):
     path: str = Field(default="/", description="Base path to enumerate.")
 
 
+class WhatwebArgs(ActionReasoning):
+    pass
+
+
+class SslscanArgs(ActionReasoning):
+    port: int | None = Field(default=None, description="Optional target port to scan (defaults to web port).")
+
+
+class HashIdentifyArgs(BaseModel):
+    hash_value: str = Field(description="The hash string to identify.")
+    source_step_id: int = Field(description="Step ID of artifact where the hash was captured.")
+
+
+class HashcatArgs(ActionReasoning):
+    source_step_id: int = Field(description="Step ID of artifact where the hash was captured.")
+    hash_value: str | None = Field(default=None, description="Exact hash string to crack (must exist in source artifact).")
+    hash_file: str | None = Field(default=None, description="Optional hash file relative to assessment artifact directory.")
+    hash_mode: int = Field(default=0, description="Hashcat hash mode (-m, e.g. 0 for MD5, 100 for SHA-1, 3200 for bcrypt).")
+    wordlist: Literal["lab", "rockyou"] = Field(default="lab", description="Allowlisted dictionary to attack with.")
+    runtime: int = Field(default=120, ge=10, le=300, description="Max runtime in seconds (10 to 300).")
+
+
 class NiktoArgs(ActionReasoning):
     pass
 
@@ -117,6 +139,14 @@ class UpdateFindingStatusArgs(BaseModel):
     finding_id: int = Field(description="ID of the candidate finding to update.")
     status: Literal["confirmed", "suspected", "false_positive"] = Field(description="New status.")
     reasoning: str = Field(description="Detailed justification based on observed probe evidence.")
+
+
+class LookupCveArgs(BaseModel):
+    cve_id: str | None = Field(default=None, description="Exact CVE identifier (e.g. 'CVE-2023-38606').")
+    vendor: str | None = Field(default=None, description="Normalized vendor name (e.g. 'nginx', 'apache').")
+    product: str | None = Field(default=None, description="Normalized product name (e.g. 'nginx', 'http_server').")
+    version: str | None = Field(default=None, description="Observed version string (e.g. '1.24.0').")
+    cpe: str | None = Field(default=None, description="Exact CPE 2.3 criteria if identified by a scanner.")
 
 
 class EmptyArgs(BaseModel):
@@ -267,7 +297,7 @@ zap_baseline_tool = ToolSpec(
 curl_tool = ToolSpec(
     name="curl_tool",
     kind="action",
-    action="http_probe",
+    action="curl_tool",
     args_model=CurlArgs,
     description=(
         "Send one safe HTTP request to a path on an in-scope target. "
@@ -277,6 +307,53 @@ curl_tool = ToolSpec(
         "This action requires human approval."
     ),
     param_fields=("path", "method", "headers", "body", "expected_status", "finding_id"),
+)
+
+whatweb_tool = ToolSpec(
+    name="whatweb",
+    kind="action",
+    action="whatweb",
+    args_model=WhatwebArgs,
+    description=(
+        "Run WhatWeb to detect web server technology, CMS, libraries, and response headers "
+        "on an in-scope web service. Emits informational findings."
+    ),
+    param_fields=(),
+)
+
+sslscan_tool = ToolSpec(
+    name="sslscan",
+    kind="action",
+    action="sslscan",
+    args_model=SslscanArgs,
+    description=(
+        "Run sslscan to determine supported TLS/SSL protocols, cipher suites, and certificate "
+        "validity on in-scope ports. Identifies deprecated SSL/TLS protocols and expired certificates."
+    ),
+    param_fields=("port",),
+)
+
+hash_identify_tool = ToolSpec(
+    name="hash_identify",
+    kind="direct",
+    args_model=HashIdentifyArgs,
+    description=(
+        "Safely identify the hash algorithm (MD5, SHA-1, SHA-256, bcrypt, etc.) and suggested "
+        "Hashcat mode for a hash discovered in an assessment artifact. Fast and direct."
+    ),
+)
+
+hashcat_crack_tool = ToolSpec(
+    name="hashcat_crack",
+    kind="action",
+    action="hashcat_crack",
+    args_model=HashcatArgs,
+    description=(
+        "Perform bounded offline credential cracking using Hashcat against captured hash material "
+        "from an assessment artifact. High-risk action requiring human approval. "
+        "Recovered credentials are automatically redacted; plaintext passwords are never displayed."
+    ),
+    param_fields=("source_step_id", "hash_value", "hash_file", "hash_mode", "wordlist", "runtime"),
 )
 
 sqlmap_scan_tool = ToolSpec(
@@ -305,10 +382,25 @@ update_finding_status_tool = ToolSpec(
     ),
 )
 
+lookup_cve_tool = ToolSpec(
+    name="lookup_cve",
+    kind="direct",
+    args_model=LookupCveArgs,
+    description=(
+        "Look up grounded CVE intelligence from the pinned local CVE database (Vulnify). "
+        "Provide an exact cve_id or normalized vendor/product/version/cpe. "
+        "Returns verified CVSS, CWE, KEV status, EPSS score, and upstream reference URLs. "
+        "Free-text search is not supported."
+    ),
+)
+
 
 ROLE_TOOL_SPECS: dict[str, list[ToolSpec]] = {
     "recon": [
         recon_services_tool,
+        whatweb_tool,
+        sslscan_tool,
+        lookup_cve_tool,
         read_artifact_tool,
         list_services_tool,
         record_hypothesis_tool,
@@ -319,6 +411,7 @@ ROLE_TOOL_SPECS: dict[str, list[ToolSpec]] = {
         dirb_scan_tool,
         nikto_scan_tool,
         zap_baseline_tool,
+        lookup_cve_tool,
         read_artifact_tool,
         list_findings_tool,
         record_hypothesis_tool,
@@ -328,6 +421,9 @@ ROLE_TOOL_SPECS: dict[str, list[ToolSpec]] = {
     "validation": [
         curl_tool,
         sqlmap_scan_tool,
+        hash_identify_tool,
+        hashcat_crack_tool,
+        lookup_cve_tool,
         read_artifact_tool,
         list_findings_tool,
         update_finding_status_tool,
@@ -350,13 +446,12 @@ SUPERVISOR_TOOL_SPECS: list[ToolSpec] = [
 
 
 def lookup_tool(role: str, name: str) -> ToolSpec:
-    target_name = "curl_tool" if name == "http_probe" else name
     specs = ROLE_TOOL_SPECS.get(role, [])
     for s in specs:
-        if s.name == target_name or (name == "http_probe" and s.name == "curl_tool"):
+        if s.name == name:
             return s
     for s in SUPERVISOR_TOOL_SPECS:
-        if s.name == target_name:
+        if s.name == name:
             return s
     raise KeyError(f"tool {name!r} not found for role {role!r}")
 

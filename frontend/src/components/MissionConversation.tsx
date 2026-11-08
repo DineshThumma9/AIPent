@@ -240,14 +240,14 @@ function ApprovalCard({
     <article
       className="gate-card"
       data-decision={approval.decision}
-      aria-label={`${actionLabel(approval.action)} gate`}
+      aria-label={`${actionLabel(approval.action)} approval`}
     >
       <header className="gate-head">
         <div className="gate-heading">
           <span className="gate-stamp" aria-hidden="true" />
           <div>
             <p className="gate-kind">
-              {pending ? 'Action gate' : 'Gate record'}
+              {pending ? 'Action approval' : 'Approval record'}
             </p>
             <h3>{actionLabel(approval.action)}</h3>
           </div>
@@ -351,7 +351,7 @@ function ApprovalCard({
 
       {pending && !gateOpen && (
         <p className="gate-hint">
-          The role is still working. This gate opens when its turn ends.
+          The role is still working; the approval card opens when it reaches the action.
         </p>
       )}
 
@@ -494,7 +494,7 @@ function NoteTurn({
 
 function suggestionsFor(mission: MissionView): string[] {
   if (mission.pendingApproval) {
-    return ['Explain this gate', 'What is left?', 'What happens if I reject?']
+    return ['Explain this action', 'What is left?', 'What happens if I reject?']
   }
   if (mission.running) {
     return ['What is the status?', 'Why this step?', 'Stop after this step']
@@ -614,7 +614,7 @@ export function MissionConversation({
 
   const suggestions = suggestionsFor(mission)
   const placeholder = mission.pendingApproval
-    ? 'Ask about the open gate'
+    ? 'Ask about the open approval'
     : mission.running
       ? 'Ask for status or explain a step'
       : mission.runId
@@ -697,9 +697,9 @@ export function MissionConversation({
           </div>
           <p className="conversation-hint">
             {mission.pendingApproval
-              ? 'Gate open below. Nothing runs until you decide.'
+              ? 'Approval open below. Nothing runs until you decide.'
               : mission.running
-                ? 'Roles are working. The next gate appears in the thread.'
+                ? 'Roles are working. The next approval appears in the thread.'
                 : mission.runId
                   ? 'Run closed. Start again to re-open the service surface.'
                   : 'Recon starts with nmap, then hands the surface to discovery.'}

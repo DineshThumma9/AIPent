@@ -118,10 +118,10 @@ def test_step_matches_distinguishes_paths_and_methods():
     step = Step(
         assessment_id=1,
         seq=1,
-        action="http_probe",
+        action="curl_tool",
         target="127.0.0.1",
         argv=[
-            "http_probe",
+            "curl_tool",
             "GET",
             "http://127.0.0.1:3000/login",
             "{}",
@@ -139,7 +139,7 @@ def test_step_matches_distinguishes_paths_and_methods():
     assert not _step_matches(step, "10.0.0.1", {"path": "/login"})
 
 
-def test_resolve_argv_http_probe_stays_local(monkeypatch, tmp_path):
+def test_resolve_argv_curl_tool_stays_local(monkeypatch, tmp_path):
     monkeypatch.setattr(catalogue, "ARTIFACT_DIR", tmp_path)
     monkeypatch.setattr(settings, "mcp_enabled", True)
     monkeypatch.setattr(settings, "mcp_transport", "gateway")
@@ -148,7 +148,7 @@ def test_resolve_argv_http_probe_stays_local(monkeypatch, tmp_path):
         id=1, title="Lab", targets=["127.0.0.1"], ports=[3000]
     )
     argv = resolve_argv(
-        "http_probe",
+        "curl_tool",
         assessment,
         "127.0.0.1",
         1,
@@ -161,7 +161,7 @@ def test_resolve_argv_http_probe_stays_local(monkeypatch, tmp_path):
         },
     )
 
-    assert argv[0] == "http_probe"
+    assert argv[0] == "curl_tool"
     assert argv[1] == "POST"
     assert argv[2] == "http://127.0.0.1:3000/login?next=/"
     assert json.loads(argv[3]) == {"X-Test": "1"}
@@ -193,7 +193,7 @@ def test_probe_canonical_key_includes_path_and_method():
     def payload(url: str, method: str) -> str:
         return json.dumps(
             {
-                "probe_result": {
+                "curl_result": {
                     "url": url,
                     "method": method,
                     "status_code": 200,
@@ -273,7 +273,7 @@ def test_update_finding_status_requires_executed_probe_evidence(engine):
         blocked = await repo.update_status(
             finding.id, assessment.id, "confirmed", "looks real"
         )
-        assert "no executed http_probe evidence" in blocked["error"]
+        assert "no executed curl_tool evidence" in blocked["error"]
 
         session.add(
             Evidence(
@@ -428,8 +428,8 @@ def test_resume_replays_an_identical_decision(engine, monkeypatch):
         assessment = await _assessment(session)
         approval = Approval(
             assessment_id=assessment.id,
-            action="http_probe",
-            argv=["http_probe"],
+            action="curl_tool",
+            argv=["curl_tool"],
             decision=Decision.APPROVED.value,
         )
         session.add(approval)

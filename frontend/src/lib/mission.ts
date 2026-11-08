@@ -141,12 +141,16 @@ export function actionLabel(action: string): string {
     final_review: 'Final findings review',
     recon_services: 'Service and port scan',
     nmap_scan: 'Nmap scan',
+    nmap_nse: 'Nmap NSE script scan',
+    whatweb: 'Technology detection (WhatWeb)',
+    sslscan: 'TLS/SSL configuration scan (sslscan)',
     nikto_scan: 'Nikto web scan',
     sqlmap_scan: 'sqlmap scan',
     dirb_scan: 'Directory scan',
     zap_baseline: 'ZAP baseline scan',
     curl_tool: 'HTTP request (curl)',
-    http_probe: 'HTTP request (curl)',
+    hashcat_crack: 'Credential recovery (hashcat)',
+    hash_identify: 'Hash format identification',
   }
   return labels[action] ?? action.replaceAll('_', ' ')
 }
@@ -200,7 +204,7 @@ export function briefText(detail: AssessmentDetail): string {
   const ports = detail.ports.length
     ? ` on ${detail.ports.join(', ')}`
     : ' on the catalogue default ports'
-  return `Scope is locked to ${targets}${ports}. Recon maps the service surface, discovery turns it into candidate findings, and validation tests each hypothesis with safe probes. Every action stops here for approval before it runs.`
+  return `Scope is locked to ${targets}${ports}. Recon maps the service surface, discovery turns it into candidate findings, and validation tests each hypothesis with safe probes. Every consequential action stops here for approval before it runs.`
 }
 
 function runAudit(detail: AssessmentDetail) {

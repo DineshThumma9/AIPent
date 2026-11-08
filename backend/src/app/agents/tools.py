@@ -36,7 +36,7 @@ def set_context(assessment_id: int, run_id: str, role: str) -> None:
     "update_finding_status",
     description=(
         "Record a validation verdict for one candidate finding. Use only "
-        "after an http_probe has executed and its evidence is linked to the "
+        "after a curl_tool has executed and its evidence is linked to the "
         "finding. Status must be confirmed, suspected, or false_positive."
     ),
 )

@@ -156,6 +156,25 @@ class Evidence(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow)
 
 
+class FindingCve(SQLModel, table=True):
+    """Provenance tracking linking a finding's CVE to its verified upstream source."""
+
+    __tablename__ = "finding_cve"
+    __table_args__ = (
+        UniqueConstraint("finding_id", "cve_id", name="uq_finding_cve"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    finding_id: int = Field(foreign_key="finding.id", index=True)
+    cve_id: str = Field(index=True)
+    source: str = "nvd"  # nvd | nikto | zap | nuclei
+    source_url: str = ""  # NVD detail or vendor advisory URL
+    catalog_release: str = "vulnify v2026.11.02"
+    match_reason: str = "cpe_exact"  # scanner_reference | cpe_exact | version_range | manual
+    confidence: str = "high"  # high | medium | low
+    retrieved_at: datetime = Field(default_factory=utcnow)
+
+
 class Approval(SQLModel, table=True):
     """Human decision bound to the exact command that will run."""
 

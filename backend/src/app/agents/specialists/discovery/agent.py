@@ -90,7 +90,7 @@ async def agent_node(state: dict) -> Command[Literal["__end__"]]:
         f"Choose the scanner that fits; do not run all three blindly.\n"
         f"After queueing, stop calling tools and reply with a short summary. "
         f"The gate runs the scan after your turn.\n"
-        f"Do not use sqlmap or http_probe — those belong to Validation."
+        f"Do not use sqlmap or curl_tool — those belong to Validation."
     )
 
     try:

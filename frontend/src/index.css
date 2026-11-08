@@ -966,7 +966,8 @@ button {
   flex: none;
 }
 
-.status[data-status="running"] {
+.status[data-status="running"],
+.status[data-status="active"] {
   color: var(--oxide);
 }
 
@@ -976,12 +977,18 @@ button {
   color: var(--amber);
 }
 
-.status[data-status="completed"] {
+.status[data-status="completed"],
+.status[data-status="done"],
+.status[data-status="succeeded"] {
   color: var(--moss);
 }
 
 .status[data-status="failed"] {
   color: var(--oxide);
+}
+
+.status[data-status="queued"] {
+  color: var(--ink-muted);
 }
 
 .severity {
@@ -1031,6 +1038,14 @@ button {
 
 .severity[data-severity="low"] .severity-dot {
   background: var(--moss);
+}
+
+.severity[data-severity="info"] {
+  color: var(--ink-soft);
+}
+
+.severity[data-severity="info"] .severity-dot {
+  background: var(--ink-muted);
 }
 
 /* Workspace grid --------------------------------------------------------- */

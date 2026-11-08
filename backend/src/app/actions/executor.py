@@ -288,7 +288,7 @@ async def execute_action(
     transport = (
         "mcp"
         if (
-            action != "http_probe"
+            action != "curl_tool"
             and settings.mcp_enabled
             and settings.mcp_transport == "gateway"
         )
@@ -320,8 +320,8 @@ async def execute_action(
 
     artifact = _artifact_dir(assessment_id) / f"{step.id}{spec.suffix}"
     try:
-        if action == "http_probe":
-            text = await _run_http_probe(step, assessment)
+        if action == "curl_tool":
+            text = await _run_curl(step, assessment)
             step.exit_code = 0
             artifact.parent.mkdir(parents=True, exist_ok=True)
             artifact.write_text(text, encoding="utf-8")
@@ -421,16 +421,16 @@ async def execute_action(
     return step
 
 
-async def _run_http_probe(step: Step, assessment: Assessment) -> str:
-    """Execute an http_probe step locally and produce the artifact JSON.
+async def _run_curl(step: Step, assessment: Assessment) -> str:
+    """Execute a curl_tool step locally and produce the artifact JSON.
 
     The agent-generated argv carries the exact method/url/headers/body the
     human action gate approved.
     """
-    from app.actions.probe import run_probe
+    from app.actions.probe import run_curl
 
     if len(step.argv) < 5:
-        raise ValueError(f"http_probe argv incomplete: {step.argv}")
+        raise ValueError(f"curl_tool argv incomplete: {step.argv}")
 
     method = step.argv[1]
     url = step.argv[2]
@@ -438,7 +438,7 @@ async def _run_http_probe(step: Step, assessment: Assessment) -> str:
     expected_status = int(step.argv[4])
     body = step.argv[5] if len(step.argv) > 5 else ""
 
-    probe = await run_probe(
+    probe = await run_curl(
         method=method,
         url=url,
         headers=headers,
@@ -447,7 +447,7 @@ async def _run_http_probe(step: Step, assessment: Assessment) -> str:
         timeout=15,
     )
     artifact_payload = {
-        "probe_result": probe.model_dump(),
+        "curl_result": probe.model_dump(),
         "expected_status": expected_status,
         "step_id": step.id,
         "assessment_id": assessment.id,

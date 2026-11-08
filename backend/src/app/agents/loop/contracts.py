@@ -61,6 +61,8 @@ class Observation(BaseModel):
     http: dict[str, Any] | None = None
     # {"status_code": 200, "headers": {...}, "body_excerpt": "..."}
 
+    facts: dict[str, Any] | None = None
+
     errors: list[str] = Field(default_factory=list)
     duration_ms: int | None = None
     next_hint: str | None = None

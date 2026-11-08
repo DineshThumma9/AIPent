@@ -181,9 +181,9 @@ function GatesSide({ detail }: { detail: AssessmentDetail }) {
     .slice(0, 4)
 
   return (
-    <section className="side-panel" aria-labelledby="gates-title">
+    <section className="side-panel" aria-labelledby="approvals-title">
       <div className="side-head">
-        <h2 id="gates-title">Gates</h2>
+        <h2 id="approvals-title">Approvals</h2>
         <span className="side-meta mono">
           {detail.approvals.some((approval) => approval.decision === 'pending')
             ? 'open'
@@ -193,7 +193,7 @@ function GatesSide({ detail }: { detail: AssessmentDetail }) {
 
       {recent.length === 0 ? (
         <p className="side-empty">
-          No gate has opened. Every action pauses here before it runs.
+          No action has needed approval yet.
         </p>
       ) : (
         <ol className="gate-history">

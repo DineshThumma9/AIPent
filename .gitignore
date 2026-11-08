@@ -48,3 +48,5 @@ docs/
 
 pro.txt
 *.db
+*.db*
+vulnify.db*

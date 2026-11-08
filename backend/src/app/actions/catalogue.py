@@ -14,12 +14,28 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 from urllib.parse import urlsplit
 
-from app.adapters import nikto, nmap, zap
+from app.adapters import hashcat, nikto, nmap, sslscan, whatweb, zap
 from app.adapters.base import FindingDraft
 from app.core.config import settings
 from app.domain.models import Assessment
 
 ARTIFACT_DIR = settings.artifacts_path
+
+BACKEND_DIR = Path(__file__).resolve().parents[3]
+WORDLISTS = {
+    "lab": BACKEND_DIR / "data" / "wordlists" / "lab.txt",
+    "rockyou": Path("/usr/share/wordlists/rockyou.txt"),
+}
+
+NMAP_SAFE_SCRIPTS = {
+    "http-title",
+    "http-headers",
+    "http-enum",
+    "ssl-cert",
+    "ssl-enum-ciphers",
+    "smb-os-discovery",
+    "smb-enum-shares",
+}
 
 
 class ScopeError(ValueError):
@@ -65,17 +81,20 @@ def _nmap_argv(
     assessment: Assessment, target: str, _output: Path, params: dict[str, Any] | None = None
 ) -> list[str]:
     p = NmapParams(**(params or {}))
+    for s in p.scripts:
+        if s not in NMAP_SAFE_SCRIPTS:
+            raise ValueError(f"script {s!r} is not in NMAP_SAFE_SCRIPTS allowlist")
     if p.profile == "host_discovery":
-        return nmap.argv(target, [], host_discovery=True)
+        return nmap.argv(target, [], host_discovery=True, scripts=p.scripts)
     if p.profile == "fast":
-        return nmap.fast_scan(target, p.ports, timing=p.timing)
+        return nmap.fast_scan(target, p.ports, timing=p.timing, scripts=p.scripts)
     if p.profile == "service":
-        return nmap.service_scan(target, p.ports, timing=p.timing)
+        return nmap.service_scan(target, p.ports, timing=p.timing, scripts=p.scripts)
     if p.profile == "full_tcp":
-        return nmap.full_tcp(target, timing=p.timing)
+        return nmap.full_tcp(target, timing=p.timing, scripts=p.scripts)
     if p.profile == "full_service":
-        return nmap.full_service(target, timing=p.timing)
-    return nmap.argv(target, assessment.ports or [3000])
+        return nmap.full_service(target, timing=p.timing, scripts=p.scripts)
+    return nmap.argv(target, assessment.ports or [3000], scripts=p.scripts)
 
 
 def _nmap_scan_argv(
@@ -123,13 +142,13 @@ def _sqlmap_argv(
     ]
 
 
-def _http_probe_argv(
+def _curl_argv(
     assessment: Assessment,
     target: str,
     _output: Path,
     params: dict[str, Any] | None = None,
 ) -> list[str]:
-    """Resolve the approved method/URL/headers for one safe HTTP probe.
+    """Resolve the approved method/URL/headers for one safe HTTP probe (curl).
 
     ``params.path`` is restricted to a path on the scoped target so the probe
     cannot be pointed at a different host. ``params.finding_id`` is stored on
@@ -149,7 +168,65 @@ def _http_probe_argv(
     except (TypeError, ValueError):
         expected = 200
     body = str(p.get("body") or "")
-    return ["http_probe", method, url, headers, str(expected), body]
+    return ["curl_tool", method, url, headers, str(expected), body]
+
+
+def _whatweb_argv(
+    assessment: Assessment, target: str, output: Path, params: dict[str, Any] | None = None
+) -> list[str]:
+    return [
+        "whatweb",
+        "--log-json",
+        str(output),
+        "--no-errors",
+        f"http://{target}:{_web_port(assessment)}/",
+    ]
+
+
+def _sslscan_argv(
+    assessment: Assessment, target: str, output: Path, params: dict[str, Any] | None = None
+) -> list[str]:
+    p = params or {}
+    port = p.get("port") or _web_port(assessment)
+    return [
+        "sslscan",
+        "--no-colour",
+        "--xml",
+        str(output),
+        f"{target}:{port}",
+    ]
+
+
+def _hashcat_argv(
+    assessment: Assessment, target: str, output: Path, params: dict[str, Any] | None = None
+) -> list[str]:
+    p = params or {}
+    mode = p.get("hash_mode", 0)
+    runtime = p.get("runtime", 120)
+    wordlist_key = p.get("wordlist", "lab")
+    wordlist = WORDLISTS.get(wordlist_key, WORDLISTS["lab"])
+    input_path = p.get("input_path") or (_artifact_dir(assessment.id or 0) / f"hashcat-input-{p.get('source_step_id', 0)}.txt")
+    potfile = _artifact_dir(assessment.id or 0) / "hashcat.potfile"
+    return [
+        "hashcat",
+        "-m",
+        str(mode),
+        "-a",
+        "0",
+        "--potfile-path",
+        str(potfile),
+        "--outfile",
+        str(output),
+        "--outfile-format",
+        "1",
+        "--runtime",
+        str(runtime),
+        "--status",
+        "--status-timer",
+        "10",
+        str(input_path),
+        str(wordlist),
+    ]
 
 
 def _dirb_argv(
@@ -179,6 +256,7 @@ ACTIONS: dict[str, ActionSpec] = {
             "profile": "Scan profile: host_discovery, fast, service, full_tcp, full_service",
             "ports": "Port set: top100, top1000, all, or list of port numbers",
             "timing": "Nmap timing template (0-5, default 4)",
+            "scripts": f"Safe NSE scripts: {', '.join(sorted(NMAP_SAFE_SCRIPTS))}",
         },
     ),
     "nmap_scan": ActionSpec(
@@ -194,6 +272,43 @@ ACTIONS: dict[str, ActionSpec] = {
             "profile": "Scan profile: host_discovery, fast, service, full_tcp, full_service",
             "ports": "Port set: top100, top1000, all, or list of port numbers",
             "timing": "Nmap timing template (0-5, default 4)",
+            "scripts": f"Safe NSE scripts: {', '.join(sorted(NMAP_SAFE_SCRIPTS))}",
+        },
+    ),
+    "nmap_nse": ActionSpec(
+        name="nmap_nse",
+        tool="nmap",
+        suffix=".nmap.xml",
+        output="stdout",
+        transport="local",
+        ok_codes=(0,),
+        build_argv=_nmap_argv,
+        parse=lambda text, host, _port: nmap.scan(text, host_override=host),
+        param_hints={
+            "scripts": f"Safe NSE scripts: {', '.join(sorted(NMAP_SAFE_SCRIPTS))}",
+        },
+    ),
+    "whatweb": ActionSpec(
+        name="whatweb",
+        tool="whatweb",
+        suffix=".whatweb.json",
+        output="file",
+        transport="local",
+        ok_codes=(0,),
+        build_argv=_whatweb_argv,
+        parse=lambda text, host, port: whatweb.scan(text, host, port),
+    ),
+    "sslscan": ActionSpec(
+        name="sslscan",
+        tool="sslscan",
+        suffix=".sslscan.xml",
+        output="file",
+        transport="local",
+        ok_codes=(0,),
+        build_argv=_sslscan_argv,
+        parse=lambda text, host, port: sslscan.scan(text, host, port),
+        param_hints={
+            "port": "Target port (defaults to assessment web port)",
         },
     ),
     "nikto_scan": ActionSpec(
@@ -236,15 +351,30 @@ ACTIONS: dict[str, ActionSpec] = {
         build_argv=_dirb_argv,
         parse=lambda _text, _host, _port: [],
     ),
-    "http_probe": ActionSpec(
-        name="http_probe",
-        tool="http_probe",
-        suffix=".http_probe.json",
+    "curl_tool": ActionSpec(
+        name="curl_tool",
+        tool="curl",
+        suffix=".curl.json",
         output="file",
         transport="http",
         ok_codes=(0,),
-        build_argv=_http_probe_argv,
+        build_argv=_curl_argv,
         parse=lambda _text, _host, _port: [],
+    ),
+    "hashcat_crack": ActionSpec(
+        name="hashcat_crack",
+        tool="hashcat",
+        suffix=".hashcat.txt",
+        output="file",
+        transport="local",
+        ok_codes=(0, 1),
+        build_argv=_hashcat_argv,
+        parse=lambda text, host, port: hashcat.scan(text, host, port),
+        param_hints={
+            "hash_mode": "Hashcat mode (-m), e.g. 0 for MD5, 100 for SHA-1, 3200 for bcrypt",
+            "wordlist": "Allowlisted wordlist: lab (default) or rockyou",
+            "runtime": "Max cracking time in seconds (10-300, default 120)",
+        },
     ),
 }
 
@@ -277,17 +407,25 @@ def mcp_tool_call(
     """
     alias = transport_target(target)
     port = _web_port(assessment)
-    if action in {"recon_services", "nmap_scan"}:
+    if action in {"recon_services", "nmap_scan", "nmap_nse"}:
         p = NmapParams(**(params or {}))
+        for s in p.scripts:
+            if s not in NMAP_SAFE_SCRIPTS:
+                raise ValueError(f"script {s!r} is not in NMAP_SAFE_SCRIPTS allowlist")
         if isinstance(p.ports, list):
             return "nmap_scan", {
                 "target": alias,
-                "flags": nmap.mcp_flags(ports=p.ports, timing=p.timing),
+                "flags": nmap.mcp_flags(ports=p.ports, timing=p.timing, scripts=p.scripts),
             }
         return "nmap_scan", {
             "target": alias,
-            "flags": nmap.mcp_flags(top_ports=p.ports, timing=p.timing),
+            "flags": nmap.mcp_flags(top_ports=p.ports, timing=p.timing, scripts=p.scripts),
         }
+    if action == "whatweb":
+        return "whatweb", {"target_url": f"http://{alias}:{port}"}
+    if action == "sslscan":
+        target_port = (params or {}).get("port") or port
+        return "sslscan", {"target": f"{alias}:{target_port}"}
     if action == "nikto_scan":
         return "nikto_scan", {"target_url": f"http://{alias}:{port}"}
     if action == "zap_baseline":
@@ -398,7 +536,7 @@ def inject_output_path(argv: list[str], output_path: str, spec: ActionSpec) -> l
 
     - dirb: ``-o <path>``
     - nikto: ``-output <path>``
-    - http_probe: no file flag injected (writes its own artifact)
+    - curl: no file flag injected (writes its own artifact)
 
     Replaces an existing matching flag, or appends one, so the executor
     finds the artifact where it expects it.
@@ -411,8 +549,29 @@ def inject_output_path(argv: list[str], output_path: str, spec: ActionSpec) -> l
                 result[idx + 1] = output_path
         except ValueError:
             result.extend(["-o", output_path])
-    elif spec.tool == "http_probe":
+    elif spec.tool == "curl":
         return result
+    elif spec.tool == "whatweb":
+        try:
+            idx = result.index("--log-json")
+            if idx + 1 < len(result):
+                result[idx + 1] = output_path
+        except ValueError:
+            result.extend(["--log-json", output_path])
+    elif spec.tool == "sslscan":
+        try:
+            idx = result.index("--xml")
+            if idx + 1 < len(result):
+                result[idx + 1] = output_path
+        except ValueError:
+            result.extend(["--xml", output_path])
+    elif spec.tool == "hashcat":
+        try:
+            idx = result.index("--outfile")
+            if idx + 1 < len(result):
+                result[idx + 1] = output_path
+        except ValueError:
+            result.extend(["--outfile", output_path])
     else:
         try:
             idx = result.index("-output")

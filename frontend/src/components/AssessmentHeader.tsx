@@ -78,8 +78,8 @@ export function AssessmentHeader({
         </button>
         <span className="head-hint">
           {gatePending
-            ? 'A gate is open in the approval panel. Decide there to continue.'
-            : 'Plan gate, active-scan gate, final review. Exact argv is audited before it runs.'}
+            ? 'An approval is pending. Decide there to continue.'
+            : 'Plan approval, active-scan approval, final review. Exact argv is audited before it runs.'}
         </span>
       </div>
     </header>
