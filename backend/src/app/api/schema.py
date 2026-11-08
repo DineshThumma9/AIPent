@@ -24,6 +24,9 @@ class DecisionIn(BaseModel):
     decision: Literal["approved", "rejected"]
     actor: str = Field(default="analyst", min_length=1, max_length=80)
     reason: str = Field(default="", max_length=500)
+    # Bind the decision to the gate card the analyst saw.
+    approval_id: int | None = None
+    step_id: int | None = None
 
 
 class MessageOut(BaseModel):
@@ -89,3 +92,4 @@ class AssessmentDetail(BaseModel):
     approvals: list[Approval] = Field(default_factory=list)
     audit: list[Audit] = Field(default_factory=list)
     messages: list[MessageOut] = Field(default_factory=list)
+    gate_open: bool = False

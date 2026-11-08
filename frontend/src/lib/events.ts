@@ -164,6 +164,11 @@ export function applyEvent(
 
     case 'message':
       return detail
+        ? {
+            ...detail,
+            messages: upsert(detail.messages, event.data.message),
+          }
+        : detail
 
     case 'error':
     case 'heartbeat':

@@ -47,7 +47,7 @@ def test_mcp_tool_call_is_the_approved_descriptor(monkeypatch):
     assert tool == "nmap_scan"
     assert arguments == {
         "target": "host.docker.internal",
-        "flags": "-sV -Pn -T3 -p 3000 -oX -",
+        "flags": "-sV -Pn -T4 --top-ports 100 -oX -",
     }
 
     descriptor = actions.mcp_command("nikto_scan", assessment, "127.0.0.1")
@@ -153,7 +153,19 @@ def test_gateway_mapping_uses_fixed_arguments(monkeypatch):
 
     monkeypatch.setattr(executor, "GatewayClient", FakeGateway)
     assessment = Assessment(title="Lab", targets=["127.0.0.1"], ports=[3000])
-    step = Step(assessment_id=1, seq=1, action="recon_services", target="127.0.0.1")
+    argv = actions.mcp_command(
+        "recon_services",
+        assessment,
+        "127.0.0.1",
+        params={"ports": [3000], "timing": 3},
+    )
+    step = Step(
+        assessment_id=1,
+        seq=1,
+        action="recon_services",
+        target="127.0.0.1",
+        argv=argv,
+    )
 
     result = asyncio.run(
         executor._run_gateway("recon_services", assessment, "127.0.0.1", step)

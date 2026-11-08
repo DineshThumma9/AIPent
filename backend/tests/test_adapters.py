@@ -1,5 +1,6 @@
 import asyncio
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -118,19 +119,13 @@ def _run(fn):
 
 
 def test_execute_nikto_writes_artifact_and_evidence(assessment_id, monkeypatch):
-    def fake_run(argv, **kwargs):
+    async def fake_run(argv, timeout, assessment_id=None):
         output = Path(argv[argv.index("-output") + 1])
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(NIKTO_JSON, encoding="utf-8")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
-        class Process:
-            returncode = 0
-            stdout = ""
-            stderr = ""
-
-        return Process()
-
-    monkeypatch.setattr(executor.subprocess, "run", fake_run)
+    monkeypatch.setattr(executor, "_run", fake_run)
 
     async def body(session):
         step = await actions.execute_action(
@@ -154,10 +149,10 @@ def test_execute_nikto_writes_artifact_and_evidence(assessment_id, monkeypatch):
 
 
 def test_execute_missing_tool_is_blocked(assessment_id, monkeypatch):
-    def explode(*_args, **_kwargs):
+    async def explode(*_args, **_kwargs):
         raise FileNotFoundError("nikto")
 
-    monkeypatch.setattr(executor.subprocess, "run", explode)
+    monkeypatch.setattr(executor, "_run", explode)
 
     async def body(session):
         step = await actions.execute_action(
@@ -171,19 +166,13 @@ def test_execute_missing_tool_is_blocked(assessment_id, monkeypatch):
 
 
 def test_duplicate_evidence_is_not_written_twice(assessment_id, monkeypatch):
-    def fake_run(argv, **kwargs):
+    async def fake_run(argv, timeout, assessment_id=None):
         output = Path(argv[argv.index("-output") + 1])
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(NIKTO_JSON, encoding="utf-8")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
-        class Process:
-            returncode = 0
-            stdout = ""
-            stderr = ""
-
-        return Process()
-
-    monkeypatch.setattr(executor.subprocess, "run", fake_run)
+    monkeypatch.setattr(executor, "_run", fake_run)
 
     async def body(session):
         await actions.execute_action(session, assessment_id, "nikto_scan")

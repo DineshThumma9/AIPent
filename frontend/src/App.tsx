@@ -42,6 +42,13 @@ function causeText(cause: unknown): string {
   if (cause instanceof Error) {
     try {
       const parsed = JSON.parse(cause.message)
+      if (
+        parsed &&
+        typeof parsed.detail === 'object' &&
+        parsed.detail?.message
+      ) {
+        return String(parsed.detail.message)
+      }
       if (parsed && typeof parsed.detail === 'string') {
         return parsed.detail
       }
@@ -75,6 +82,7 @@ export default function App() {
   const [agentBusy, setAgentBusy] = useState(false)
   const [chatBusy, setChatBusy] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
+  const [settledApprovalId, setSettledApprovalId] = useState<number | null>(null)
   const [chats, setChats] = useState<Record<number, LocalMessage[]>>(() =>
     selectedId !== null ? { [selectedId]: [] } : {},
   )
@@ -165,6 +173,24 @@ export default function App() {
       ),
     )
   }, [detail?.id, detail?.status, detail?.finished_at])
+
+  // The stream carries messages from every client. Merge anything this tab
+  // has not seen yet so cross-client replies show up without a refetch.
+  useEffect(() => {
+    if (!detail) return
+    setChats((prev) => {
+      const current = prev[detail.id] ?? []
+      const known = new Set(current.map((message) => message.id))
+      const incoming = detail.messages
+        .map(toLocalMessage)
+        .filter((message) => !known.has(message.id))
+      if (incoming.length === 0) return prev
+      const next = [...current, ...incoming]
+        .sort((a, b) => a.at.localeCompare(b.at))
+        .slice(-120)
+      return { ...prev, [detail.id]: next }
+    })
+  }, [detail?.id, detail?.messages])
 
   async function handleCreate(input: AssessmentInput) {
     setActionError(null)
@@ -265,6 +291,11 @@ export default function App() {
         approval_id: pending?.id ?? undefined,
         step_id: pending?.step_id ?? undefined,
       })
+      if (pending) {
+        // The card is settled even if the poll-driven status has not caught up
+        // yet. Prevent a second click from racing the resumed graph.
+        setSettledApprovalId(pending.id)
+      }
       // Do not fetch the assessment here. The graph resumes in a background
       // task and the DB may not reflect the new state yet. Let the SSE
       // stream push the updated state (gate, step, report, status) as it
@@ -399,6 +430,10 @@ export default function App() {
                 mission={mission}
                 messages={messagesFor(detail.id)}
                 busy={agentBusy || chatBusy}
+                gateOpen={
+                  mission.gateOpen &&
+                  mission.pendingApproval?.id !== settledApprovalId
+                }
                 scanning={scanning}
                 onSend={handleChat}
                 onDecision={handleDecision}

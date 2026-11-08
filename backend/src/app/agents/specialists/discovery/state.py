@@ -19,7 +19,7 @@ class DiscoveryState(TypedDict, total=False):
     # Discovery's own working memory
     candidates: list[dict]        # candidate findings from scanners
     scanners_used: list[str]      # which scanners ran this turn
-    steps_queued: list[dict]      # step ids + actions queued this turn
+    steps: list[dict]             # step ids + actions queued this turn
 
     # Output handed back to supervisor
     recommendations: Annotated[list, operator.add]

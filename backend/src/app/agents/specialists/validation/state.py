@@ -19,7 +19,7 @@ class ValidationState(TypedDict, total=False):
     # Validation's own working memory
     probes_used: int              # http_probe count this turn
     verdicts: list[dict]          # confirmed / suspected / false_positive
-    steps_queued: list[dict]      # step ids + actions queued this turn
+    steps: list[dict]             # step ids + actions queued this turn
 
     # Output handed back to supervisor
     recommendations: Annotated[list, operator.add]

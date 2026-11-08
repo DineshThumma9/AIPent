@@ -13,6 +13,9 @@ from app.domain.models import (
 )
 from app.persistence.base import BaseRepo
 
+SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+STATUS_RANK = {"suspected": 0, "confirmed": 1, "false_positive": 2}
+
 
 class FindingRepo(BaseRepo):
     """All database access for findings and evidence."""
@@ -110,8 +113,6 @@ class FindingRepo(BaseRepo):
 
     async def rank_candidates(self, assessment_id: int) -> list[Finding]:
         """Return candidate findings ranked by status, severity, confidence."""
-        from app.domain.models import SEVERITY_RANK, STATUS_RANK
-
         rows = await self.get_candidates(assessment_id)
         return sorted(
             rows,
@@ -151,7 +152,7 @@ class FindingRepo(BaseRepo):
             )
             evidence = list(evidence_result.scalars().all())
             executed = any(
-                (item.locator or {}).get("tool") == "http_probe"
+                (item.locator or {}).get("tool") in ("http_probe", "curl_tool")
                 and (item.locator or {}).get("http_status") is not None
                 for item in evidence
             )

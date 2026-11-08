@@ -92,12 +92,22 @@ export const AuditEventSchema = z.object({
   payload: z.record(z.string(), z.unknown()),
 })
 
+export const MessageSchema = z.object({
+  id: z.number().int(),
+  assessment_id: z.number().int(),
+  role: z.string(),
+  text: z.string(),
+  created_at: z.string(),
+})
+
 export const AssessmentDetailSchema = AssessmentSchema.extend({
   steps: z.array(StepSchema),
   findings: z.array(FindingSchema),
   evidence: z.array(EvidenceSchema),
   approvals: z.array(ApprovalSchema),
   audit: z.array(AuditEventSchema),
+  messages: z.array(MessageSchema).default([]),
+  gate_open: z.boolean().default(false),
 })
 
 export const PlanStepSchema = z.object({
@@ -134,14 +144,6 @@ export const DecisionInputSchema = z.object({
   // backend can reject stale approval cards (approval.argv must match step.argv).
   approval_id: z.number().int().optional(),
   step_id: z.number().int().optional(),
-})
-
-export const MessageSchema = z.object({
-  id: z.number().int(),
-  assessment_id: z.number().int(),
-  role: z.string(),
-  text: z.string(),
-  created_at: z.string(),
 })
 
 export const AssessmentInputSchema = z.object({

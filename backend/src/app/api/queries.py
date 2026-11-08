@@ -3,7 +3,17 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col, select
 
-from app.domain.models import Approval, Assessment, Audit, Evidence, Finding, Message, Step
+from app.domain.models import (
+    Approval,
+    Assessment,
+    AssessmentStatus,
+    Audit,
+    Decision,
+    Evidence,
+    Finding,
+    Message,
+    Step,
+)
 from app.api.schema import AssessmentDetail, MessageOut
 from app.persistence import AuditRepo, AssessmentRepo, FindingRepo, StepRepo
 
@@ -47,6 +57,20 @@ async def load_assessment_detail(
     )
     messages = [MessageOut.model_validate(m) for m in messages.scalars().all()]
 
+    pending_approval = next(
+        (row for row in approvals if row.decision == Decision.PENDING.value),
+        None,
+    )
+    requires_approval = True
+    if pending_approval is not None:
+        requires_approval = (
+            (pending_approval.detail or {}).get("requires_approval", True) is not False
+        )
+    gate_open = (
+        assessment.status == AssessmentStatus.AWAITING_APPROVAL.value
+        and requires_approval
+    )
+
     return AssessmentDetail(
         **assessment.model_dump(),
         steps=steps,
@@ -55,4 +79,5 @@ async def load_assessment_detail(
         approvals=approvals,
         audit=audit,
         messages=messages,
+        gate_open=gate_open,
     )

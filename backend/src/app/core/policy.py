@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any
 
 
@@ -77,3 +78,16 @@ def load_policies_from_json(json_text: str | None) -> dict[str, ActionPolicy]:
     if not isinstance(data, dict):
         return dict(DEFAULT_ACTION_POLICIES)
     return load_policies(data)
+
+
+@lru_cache(maxsize=8)
+def _cached_policies(json_text: str | None) -> dict[str, ActionPolicy]:
+    return load_policies_from_json(json_text)
+
+
+def policy_for(action: str) -> ActionPolicy:
+    """Return the effective policy for one action, fail-closed when unknown."""
+    # Imported lazily so this module stays importable without settings.
+    from app.core.config import settings
+
+    return _cached_policies(settings.action_policies_json).get(action, ActionPolicy())

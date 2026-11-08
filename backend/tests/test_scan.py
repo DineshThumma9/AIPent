@@ -17,12 +17,10 @@ def engine(tmp_path, monkeypatch, nmap_xml):
     set_engine(engine)
     monkeypatch.setattr(catalogue, "ARTIFACT_DIR", tmp_path / "artifacts")
 
-    class Process:
-        returncode = 0
-        stdout = nmap_xml
-        stderr = ""
+    async def fake_run(argv, timeout, assessment_id=None):
+        return subprocess.CompletedProcess(argv, 0, nmap_xml, "")
 
-    monkeypatch.setattr(executor.subprocess, "run", lambda *a, **k: Process())
+    monkeypatch.setattr(executor, "_run", fake_run)
     return engine
 
 

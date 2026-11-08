@@ -1,6 +1,7 @@
 """Step and Approval persistence."""
 
 from typing import Any
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from sqlalchemy import func
@@ -16,6 +17,7 @@ from app.actions import (
     resolve_argv,
 )
 from app.core.config import settings
+from app.core.policy import policy_for
 from app.domain.models import (
     Approval,
     Assessment,
@@ -31,6 +33,28 @@ ACTIVE_STATES = (
     StepStatus.RUNNING.value,
     StepStatus.SUCCEEDED.value,
 )
+
+
+def _step_matches(
+    row: Step, target: str, params: dict[str, Any] | None
+) -> bool:
+    """Whether a queued step is the same action the agent is asking for.
+
+    Most actions are unique per target. HTTP probes are not: one target can
+    have many interesting paths, so compare method and path too.
+    """
+    if row.target != target:
+        return False
+    if row.action != "http_probe":
+        return True
+    probe = params or {}
+    method = str(probe.get("method", "GET")).upper()
+    path = str(probe.get("path") or "/")
+    if not path.startswith("/"):
+        path = "/" + path
+    if len(row.argv) < 3 or row.argv[1].upper() != method:
+        return False
+    return urlsplit(row.argv[2]).path == path
 
 
 class StepRepo(BaseRepo):
@@ -61,6 +85,45 @@ class StepRepo(BaseRepo):
         except ScopeError as exc:
             return {"error": str(exc)}
 
+        # Count queued actions for this run using audit events, and remember
+        # which steps belong to this run so duplicates from an earlier run do
+        # not block a legitimate rerun.
+        result = await self.session.execute(
+            select(Audit).where(
+                Audit.assessment_id == assessment_id,
+                Audit.event_type == "action.queued",
+            )
+        )
+        events = result.scalars().all()
+        run_events = [
+            event for event in events if (event.payload or {}).get("run_id") == run_id
+        ]
+        run_step_ids = {
+            (event.payload or {}).get("step_id") for event in run_events
+        }
+        if len(run_events) >= settings.max_steps:
+            return {
+                "error": (
+                    f"action budget exhausted ({settings.max_steps} queued actions "
+                    "for this run); hand off and let the analyst review what ran"
+                )
+            }
+
+        if action == "http_probe":
+            probes = sum(
+                1
+                for event in run_events
+                if (event.payload or {}).get("action") == "http_probe"
+            )
+            if probes >= settings.max_validation_probes:
+                return {
+                    "error": (
+                        "validation probe budget exhausted for this run "
+                        f"({settings.max_validation_probes} probes); hand off "
+                        "and let the analyst review the evidence"
+                    )
+                }
+
         result = await self.session.execute(
             select(Step).where(
                 Step.assessment_id == assessment_id,
@@ -70,7 +133,13 @@ class StepRepo(BaseRepo):
         )
         existing = result.scalars().all()
         for row in existing:
-            duplicate = row.argv == argv if argv is not None else row.target == target
+            if row.id not in run_step_ids:
+                continue
+            duplicate = (
+                row.argv == argv
+                if argv is not None
+                else _step_matches(row, target, params)
+            )
             if duplicate:
                 return {
                     "queued": True,
@@ -78,25 +147,6 @@ class StepRepo(BaseRepo):
                     "status": row.status,
                     "note": "this action is already queued or executed; not resent",
                 }
-
-        # Count queued actions for this run using audit events.
-        result = await self.session.execute(
-            select(Audit).where(
-                Audit.assessment_id == assessment_id,
-                Audit.event_type == "action.queued",
-            )
-        )
-        events = result.scalars().all()
-        queued_count = sum(
-            1 for event in events if (event.payload or {}).get("run_id") == run_id
-        )
-        if queued_count >= settings.max_steps:
-            return {
-                "error": (
-                    f"action budget exhausted ({settings.max_steps} queued actions "
-                    "for this run); hand off and let the analyst review what ran"
-                )
-            }
 
         step = Step(
             assessment_id=assessment_id,
@@ -116,12 +166,15 @@ class StepRepo(BaseRepo):
             argv = inject_output_path(list(argv), output_path, spec)
         step.argv = argv
 
+        policy = policy_for(action)
         approval_detail: dict[str, Any] = {
             "role": role,
             "phase": role,
             "rationale": rationale,
             "tool": spec.tool,
             "params": params or {},
+            "risk": policy.risk,
+            "requires_approval": policy.requires_approval,
             "plan": [
                 {"action": action, "target": target, "rationale": rationale},
             ],
@@ -165,8 +218,8 @@ class StepRepo(BaseRepo):
             "gate": "action",
             "note": (
                 "Queued, not executed. The gate runs this action after your turn "
-                "ends; its result appears in the next observation. Do not poll "
-                "query_steps/query_findings waiting for it — call handoff now."
+                "ends; its result appears in the next observation. Stop calling "
+                "tools and return a short summary."
             ),
         }
 
@@ -273,27 +326,6 @@ class StepRepo(BaseRepo):
             )
         )
         return result.scalar() or 0
-
-    async def is_duplicate(
-        self,
-        assessment_id: int,
-        action: str,
-        target: str | None = None,
-        argv: list[str] | None = None,
-    ) -> Step | None:
-        result = await self.session.execute(
-            select(Step).where(
-                Step.assessment_id == assessment_id,
-                Step.action == action,
-                Step.status.in_(ACTIVE_STATES),
-            )
-        )
-        existing = result.scalars().all()
-        for row in existing:
-            duplicate = row.argv == argv if argv is not None else row.target == target
-            if duplicate:
-                return row
-        return None
 
     async def get_approval_for_step(self, step_id: int) -> Approval | None:
         result = await self.session.execute(

@@ -200,10 +200,12 @@ function finalReviewFacts(approval: Approval): string[] {
 function ApprovalCard({
   approval,
   busy,
+  gateOpen,
   onDecision,
 }: {
   approval: Approval
   busy: boolean
+  gateOpen: boolean
   onDecision: (decision: 'approved' | 'rejected') => void
 }) {
   const pending = approval.decision === 'pending'
@@ -279,7 +281,13 @@ function ApprovalCard({
         </p>
       )}
 
-      {pending && (
+      {pending && !gateOpen && (
+        <p className="gate-hint">
+          The role is still working. This gate opens when its turn ends.
+        </p>
+      )}
+
+      {pending && gateOpen && (
         <div className="gate-actions">
           <button
             type="button"
@@ -425,6 +433,7 @@ export function MissionConversation({
   mission,
   messages,
   busy,
+  gateOpen,
   scanning,
   onSend,
   onDecision,
@@ -436,6 +445,7 @@ export function MissionConversation({
   mission: MissionView
   messages: LocalMessage[]
   busy: boolean
+  gateOpen: boolean
   scanning: boolean
   onSend: (text: string) => void
   onDecision: (decision: 'approved' | 'rejected') => void
@@ -622,6 +632,9 @@ export function MissionConversation({
                   <ApprovalCard
                     approval={entry.approval}
                     busy={busy}
+                    gateOpen={
+                      gateOpen && mission.pendingApproval?.id === entry.approval.id
+                    }
                     onDecision={onDecision}
                   />
                 </div>

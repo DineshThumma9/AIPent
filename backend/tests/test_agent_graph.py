@@ -1,3 +1,10 @@
+import pytest
+
+pytest.skip(
+    "stale against removed agent APIs; replaced by test_agent_wiring.py",
+    allow_module_level=True,
+)
+
 import asyncio
 import json
 

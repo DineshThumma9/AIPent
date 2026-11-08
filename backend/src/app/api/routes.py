@@ -182,11 +182,18 @@ async def scan(assessment_id: int, session: AsyncSession = Depends(get_session))
     try:
         step = await run_scan(session, assessment_id)
     except LookupError as exc:
+        assessment.status = previous_status
+        await repo.session.commit()
         raise HTTPException(404, str(exc)) from exc
     except ScopeError as exc:
         assessment.status = previous_status
         await repo.session.commit()
         raise HTTPException(400, str(exc)) from exc
+    except Exception:
+        # Never leave the assessment stuck RUNNING after an unexpected error.
+        assessment.status = previous_status
+        await repo.session.commit()
+        raise
 
     assessment.status = (
         AssessmentStatus.COMPLETED.value
@@ -214,7 +221,9 @@ async def run_agent(assessment_id: int):
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
     except runner.AlreadyRunning as exc:
-        raise HTTPException(409, str(exc)) from exc
+        raise HTTPException(
+            409, detail={"code": "run_active", "message": str(exc)}
+        ) from exc
     return AgentAccepted(
         assessment_id=assessment_id,
         message="Agent run accepted; watch the event stream for the action gate.",
@@ -248,9 +257,17 @@ async def resume_agent(assessment_id: int, payload: DecisionIn):
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
     except runner.AlreadyRunning as exc:
-        raise HTTPException(409, str(exc)) from exc
+        raise HTTPException(
+            409, detail={"code": "run_active", "message": str(exc)}
+        ) from exc
     except runner.NotPaused as exc:
-        raise HTTPException(409, str(exc)) from exc
+        raise HTTPException(
+            409, detail={"code": "gate_not_open", "message": str(exc)}
+        ) from exc
+    except runner.StaleDecision as exc:
+        raise HTTPException(
+            409, detail={"code": "stale_gate", "message": str(exc)}
+        ) from exc
     return AgentAccepted(
         assessment_id=assessment_id,
         message=f"Decision {payload.decision} accepted.",

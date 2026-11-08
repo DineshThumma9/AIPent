@@ -16,7 +16,7 @@ class ReconState(TypedDict, total=False):
     # Recon's own working memory
     services: list[dict]          # open services discovered
     tech_guesses: list[str]
-    steps_queued: list[dict]      # step ids + actions queued this turn
+    steps: list[dict]             # step ids + actions queued this turn
 
     # Output handed back to supervisor
     recommendations: Annotated[list, operator.add]

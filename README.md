@@ -8,9 +8,9 @@ AIPENT runs an authorized VAPT against scoped targets through three specialist r
 
 | Role | Mission | Tools |
 |------|---------|-------|
-| **Recon** | Map live ports and service facts | `scan_services`, `nmap_scan` |
-| **Discovery** | Turn service facts into candidate findings | `web_scan`, `nikto_scan`, `zap_baseline`, `sqlmap_scan`, `dirb_scan` |
-| **Validation** | Test hypotheses with safe probes and record verdicts | `http_probe`, `invoke_skill`, `update_finding_status` |
+| **Recon** | Map live ports and service facts | `recon_services` |
+| **Discovery** | Turn service facts into candidate findings | `dirb_scan`, `nikto_scan`, `zap_baseline` |
+| **Validation** | Test hypotheses with safe probes | `http_probe`, `sqlmap_scan` |
 
 Every action the agent wants to run is **queued as a Step first**. Gate policy then decides whether it pauses for a human or executes on agent authority (see [`AIPENT_ACTION_POLICIES`](#environment-variables)). High-risk actions — `sqlmap_scan`, `http_probe`, `zap_baseline` — pause by default. Nothing touches the target before it has been queued, and every approved command runs exactly as shown in the approval card.
 
@@ -19,8 +19,8 @@ Every action the agent wants to run is **queued as a Step first**. Gate policy t
 ```
 ┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐
 │   Recon         │      │   Discovery     │      │   Validation    │
-│   (nmap_scan)   │─────▶│   (nikto/zap/   │─────▶│   (http_probe/  │
-│                 │      │    sqlmap/dirb) │      │    invoke_skill)│
+│ (recon_services)│─────▶│ (nikto/zap/dirb)│─────▶│ (http_probe/    │
+│                 │      │                 │      │  sqlmap_scan)   │
 └─────────────────┘      └─────────────────┘      └─────────────────┘
          │                         │                         │
          ▼                         ▼                         ▼

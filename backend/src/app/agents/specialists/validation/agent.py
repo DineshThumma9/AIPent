@@ -12,13 +12,14 @@ from langchain_core.messages import HumanMessage
 from langgraph.errors import GraphRecursionError
 from langgraph.types import Command
 
-from app.agents.control import audit, record_role, role_history
+from app.agents.control import audit, record_turn
 from app.agents.model import build_role_agent
 from app.agents.prompts import VALIDATION_PROMPT
 from app.agents.tools import set_context
+from app.core.config import settings
 from app.core.db import get_async_session_ctx
 from app.core.log import get_logger
-from app.persistence import AssessmentRepo, StepRepo
+from app.persistence import AssessmentRepo, FindingRepo, StepRepo
 
 log = get_logger("agent.validation")
 
@@ -40,24 +41,35 @@ async def agent_node(state: dict) -> Command[Literal["__end__"]]:
         if assessment is None:
             raise LookupError(f"assessment {assessment_id} not found")
 
-        history = await role_history(session, assessment_id, run_id)
-        if not history or history[-1].get("role") != role:
-            record_role(
-                session, assessment_id, run_id, role, "role turn",
-                from_role=state.get("role"),
-            )
-            history = await role_history(session, assessment_id, run_id)
+        await record_turn(
+            session,
+            assessment_id,
+            run_id,
+            role,
+            reason="validation agent invocation",
+            from_role=state.get("role"),
+        )
         await session.commit()
 
     agent = build_role_agent(role)
     targets = state.get("targets", [])
-    candidates = state.get("discovery_state", {}).get("candidates", [])
+
+    # Candidates are findings created by Discovery. Read them from the DB
+    # instead of relying on a scratchpad key that is not populated.
+    async with get_async_session_ctx() as session:
+        finding_repo = FindingRepo(session)
+        candidates = [
+            row
+            for row in await finding_repo.get_candidates(assessment_id)
+            if row.status != "false_positive"
+        ]
 
     candidates_summary = "\n".join(
-        f"- {c.get('canonical_key', c.get('title', 'unknown'))} "
-        f"(status={c.get('status', 'unknown')}, severity={c.get('severity', 'unknown')})"
+        f"- id={c.id} {c.canonical_key or c.title} "
+        f"(asset={c.asset}, endpoint={c.endpoint or 'n/a'}, "
+        f"status={c.status}, severity={c.severity})"
         for c in candidates[:12]
-    ) or "No candidates reported by discovery."
+    ) or "No candidate findings."
 
     digest = (
         f"You are the Validation specialist for assessment {assessment_id}.\n"
@@ -65,17 +77,22 @@ async def agent_node(state: dict) -> Command[Literal["__end__"]]:
         f"Candidate findings from discovery:\n{candidates_summary}\n"
         f"Run ID: {run_id}\n"
         f"Mission: Test candidate findings with safe, controlled probes.\n"
-        f"Use http_probe to verify candidates. Only use sqlmap_scan if you "
-        f"have strong evidence of SQL injection — it requires human approval.\n"
+        f"Use http_probe for candidates. Pass the candidate endpoint as "
+        f"params.path and the candidate id as params.finding_id. "
+        f"Only use sqlmap_scan if you have strong evidence of SQL injection — "
+        f"it requires human approval.\n"
         f"Never run destructive sqlmap options (--dump, --os-shell, etc.).\n"
-        f"Record your verdict for each candidate: confirmed, suspected, or false_positive.\n"
-        f"When finished, call handoff with your recommendation."
+        f"If there are no candidates, do not queue any action; say there is "
+        f"nothing to validate.\n"
+        f"After queueing, stop calling tools and reply with a short summary. "
+        f"The gate runs the probe after your turn; do not claim a verdict "
+        f"before it runs."
     )
 
     try:
         result = await agent.ainvoke(
             {"messages": [HumanMessage(content=digest)]},
-            config={"recursion_limit": 50},
+            config={"recursion_limit": settings.agent_recursion_limit},
         )
     except GraphRecursionError as exc:
         log.warning(
@@ -129,7 +146,6 @@ async def agent_node(state: dict) -> Command[Literal["__end__"]]:
         update={
             "last_specialist": "validation",
             "role": "validation",
-            "role_history": history,
             "last_message": last_text or "Validation completed.",
             "recommendations": [
                 {

@@ -15,16 +15,17 @@ import json
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Registry of in-flight scanner processes keyed by assessment_id, so that
 # stop_run can terminate a child process when an operator cancels a run.
-_active_processes: dict[int, asyncio.Process] = {}
+_active_processes: dict[int, asyncio.subprocess.Process] = {}
 
 
-def register_process(assessment_id: int, process: asyncio.Process) -> None:
+def register_process(assessment_id: int, process: asyncio.subprocess.Process) -> None:
     """Store a live subprocess so stop_run can terminate it."""
     _active_processes[assessment_id] = process
 
@@ -129,7 +130,9 @@ async def _save_findings(
         else:
             target_finding = existing
             target_finding.updated_at = utcnow()
-            target_finding.confidence = max(existing.confidence, draft.confidence)
+            target_finding.confidence = max(
+                existing.confidence or 0, draft.confidence
+            )
             if SEVERITY_RANK.get(draft.severity.value, 9) < SEVERITY_RANK.get(
                 existing.severity, 9
             ):
@@ -139,9 +142,9 @@ async def _save_findings(
             if not existing.remediation:
                 target_finding.remediation = draft.remediation
             if draft.cve:
-                target_finding.cve = sorted(set(existing.cve) | set(draft.cve))
+                target_finding.cve = sorted(set(existing.cve or []) | set(draft.cve))
             if draft.cwe:
-                target_finding.cwe = sorted(set(existing.cwe) | set(draft.cwe))
+                target_finding.cwe = sorted(set(existing.cwe or []) | set(draft.cwe))
             if draft.status.value == "confirmed" and existing.status != "confirmed":
                 target_finding.status = "confirmed"
             merged += 1
@@ -284,10 +287,14 @@ async def execute_action(
 
     transport = (
         "mcp"
-        if settings.mcp_enabled and settings.mcp_transport == "gateway"
+        if (
+            action != "http_probe"
+            and settings.mcp_enabled
+            and settings.mcp_transport == "gateway"
+        )
         else spec.transport
     )
-    alias = transport_target(target)
+    alias = transport_target(target) if transport == "mcp" else target
     if alias != target:
         _audit(
             session,
@@ -389,7 +396,7 @@ async def execute_action(
             "step.blocked",
             {"step_id": step.id, "tool": spec.tool, "error": step.error},
         )
-    except subprocess.TimeoutExpired:
+    except (TimeoutError, subprocess.TimeoutExpired):
         step.status = StepStatus.TIMEOUT.value
         step.error = f"timed out after {timeout}s"
         _audit(
@@ -454,7 +461,16 @@ async def _run_gateway(
     target: str,
     step: Step,
 ) -> MCPResult:
-    tool, arguments = mcp_tool_call(action, assessment, target)
+    # The step stores the exact approved descriptor. Use it rather than
+    # re-deriving the arguments, so the approved command is the one that runs.
+    if len(step.argv) >= 3 and step.argv[0] == "mcp":
+        tool = step.argv[1]
+        try:
+            arguments = json.loads(step.argv[2])
+        except json.JSONDecodeError:
+            tool, arguments = mcp_tool_call(action, assessment, target)
+    else:
+        tool, arguments = mcp_tool_call(action, assessment, target)
     calls: list[dict] = []
 
     async with GatewayClient() as gateway:

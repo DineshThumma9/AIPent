@@ -115,6 +115,38 @@ def record_role(
     return payload
 
 
+async def record_turn(
+    session: AsyncSession,
+    assessment_id: int,
+    run_id: str,
+    role: str,
+    reason: str = "role turn",
+    from_role: str | None = None,
+) -> int:
+    """Record one specialist model invocation and return its turn number."""
+    if role not in ROLES:
+        raise ValueError(f"unknown role {role!r}; expected one of {ROLES}")
+    turn = (
+        await role_event_count(
+            session, assessment_id, run_id, role, "role.turn"
+        )
+        + 1
+    )
+    audit(
+        session,
+        assessment_id,
+        "role.turn",
+        {
+            "run_id": run_id,
+            "role": role,
+            "reason": reason,
+            "from": from_role,
+            "turn": turn,
+        },
+    )
+    return turn
+
+
 def record_handoff(
     session: AsyncSession,
     assessment_id: int,

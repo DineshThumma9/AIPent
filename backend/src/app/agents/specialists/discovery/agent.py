@@ -1,6 +1,6 @@
-"""Discovery specialist agent — LLM agent with discovery tools (nikto, zap).
+"""Discovery specialist agent — LLM agent with web scanners (dirb, nikto, zap).
 
-The agent decides whether to run nikto_scan, zap_baseline, or both, and
+The agent decides whether to run dirb_scan, nikto_scan, or zap_baseline, and
 against which open web services. It returns a typed handoff.
 """
 
@@ -12,10 +12,11 @@ from langchain_core.messages import HumanMessage
 from langgraph.errors import GraphRecursionError
 from langgraph.types import Command
 
-from app.agents.control import audit, record_role, role_history
+from app.agents.control import audit, record_turn
 from app.agents.model import build_role_agent
 from app.agents.prompts import DISCOVERY_PROMPT
 from app.agents.tools import set_context
+from app.core.config import settings
 from app.core.db import get_async_session_ctx
 from app.core.log import get_logger
 from app.persistence import AssessmentRepo, FindingRepo, StepRepo
@@ -40,13 +41,14 @@ async def agent_node(state: dict) -> Command[Literal["__end__"]]:
         if assessment is None:
             raise LookupError(f"assessment {assessment_id} not found")
 
-        history = await role_history(session, assessment_id, run_id)
-        if not history or history[-1].get("role") != role:
-            record_role(
-                session, assessment_id, run_id, role, "role turn",
-                from_role=state.get("role"),
-            )
-            history = await role_history(session, assessment_id, run_id)
+        await record_turn(
+            session,
+            assessment_id,
+            run_id,
+            role,
+            reason="discovery agent invocation",
+            from_role=state.get("role"),
+        )
         await session.commit()
 
     agent = build_role_agent(role)
@@ -84,15 +86,17 @@ async def agent_node(state: dict) -> Command[Literal["__end__"]]:
         f"Open services from recon:\n{services_summary}\n"
         f"Run ID: {run_id}\n"
         f"Mission: Turn service facts into candidate vulnerabilities.\n"
-        f"Use nikto_scan or zap_baseline against open web services. "
-        f"Do not use sqlmap or http_probe — those belong to Validation.\n"
-        f"When finished, call handoff with your recommendation."
+        f"Use dirb_scan, nikto_scan, or zap_baseline against open web services. "
+        f"Choose the scanner that fits; do not run all three blindly.\n"
+        f"After queueing, stop calling tools and reply with a short summary. "
+        f"The gate runs the scan after your turn.\n"
+        f"Do not use sqlmap or http_probe — those belong to Validation."
     )
 
     try:
         result = await agent.ainvoke(
             {"messages": [HumanMessage(content=digest)]},
-            config={"recursion_limit": 50},
+            config={"recursion_limit": settings.agent_recursion_limit},
         )
     except GraphRecursionError as exc:
         log.warning(
@@ -146,7 +150,6 @@ async def agent_node(state: dict) -> Command[Literal["__end__"]]:
         update={
             "last_specialist": "discovery",
             "role": "discovery",
-            "role_history": history,
             "last_message": last_text or "Discovery completed.",
             "recommendations": [
                 {

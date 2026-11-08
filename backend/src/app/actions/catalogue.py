@@ -7,10 +7,12 @@ thing that runs.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal
+from urllib.parse import urlsplit
 
 from app.adapters import nikto, nmap, zap
 from app.adapters.base import FindingDraft
@@ -109,6 +111,8 @@ def _zap_argv(
 def _sqlmap_argv(
     assessment: Assessment, target: str, _output: Path, params: dict[str, Any] | None = None
 ) -> list[str]:
+    # sqlmap writes its report to stdout by default. The action spec is
+    # output="stdout", so the executor captures it into the artifact file.
     return [
         "sqlmap",
         "-u",
@@ -116,6 +120,35 @@ def _sqlmap_argv(
         "--batch",
         "--dbs",
     ]
+
+
+def _http_probe_argv(
+    assessment: Assessment,
+    target: str,
+    _output: Path,
+    params: dict[str, Any] | None = None,
+) -> list[str]:
+    """Resolve the approved method/URL/headers for one safe HTTP probe.
+
+    ``params.path`` is restricted to a path on the scoped target so the probe
+    cannot be pointed at a different host. ``params.finding_id`` is stored on
+    the approval detail, not in argv, so evidence can be linked after the run.
+    """
+    p = params or {}
+    method = str(p.get("method", "GET")).upper()
+    if method not in ("GET", "HEAD", "POST"):
+        method = "GET"
+    path = str(p.get("path") or "/")
+    if not path.startswith("/"):
+        path = "/" + path
+    url = f"http://{target}:{_web_port(assessment)}{path}"
+    headers = json.dumps(p.get("headers") or {}, sort_keys=True)
+    try:
+        expected = int(p.get("expected_status", 200))
+    except (TypeError, ValueError):
+        expected = 200
+    body = str(p.get("body") or "")
+    return ["http_probe", method, url, headers, str(expected), body]
 
 
 def _dirb_argv(
@@ -186,7 +219,7 @@ ACTIONS: dict[str, ActionSpec] = {
         name="sqlmap_scan",
         tool="sqlmap",
         suffix=".sqlmap.txt",
-        output="file",
+        output="stdout",
         transport="local",
         ok_codes=(0, 1),
         build_argv=_sqlmap_argv,
@@ -209,13 +242,7 @@ ACTIONS: dict[str, ActionSpec] = {
         output="file",
         transport="http",
         ok_codes=(0,),
-        build_argv=lambda assessment, target, _output, params=None: [
-            "http_probe",
-            "GET",
-            f"http://{target}:{_web_port(assessment)}/",
-            "{}",
-            "200",
-        ],
+        build_argv=_http_probe_argv,
         parse=lambda _text, _host, _port: [],
     ),
 }
@@ -249,7 +276,7 @@ def mcp_tool_call(
     """
     alias = transport_target(target)
     port = _web_port(assessment)
-    if action == "recon_services":
+    if action in {"recon_services", "nmap_scan"}:
         p = NmapParams(**(params or {}))
         if isinstance(p.ports, list):
             return "nmap_scan", {
@@ -301,15 +328,65 @@ def resolve_argv(
     step_id: int,
     params: dict[str, Any] | None = None,
 ) -> list[str]:
-    if settings.mcp_enabled and settings.mcp_transport == "gateway":
-        return mcp_command(action, assessment, target, params=params)
     spec = get_action(action)
+    if (
+        settings.mcp_enabled
+        and settings.mcp_transport == "gateway"
+        and spec.transport != "http"
+    ):
+        return mcp_command(action, assessment, target, params=params)
     output = _artifact_dir(assessment.id or 0) / f"{step_id}{spec.suffix}"
     return spec.build_argv(assessment, target, output, params)
 
 
+_LOOPBACK = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _normalize_scope_value(value: str) -> str:
+    """Case-fold a host and reduce a URL to its hostname."""
+    text = value.strip()
+    if "://" in text:
+        text = urlsplit(text).hostname or text
+    return text.rstrip(".").lower()
+
+
+def _scope_match(target: str, entries: list[str]) -> bool:
+    """True when ``target`` equals an entry, a CIDR member, or its loopback alias.
+
+    Scope still fails closed: anything that cannot be parsed or matched is
+    rejected. CIDR entries only match IP-literal targets.
+    """
+    normalized = _normalize_scope_value(target)
+    if not normalized:
+        return False
+
+    try:
+        address = ipaddress.ip_address(normalized)
+    except ValueError:
+        address = None
+
+    for entry in entries:
+        candidate = _normalize_scope_value(entry)
+        if not candidate:
+            continue
+        if candidate == normalized:
+            return True
+        if candidate in _LOOPBACK and normalized in _LOOPBACK:
+            return True
+        if address is not None and "/" in candidate:
+            try:
+                network = ipaddress.ip_network(candidate, strict=False)
+            except ValueError:
+                continue
+            if address in network:
+                return True
+    return False
+
+
 def check_scope(assessment: Assessment, target: str) -> None:
-    if target in assessment.exclusions or target not in assessment.targets:
+    if _scope_match(target, assessment.exclusions or []):
+        raise ScopeError(f"{target} is not in scope for assessment {assessment.id}")
+    if not _scope_match(target, assessment.targets or []):
         raise ScopeError(f"{target} is not in scope for assessment {assessment.id}")
 
 
@@ -319,7 +396,6 @@ def inject_output_path(argv: list[str], output_path: str, spec: ActionSpec) -> l
     Different scanners use different flags for their output destination:
 
     - dirb: ``-o <path>``
-    - sqlmap: ``--output-dir <directory>``
     - nikto: ``-output <path>``
     - http_probe: no file flag injected (writes its own artifact)
 
@@ -334,14 +410,6 @@ def inject_output_path(argv: list[str], output_path: str, spec: ActionSpec) -> l
                 result[idx + 1] = output_path
         except ValueError:
             result.extend(["-o", output_path])
-    elif spec.tool == "sqlmap":
-        output_dir = str(Path(output_path).parent)
-        try:
-            idx = result.index("--output-dir")
-            if idx + 1 < len(result):
-                result[idx + 1] = output_dir
-        except ValueError:
-            result.extend(["--output-dir", output_dir])
     elif spec.tool == "http_probe":
         return result
     else:

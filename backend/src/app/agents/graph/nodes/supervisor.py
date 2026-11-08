@@ -22,6 +22,7 @@ from langgraph.types import Command
 from app.agents.control import ROLE_TURN_CAPS, audit
 from app.agents.graph.context import discovery_eligible, has_planned, validation_eligible
 from app.agents.graph.state import AssessmentState
+from app.core.config import settings
 from app.core.db import get_async_session_ctx
 
 from app.agents.specialists import (
@@ -88,12 +89,10 @@ async def _invoke_specialist(state: AssessmentState, specialist: str) -> dict:
             slice_, config=recon_graph_config(assessment_id)
         )
     if specialist == "discovery":
-        slice_["services"] = state.get("recon_state", {}).get("services", [])
         return await _discovery_graph.ainvoke(
             slice_, config=discovery_graph_config(assessment_id)
         )
     if specialist == "validation":
-        slice_["candidates"] = state.get("discovery_state", {}).get("candidates", [])
         return await _validation_graph.ainvoke(
             slice_, config=validation_graph_config(assessment_id)
         )
@@ -117,7 +116,7 @@ async def supervisor_node(state: AssessmentState) -> Command:
 
         if target == "discovery" and await discovery_eligible(assessment_id):
             turns = int(state.get("turns", {}).get("discovery", 0))
-            cap = ROLE_TURN_CAPS["discovery"]
+            cap = min(ROLE_TURN_CAPS["discovery"], settings.max_agent_turns)
             if turns >= cap:
                 async with get_async_session_ctx() as session:
                     await audit(
@@ -154,11 +153,10 @@ async def supervisor_node(state: AssessmentState) -> Command:
                         *state.get("recommendations", []),
                         *result.get("recommendations", []),
                     ],
-                    "steps": [*state.get("steps", []), *result.get("steps_queued", [])],
-                    "discovery_state": {
-                        **state.get("discovery_state", {}),
-                        "candidates": result.get("candidates", []),
-                        "scanners_used": result.get("scanners_used", []),
+                    "steps": [*state.get("steps", []), *result.get("steps", [])],
+                    "turns": {
+                        **state.get("turns", {}),
+                        "discovery": turns + 1,
                     },
                     "next_node": "supervisor",
                 },
@@ -167,7 +165,7 @@ async def supervisor_node(state: AssessmentState) -> Command:
 
         if target == "validation" and await validation_eligible(assessment_id):
             turns = int(state.get("turns", {}).get("validation", 0))
-            cap = ROLE_TURN_CAPS["validation"]
+            cap = min(ROLE_TURN_CAPS["validation"], settings.max_agent_turns)
             if turns >= cap:
                 async with get_async_session_ctx() as session:
                     await audit(
@@ -204,11 +202,10 @@ async def supervisor_node(state: AssessmentState) -> Command:
                         *state.get("recommendations", []),
                         *result.get("recommendations", []),
                     ],
-                    "steps": [*state.get("steps", []), *result.get("steps_queued", [])],
-                    "validation_state": {
-                        **state.get("validation_state", {}),
-                        "verdicts": result.get("verdicts", []),
-                        "probes_used": result.get("probes_used", 0),
+                    "steps": [*state.get("steps", []), *result.get("steps", [])],
+                    "turns": {
+                        **state.get("turns", {}),
+                        "validation": turns + 1,
                     },
                     "next_node": "supervisor",
                 },
@@ -223,7 +220,7 @@ async def supervisor_node(state: AssessmentState) -> Command:
 
     # 3. No specialist has run in this pass — start with recon.
     turns = int(state.get("turns", {}).get("recon", 0))
-    cap = ROLE_TURN_CAPS["recon"]
+    cap = min(ROLE_TURN_CAPS["recon"], settings.max_agent_turns)
     if turns >= cap:
         async with get_async_session_ctx() as session:
             await audit(
@@ -255,7 +252,6 @@ async def supervisor_node(state: AssessmentState) -> Command:
 
     result = await _invoke_specialist(state, "recon")
 
-    services = result.get("services", [])
     return Command(
         update={
             "last_specialist": "recon",
@@ -264,10 +260,10 @@ async def supervisor_node(state: AssessmentState) -> Command:
                 *state.get("recommendations", []),
                 *result.get("recommendations", []),
             ],
-            "steps": [*state.get("steps", []), *result.get("steps_queued", [])],
-            "recon_state": {
-                **state.get("recon_state", {}),
-                "services": services,
+            "steps": [*state.get("steps", []), *result.get("steps", [])],
+            "turns": {
+                **state.get("turns", {}),
+                "recon": turns + 1,
             },
             "next_node": "supervisor",
         },

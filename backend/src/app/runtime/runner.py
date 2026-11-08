@@ -26,7 +26,13 @@ from app.api.schema import AgentView
 from app.core.config import settings
 from app.core.db import get_async_session_ctx
 from app.core.log import get_logger
-from app.domain.models import Assessment, AssessmentStatus, utcnow
+from app.domain.models import (
+    Approval,
+    Assessment,
+    AssessmentStatus,
+    Decision,
+    utcnow,
+)
 from app.persistence import AssessmentRepo, AuditRepo
 
 log = get_logger("runner")
@@ -50,6 +56,10 @@ class AlreadyRunning(RuntimeError):
 
 class NotPaused(RuntimeError):
     pass
+
+
+class StaleDecision(RuntimeError):
+    """The decision does not belong to the gate that is currently open."""
 
 
 def _lock_for(assessment_id: int) -> asyncio.Lock:
@@ -155,27 +165,40 @@ async def get_view(
     )
 
 
+async def _record_failure(
+    assessment_id: int, event_type: str, error: BaseException
+) -> None:
+    """Persist a terminal run failure without masking the original error."""
+    async with get_async_session_ctx() as session:
+        repo = AssessmentRepo(session)
+        audit_repo = AuditRepo(session)
+        assessment = await repo.get(assessment_id)
+        if assessment is not None:
+            assessment.status = AssessmentStatus.FAILED.value
+            assessment.finished_at = utcnow()
+            await audit_repo.add(
+                assessment_id=assessment_id,
+                event_type=event_type,
+                payload={"error": str(error)[:500]},
+            )
+            await repo.session.commit()
+
+
 async def _invoke(assessment_id: int, payload: Any) -> None:
     try:
         graph, config = await _graph_for(assessment_id)
-        await graph.ainvoke(payload, config=config)
+        await asyncio.wait_for(
+            graph.ainvoke(payload, config=config),
+            timeout=settings.run_timeout,
+        )
     except asyncio.CancelledError:
         raise
+    except asyncio.TimeoutError as exc:
+        log.error("agent run timed out assessment=%s", assessment_id)
+        await _record_failure(assessment_id, "run.timeout", exc)
     except Exception as exc:  # noqa: BLE001 - a run failure is recorded, not fatal
         log.exception("agent run failed assessment=%s", assessment_id)
-        async with get_async_session_ctx() as session:
-            repo = AssessmentRepo(session)
-            audit_repo = AuditRepo(session)
-            assessment = await repo.get(assessment_id)
-            if assessment is not None:
-                assessment.status = AssessmentStatus.FAILED.value
-                assessment.finished_at = utcnow()
-                await audit_repo.add(
-                    assessment_id=assessment_id,
-                    event_type="agent.failed",
-                    payload={"error": str(exc)[:500]},
-                )
-                await repo.session.commit()
+        await _record_failure(assessment_id, "agent.failed", exc)
     finally:
         _tasks.pop(assessment_id, None)
 
@@ -238,9 +261,54 @@ async def resume_run(
         graph, config = await _graph_for(assessment_id)
         state = await graph.aget_state(config)
         if not state.next:
+            # Idempotent replay: a double-submitted decision whose stored
+            # decision already matches should return the current view, not a
+            # 409 that makes the client think the click failed.
+            approval_id = decision.get("approval_id")
+            if approval_id is not None:
+                async with get_async_session_ctx() as session:
+                    approval = await session.get(Approval, approval_id)
+                if (
+                    approval is not None
+                    and approval.assessment_id == assessment_id
+                    and approval.decision == str(decision.get("decision", "")).lower()
+                    and approval.decision
+                    in (Decision.APPROVED.value, Decision.REJECTED.value)
+                ):
+                    return await get_view(assessment_id, running=False)
             raise NotPaused("the graph is not waiting at a gate")
-        if not getattr(state, "interrupts", ()):
+        interrupts = getattr(state, "interrupts", ()) or ()
+        if not interrupts:
             raise NotPaused("the graph has no pending decision")
+
+        # Bind the decision to the gate the analyst actually saw. An old card
+        # cannot silently approve a different step after the gate advanced.
+        pending = interrupts[0].value
+        if isinstance(pending, dict) and pending.get("gate") == "action":
+            if (
+                decision.get("step_id") is not None
+                and decision["step_id"] != pending.get("step_id")
+            ):
+                raise StaleDecision(
+                    "this gate has already advanced; refresh and decide on "
+                    "the current gate"
+                )
+            if (
+                decision.get("approval_id") is not None
+                and decision["approval_id"] != pending.get("approval_id")
+            ):
+                raise StaleDecision(
+                    "this approval card is stale; refresh and decide on the "
+                    "current gate"
+                )
+
+        # Flip out of the gate state before launching so a second click or a
+        # polling client cannot treat the run as still paused.
+        async with get_async_session_ctx() as session:
+            assessment = await session.get(Assessment, assessment_id)
+            if assessment is not None:
+                assessment.status = AssessmentStatus.RUNNING.value
+                await session.commit()
 
         _launch(assessment_id, Command(resume=decision))
         return await get_view(assessment_id, running=True)
@@ -256,10 +324,22 @@ async def stop_run(
         # actually stops the external tool, not just the Python task.
         terminate_process(assessment_id)
 
-        task = _tasks.get(assessment_id)
+        task = _tasks.pop(assessment_id, None)
         if task is not None and not task.done():
             task.cancel()
-        _tasks.pop(assessment_id, None)
+            # Let the graph unwind before deleting the checkpoint; otherwise it
+            # can write or recreate state after the delete.
+            try:
+                await asyncio.wait_for(task, timeout=5)
+            except asyncio.TimeoutError:
+                log.warning(
+                    "agent task did not unwind within 5s assessment=%s",
+                    assessment_id,
+                )
+            except asyncio.CancelledError:
+                pass
+            except Exception:  # noqa: BLE001 - stop must still complete
+                log.exception("agent task failed while stopping assessment=%s", assessment_id)
 
         # Clear the graph checkpoint so a fresh start_run can begin a new loop
         # instead of finding a paused gate from the previous run.

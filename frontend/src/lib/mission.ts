@@ -52,6 +52,7 @@ export type MissionView = {
   runId: string | null
   startedAt: string | null
   running: boolean
+  gateOpen: boolean
   activeRole: RoleName | null
   roles: RoleView[]
   handoffs: HandoffView[]
@@ -95,7 +96,6 @@ const TERMINAL_STATUSES = new Set([
   'cancelled',
   'failed',
   'draft',
-  'awaiting_approval',
 ])
 
 const SEVERITY_RANK: Record<string, number> = {
@@ -343,6 +343,9 @@ export function deriveMission(detail: AssessmentDetail): MissionView {
     runId,
     startedAt,
     running,
+    gateOpen:
+      detail.gate_open &&
+      (pendingApproval?.detail.requires_approval ?? true) !== false,
     activeRole,
     roles,
     handoffs,

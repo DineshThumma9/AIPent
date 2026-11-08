@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field
 
@@ -128,12 +129,18 @@ def parse(
     if code in (404, 410):
         return []
 
+    method = str(probe.get("method") or "GET").upper()
+    parts = urlsplit(str(probe.get("url") or ""))
+    path = parts.path or "/"
+    if parts.query:
+        path = f"{path}?{parts.query}"
+
     return [
         FindingDraft(
-            canonical_key=f"web:probe:{host}:{port}/{probe.get('method', 'GET')}",
+            canonical_key=f"web:probe:{host}:{port}{path}:{method}",
             asset=host,
             endpoint=probe.get("url", ""),
-            title=f"Verification probe ({probe.get('method')}) returned {code}",
+            title=f"Verification probe ({method}) returned {code}",
             description=probe.get("body_preview", "")[:1000],
             severity=Severity.INFO,
             confidence=0.8,
