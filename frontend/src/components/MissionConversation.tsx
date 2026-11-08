@@ -6,7 +6,7 @@ import {
   type FormEvent,
   type KeyboardEvent,
 } from 'react'
-import { ArrowUp } from 'lucide-react'
+import { ArrowUp, Copy } from 'lucide-react'
 import { formatClock, formatDate, pad, shortHash } from '../lib/format'
 import type {
   Approval,
@@ -201,13 +201,16 @@ function ApprovalCard({
   approval,
   busy,
   gateOpen,
+  settled,
   onDecision,
 }: {
   approval: Approval
   busy: boolean
   gateOpen: boolean
-  onDecision: (decision: 'approved' | 'rejected') => void
+  settled: boolean
+  onDecision: (decision: 'approved' | 'rejected', reason?: string) => void
 }) {
+  const [reason, setReason] = useState('')
   const pending = approval.decision === 'pending'
   const role = approvalRole(approval)
   const plan = approvalPlan(approval)
@@ -215,6 +218,23 @@ function ApprovalCard({
   const rationale = approvalRationale(approval)
   const review = approval.action === 'final_review'
   const facts = review ? finalReviewFacts(approval) : []
+  const detail = approval.detail as Record<string, unknown>
+  const hypothesisId: string | undefined =
+    typeof detail.hypothesis_id === 'string' ? detail.hypothesis_id : undefined
+  const expectedObservation: string | undefined =
+    typeof detail.expected_observation === 'string'
+      ? detail.expected_observation
+      : undefined
+  const wouldFalsify: string | undefined =
+    typeof detail.would_falsify === 'string' ? detail.would_falsify : undefined
+  const evidenceIds: number[] = Array.isArray(detail.evidence_ids)
+    ? detail.evidence_ids.filter((id): id is number => typeof id === 'number')
+    : []
+  const canDecide = pending && gateOpen && !settled && !busy
+
+  const copyArgv = () => {
+    navigator.clipboard.writeText(approval.argv.join(' '))
+  }
 
   return (
     <article
@@ -253,6 +273,43 @@ function ApprovalCard({
         rationale && <p className="gate-why">{rationale}</p>
       )}
 
+      {hypothesisId && (
+        <p className="gate-meta-line">
+          <span className="mono gate-meta-label">Hypothesis</span>{' '}
+          <span className="mono">{String(hypothesisId)}</span>
+        </p>
+      )}
+
+      {expectedObservation && (
+        <p className="gate-meta-line">
+          <span className="mono gate-meta-label">Expected observation</span>{' '}
+          <span>{String(expectedObservation)}</span>
+        </p>
+      )}
+
+      {wouldFalsify && (
+        <p className="gate-meta-line">
+          <span className="mono gate-meta-label">Would falsify</span>{' '}
+          <span>{String(wouldFalsify)}</span>
+        </p>
+      )}
+
+      {evidenceIds.length > 0 && (
+        <div className="gate-meta-line">
+          <span className="mono gate-meta-label">Evidence</span>
+          {evidenceIds.map((id) => (
+            <span
+              key={id}
+              className="evidence-chip"
+              onClick={() => {}}
+              title={`Evidence #${id}`}
+            >
+              #{id}
+            </span>
+          ))}
+        </div>
+      )}
+
       {plan.length > 1 && (
         <ol className="gate-plan">
           {plan.map((step) => (
@@ -266,11 +323,22 @@ function ApprovalCard({
       )}
 
       {approval.argv.length > 0 && (
-        <pre className="gate-argv" aria-label="Exact command">
-          <span className="gate-prompt">$</span>{' '}
-          <span className="gate-verb">{approval.argv[0]}</span>{' '}
-          {approval.argv.slice(1).join(' ')}
-        </pre>
+        <div className="gate-argv-wrap">
+          <pre className="gate-argv" aria-label="Exact command">
+            <span className="gate-prompt">$</span>{' '}
+            <span className="gate-verb">{approval.argv[0]}</span>{' '}
+            {approval.argv.slice(1).join(' ')}
+          </pre>
+          <button
+            type="button"
+            className="copy-argv"
+            onClick={copyArgv}
+            aria-label="Copy command"
+            disabled={busy}
+          >
+            <Copy size={18} strokeWidth={1.5} aria-hidden="true" />
+          </button>
+        </div>
       )}
 
       {!pending && (
@@ -292,22 +360,39 @@ function ApprovalCard({
           <button
             type="button"
             className="btn btn-primary btn-small"
-            onClick={() => onDecision('approved')}
-            disabled={busy}
+            onClick={() => onDecision('approved', reason)}
+            disabled={!canDecide}
           >
             {busy ? 'Submitting…' : 'Approve'}
           </button>
           <button
             type="button"
             className="btn btn-ghost btn-small"
-            onClick={() => onDecision('rejected')}
-            disabled={busy}
+            onClick={() => onDecision('rejected', reason)}
+            disabled={!canDecide}
           >
             Reject
           </button>
           <span className="gate-hint">
             Approving runs this exact command once.
           </span>
+        </div>
+      )}
+
+      {pending && gateOpen && !settled && !busy && (
+        <div className="gate-reason">
+          <label className="sr-only" htmlFor={`approval-reason-${approval.id}`}>
+            Reason for decision
+          </label>
+          <textarea
+            id={`approval-reason-${approval.id}`}
+            className="gate-reason-input"
+            rows={2}
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            placeholder="Reason for your decision (e.g. why rejected or guidance)…"
+            maxLength={500}
+          />
         </div>
       )}
     </article>
@@ -434,6 +519,7 @@ export function MissionConversation({
   messages,
   busy,
   gateOpen,
+  settledApprovalId,
   scanning,
   onSend,
   onDecision,
@@ -446,9 +532,10 @@ export function MissionConversation({
   messages: LocalMessage[]
   busy: boolean
   gateOpen: boolean
+  settledApprovalId: number | null
   scanning: boolean
   onSend: (text: string) => void
-  onDecision: (decision: 'approved' | 'rejected') => void
+  onDecision: (decision: 'approved' | 'rejected', reason?: string) => void
   onRun: () => void
   onStop?: () => void
   onScan: () => void
@@ -491,10 +578,20 @@ export function MissionConversation({
     })
   }, [detail, mission, messages])
 
-  useEffect(() => {
+  const scrollToBottom = () => {
     const node = threadRef.current
     if (node) node.scrollTop = node.scrollHeight
-  }, [entries.length, detail.status, mission.pendingApproval?.id])
+  }
+
+  // New message arrived (optimistic or via SSE): follow the thread to the bottom.
+  useEffect(() => {
+    scrollToBottom()
+  }, [entries.length, messages.length, detail.status, mission.pendingApproval?.id])
+
+  // Keep the thread scrolled while the run is actively submitting.
+  useEffect(() => {
+    if (busy) scrollToBottom()
+  }, [busy])
 
   function submit(event?: FormEvent) {
     event?.preventDefault()
@@ -635,6 +732,10 @@ export function MissionConversation({
                     gateOpen={
                       gateOpen && mission.pendingApproval?.id === entry.approval.id
                     }
+                    settled={
+                      settledApprovalId !== null &&
+                      settledApprovalId === entry.approval.id
+                    }
                     onDecision={onDecision}
                   />
                 </div>
@@ -698,7 +799,7 @@ export function MissionConversation({
             aria-label="Send message"
             title="Send message"
           >
-            <ArrowUp size={16} strokeWidth={1.5} aria-hidden="true" />
+            <ArrowUp size={18} strokeWidth={1.5} aria-hidden="true" />
           </button>
         </form>
 

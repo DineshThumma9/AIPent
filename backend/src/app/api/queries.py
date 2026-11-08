@@ -71,6 +71,27 @@ async def load_assessment_detail(
         and requires_approval
     )
 
+    from app.agents.loop.reasoning import build_evidence_board
+
+    board = await build_evidence_board(session, assessment_id)
+
+    active_role: str | None = None
+    try:
+        from app.runtime.runner import _values, is_running
+
+        if is_running(assessment_id):
+            _, values = await _values(assessment_id)
+            active_role = values.get("role")
+    except Exception:
+        pass
+
+    if not active_role:
+        for row in reversed(audit):
+            if row.event_type == "supervisor.route":
+                active_role = (row.payload or {}).get("accepted_role")
+                if active_role:
+                    break
+
     return AssessmentDetail(
         **assessment.model_dump(),
         steps=steps,
@@ -80,4 +101,6 @@ async def load_assessment_detail(
         audit=audit,
         messages=messages,
         gate_open=gate_open,
+        active_role=active_role,
+        reasoning=board,
     )

@@ -17,8 +17,14 @@ import operator
 import uuid
 
 
+def keep_last(n: int):
+    def reducer(left: list, right: list) -> list:
+        return (list(left) + list(right))[-n:]
+    return reducer
+
+
 class AssessmentState(TypedDict, total=False):
-    # Shared root (scope, budget, audit, final report)
+    # Existing shared root
     assessment_id: int
     run_id: str
     targets: list[str]
@@ -28,52 +34,52 @@ class AssessmentState(TypedDict, total=False):
     risk_score: float | None
     final_report_path: str | None
 
-    # Specialist scratchpads (each owns its namespace)
+    # Loop control
+    role: str                      # recon | discovery | validation | review
+    messages: list[AnyMessage]     # replaced at each brief; no reducer
+    pending_action: dict | None
+    approval_decision: dict | None
+    last_handoff: dict | None
+    turns: dict[str, int]          # model calls per role
+    nudges: int
+    no_progress: int
+    finished: bool
+    last_message: str
+    next_node: str | None
+
+    # Supervisor
+    supervisor_decision: dict | None
+    supervisor_directive: str | None
+    failure_signal: dict | None
+    supervisor_calls: int
+
+    # Evidence
+    observations: Annotated[list[dict], keep_last(80)]
+    handoffs: Annotated[list[dict], operator.add]
+    decisions: Annotated[list[dict], keep_last(120)]
+    steps: Annotated[list[dict], operator.add]
+
+    # Report
+    report_narrative: dict | None
+    review_approved: bool
+    rejected: bool
+    report_path: str
+
+    # Legacy keys kept only for the old builder/read model
     recon_state: dict
     discovery_state: dict
     validation_state: dict
-
-    # Append-only shared lists (reducers merge parallel writes safely)
     findings: Annotated[list, operator.add]
-    steps: Annotated[list, operator.add]
     recommendations: Annotated[list, operator.add]
     audit_events: Annotated[list, operator.add]
-
-    # Routing control
-    next_node: str | None
     interrupt_payload: dict | None
-
-    # Orchestration fields used by intake/gate/review/report and the runner
-    # read model. Shared root + scratchpads hold working memory; these track
-    # role lifecycle, plan history, and the last gate message.
-    role: str
-    role_history: list[dict]
-    role_messages: dict[str, list[AnyMessage]]
-    observations: list[dict]
     plan: list[dict]
     plan_source: str
     step_count: int
-    turns: dict[str, int]
-    finished: bool
-    review_approved: bool
-    rejected: bool
-    report_path: str
+    role_history: list[dict]
+    role_messages: dict[str, list[AnyMessage]]
     error: str
-    last_message: str
     last_specialist: str | None
-    role_history: list[dict]
-    role_messages: dict[str, list[AnyMessage]]
-    observations: list[dict]
-    plan: list[dict]
-    plan_source: str
-    step_count: int
-    turns: dict[str, int]
-    finished: bool
-    review_approved: bool
-    rejected: bool
-    report_path: str
-    error: str
-    last_message: str
 
 
 ROLE_ORDER = ("recon", "discovery", "validation")
@@ -95,28 +101,41 @@ def initial_state(assessment_id: int, run_id: str | None = None) -> AssessmentSt
         },
         "risk_score": None,
         "final_report_path": None,
+        "role": "recon",
+        "messages": [],
+        "pending_action": None,
+        "approval_decision": None,
+        "last_handoff": None,
+        "turns": {},
+        "nudges": 0,
+        "no_progress": 0,
+        "finished": False,
+        "last_message": "",
+        "next_node": "supervisor",
+        "supervisor_decision": None,
+        "supervisor_directive": None,
+        "failure_signal": None,
+        "supervisor_calls": 0,
+        "observations": [],
+        "handoffs": [],
+        "decisions": [],
+        "steps": [],
+        "report_narrative": None,
+        "review_approved": False,
+        "rejected": False,
+        "report_path": "",
         "recon_state": {},
         "discovery_state": {},
         "validation_state": {},
         "findings": [],
-        "steps": [],
         "recommendations": [],
         "audit_events": [],
-        "next_node": "supervisor",
-        "interrupt_payload": None,
-        "role": "recon",
-        "role_history": [],
-        "role_messages": {},
-        "observations": [],
         "plan": [],
         "plan_source": "",
         "step_count": 0,
-        "turns": {},
-        "finished": False,
-        "review_approved": False,
-        "rejected": False,
-        "report_path": "",
+        "role_history": [],
+        "role_messages": {},
         "error": "",
-        "last_message": "",
         "last_specialist": None,
+        "interrupt_payload": None,
     }

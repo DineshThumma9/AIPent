@@ -7,6 +7,7 @@ import {
   type MissionView,
 } from '../lib/mission'
 import { SeverityMark, StatusMark } from './StatusMark'
+import { ReasoningPanel } from './ReasoningPanel'
 
 function ScopeSide({ detail }: { detail: AssessmentDetail }) {
   return (
@@ -192,7 +193,7 @@ function GatesSide({ detail }: { detail: AssessmentDetail }) {
 
       {recent.length === 0 ? (
         <p className="side-empty">
-          No gate has opened. Every queued action pauses here before it runs.
+          No gate has opened. Every action pauses here before it runs.
         </p>
       ) : (
         <ol className="gate-history">
@@ -273,7 +274,7 @@ function ActionRecord({ detail }: { detail: AssessmentDetail }) {
       </summary>
 
       {detail.steps.length === 0 ? (
-        <p className="side-empty">No action has been queued.</p>
+        <p className="side-empty">No action has been recorded.</p>
       ) : (
         <ol className="action-log">
           {detail.steps.map((step) => (
@@ -338,6 +339,7 @@ export function MissionSide({
       <ScopeSide detail={detail} />
       <RoleLane mission={mission} />
       <FindingsSide mission={mission} />
+      <ReasoningPanel board={mission.reasoning} />
       <GatesSide detail={detail} />
       <ReportSide detail={detail} />
       <ActionRecord detail={detail} />

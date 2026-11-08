@@ -10,6 +10,7 @@ from app.persistence.assessment_repo import AssessmentRepo
 from app.persistence.audit_repo import AuditRepo
 from app.persistence.finding_repo import FindingRepo
 from app.persistence.role_repo import RoleRepo
+from app.persistence.steering_repo import SteeringRepo
 from app.persistence.step_repo import StepRepo
 
 __all__ = [
@@ -17,5 +18,6 @@ __all__ = [
     "AuditRepo",
     "FindingRepo",
     "RoleRepo",
+    "SteeringRepo",
     "StepRepo",
 ]

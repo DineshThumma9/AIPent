@@ -72,6 +72,7 @@ class StepRepo(BaseRepo):
         argv: list[str] | None = None,
         params: dict[str, Any] | None = None,
         detail: dict[str, Any] | None = None,
+        auto_approve: bool = False,
     ) -> dict[str, Any]:
         """Create a planned Step plus a pending Approval bound to its argv.
 
@@ -85,13 +86,13 @@ class StepRepo(BaseRepo):
         except ScopeError as exc:
             return {"error": str(exc)}
 
-        # Count queued actions for this run using audit events, and remember
+        # Count actions for this run using audit events, and remember
         # which steps belong to this run so duplicates from an earlier run do
         # not block a legitimate rerun.
         result = await self.session.execute(
             select(Audit).where(
                 Audit.assessment_id == assessment_id,
-                Audit.event_type == "action.queued",
+                Audit.event_type.in_(["action.queued", "action.requested"]),
             )
         )
         events = result.scalars().all()
@@ -191,11 +192,12 @@ class StepRepo(BaseRepo):
         )
         self.session.add(approval)
         await self.session.flush()
+        event_type = "action.requested" if settings.agent_loop == "v2" else "action.queued"
         self.session.add(
             Audit(
                 assessment_id=assessment_id,
                 actor="system",
-                event_type="action.queued",
+                event_type=event_type,
                 payload={
                     "run_id": run_id,
                     "role": role,

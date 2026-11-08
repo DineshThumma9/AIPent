@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col, select
@@ -12,6 +12,8 @@ from app.api.schema import (
     AssessmentCreate,
     AssessmentDetail,
     AssessmentRequestUpdate,
+    ChatAccepted,
+    ChatIn,
     DecisionIn,
     MessageIn,
     MessageOut,
@@ -133,6 +135,61 @@ async def create_message(
     await session.commit()
     await session.refresh(message)
     return message
+
+
+@router.post(
+    "/assessments/{assessment_id}/chat",
+    response_model=ChatAccepted,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def chat(
+    assessment_id: int,
+    payload: ChatIn,
+    session: AsyncSession = Depends(get_session),
+):
+    assessment = await session.get(Assessment, assessment_id)
+    if assessment is None:
+        raise HTTPException(404, "assessment not found")
+
+    if payload.client_message_id:
+        existing = await session.execute(
+            select(Message).where(
+                Message.assessment_id == assessment_id,
+                Message.client_message_id == payload.client_message_id,
+            )
+        )
+        existing_msg = existing.scalars().first()
+        if existing_msg is not None:
+            return ChatAccepted(
+                assessment_id=assessment_id,
+                operator_message_id=existing_msg.id or 0,
+                accepted=True,
+                message="duplicate message ignored",
+            )
+
+    operator = Message(
+        assessment_id=assessment_id,
+        role="operator",
+        text=payload.text.strip(),
+        client_message_id=payload.client_message_id,
+    )
+    session.add(operator)
+    await session.commit()
+    await session.refresh(operator)
+
+    from app.runtime import runner
+    running = runner.is_running(assessment_id)
+
+    from app.agents.conversation import enqueue
+    await enqueue(assessment_id, operator.id or 0, payload.text.strip())
+
+    return ChatAccepted(
+        assessment_id=assessment_id,
+        operator_message_id=operator.id or 0,
+        accepted=True,
+        steering=running,
+        message="Message accepted; the coordinator will reply in the stream.",
+    )
 
 
 @router.get("/assessments/{assessment_id}/events")

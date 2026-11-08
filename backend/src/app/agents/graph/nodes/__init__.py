@@ -7,14 +7,12 @@ Each node is a discrete unit of work (LangGraph "task" equivalent):
 
 from app.agents.graph.nodes.intake import intake_node
 from app.agents.graph.nodes.supervisor import supervisor_node
-from app.agents.graph.nodes.gate import make_gate_node
 from app.agents.graph.nodes.review import review_node
 from app.agents.graph.nodes.report import report_node
 
 __all__ = [
     "intake_node",
     "supervisor_node",
-    "make_gate_node",
     "review_node",
     "report_node",
 ]

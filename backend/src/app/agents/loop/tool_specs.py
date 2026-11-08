@@ -1,0 +1,403 @@
+"""Tool specifications and role toolsets for the V2 loop.
+
+Separates action tools (external commands executed through the graph) from direct
+tools (safe in-process reads/writes).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Callable, Literal
+from langchain_core.tools import tool
+from pydantic import BaseModel, Field
+
+from app.agents.loop.contracts import Handoff
+
+
+@dataclass(frozen=True)
+class ToolSpec:
+    name: str
+    description: str
+    args_model: type[BaseModel]
+    kind: Literal["action", "direct"]
+    action: str | None = None
+    handler: Callable[..., Any] | None = None
+    param_fields: tuple[str, ...] = ()
+
+
+class ActionReasoning(BaseModel):
+    target: str = Field(description="Exactly one target listed in the assessment scope.")
+    rationale: str = Field(
+        description="Why this action is the cheapest next step and what uncertainty it reduces."
+    )
+    hypothesis_id: str | None = Field(
+        default=None, description="Existing hypothesis id, for example H-2."
+    )
+    evidence_ids: list[int] = Field(
+        default_factory=list, description="Evidence rows that motivated this action."
+    )
+    expected_observation: str | None = Field(
+        default=None,
+        description="What result would support the hypothesis, stated before running.",
+    )
+    would_falsify: str | None = Field(
+        default=None,
+        description="What result would make you abandon or revise the hypothesis.",
+    )
+
+
+class ReconServicesArgs(ActionReasoning):
+    profile: Literal["fast", "deep", "top100", "top1000"] = Field(
+        default="fast", description="Nmap profile to execute."
+    )
+    ports: str | int | list[int] | None = Field(
+        default=None, description="Port list or range, e.g. '80,443', '1-1000', or 3000."
+    )
+    timing: int | None = Field(default=None, ge=1, le=5, description="Nmap timing template (1-5).")
+    scripts: list[str] = Field(default_factory=list, description="Optional safe NSE script names.")
+
+
+class ReadArtifactArgs(BaseModel):
+    step_id: int = Field(description="Step id whose artifact to inspect.")
+    max_chars: int = Field(default=4000, le=8000, description="Max characters to read.")
+    search: str | None = Field(default=None, description="Optional substring to search within artifact.")
+
+
+class ListServicesArgs(BaseModel):
+    limit: int = Field(default=50, ge=1, le=200, description="Max services to return.")
+
+
+class ListFindingsArgs(BaseModel):
+    status: str | None = Field(default=None, description="Optional filter by status (suspected, confirmed, false_positive).")
+    limit: int = Field(default=50, ge=1, le=200, description="Max findings to return.")
+
+
+class RecordHypothesisArgs(BaseModel):
+    statement: str = Field(description="Clear testable claim about the target surface or vulnerability.")
+    asset: str = Field(description="Target host or IP address.")
+    endpoint: str | None = Field(default=None, description="Specific URL path, port, or service endpoint.")
+    falsifier: str = Field(default="", description="What specific observation would disprove this hypothesis.")
+    evidence_ids: list[int] = Field(default_factory=list, description="Evidence IDs supporting this hypothesis.")
+
+
+class UpdateHypothesisArgs(BaseModel):
+    hypothesis_id: str = Field(description="Identifier of hypothesis to update (e.g. 'H-1').")
+    status: Literal["open", "supported", "refuted", "inconclusive"] = Field(description="New status.")
+    confidence: float = Field(ge=0.0, le=1.0, description="Updated confidence between 0.0 and 1.0.")
+    evidence_ids: list[int] = Field(default_factory=list, description="Linked evidence IDs.")
+    note: str | None = Field(default=None, description="Explanation for the update.")
+
+
+class DirbArgs(ActionReasoning):
+    path: str = Field(default="/", description="Base path to enumerate.")
+
+
+class NiktoArgs(ActionReasoning):
+    pass
+
+
+class ZapArgs(ActionReasoning):
+    pass
+
+
+class CurlArgs(ActionReasoning):
+    path: str = Field(default="/", description="Path on the scoped target, starting with /.")
+    method: Literal["GET", "HEAD", "POST"] = Field(default="GET", description="HTTP method.")
+    headers: dict[str, str] = Field(default_factory=dict, description="Request headers.")
+    body: str = Field(default="", description="Request body.")
+    expected_status: int = Field(default=200, description="Expected HTTP response status code.")
+    finding_id: int | None = Field(default=None, description="Candidate finding ID being probed.")
+
+
+class SqlmapArgs(ActionReasoning):
+    parameter: str | None = Field(default=None, description="Optional parameter name to test.")
+
+
+class UpdateFindingStatusArgs(BaseModel):
+    finding_id: int = Field(description="ID of the candidate finding to update.")
+    status: Literal["confirmed", "suspected", "false_positive"] = Field(description="New status.")
+    reasoning: str = Field(description="Detailed justification based on observed probe evidence.")
+
+
+class EmptyArgs(BaseModel):
+    pass
+
+
+class GetStepsArgs(BaseModel):
+    limit: int = Field(default=20, ge=1, le=100)
+
+
+class GetHandoffsArgs(BaseModel):
+    limit: int = Field(default=5, ge=1, le=20)
+
+
+recon_services_tool = ToolSpec(
+    name="recon_services",
+    kind="action",
+    action="recon_services",
+    args_model=ReconServicesArgs,
+    description=(
+        "Map open TCP ports and service/version banners on one in-scope target. "
+        "Choose a profile and port set that fit the current uncertainty. "
+        "Returns a compact service summary, finding ids and evidence ids. "
+        "Use read_artifact when you need raw Nmap output."
+    ),
+    param_fields=("profile", "ports", "timing", "scripts"),
+)
+
+read_artifact_tool = ToolSpec(
+    name="read_artifact",
+    kind="direct",
+    args_model=ReadArtifactArgs,
+    description=(
+        "Read a bounded excerpt from a step artifact. Use this only when the "
+        "compact observation is insufficient. Prefer a line range or a search term."
+    ),
+)
+
+list_services_tool = ToolSpec(
+    name="list_services",
+    kind="direct",
+    args_model=ListServicesArgs,
+    description="List discovered open ports and services on in-scope targets.",
+)
+
+list_findings_tool = ToolSpec(
+    name="list_findings",
+    kind="direct",
+    args_model=ListFindingsArgs,
+    description="List candidate or confirmed findings for this assessment.",
+)
+
+record_hypothesis_tool = ToolSpec(
+    name="record_hypothesis",
+    kind="direct",
+    args_model=RecordHypothesisArgs,
+    description="Record a new hypothesis on the evidence board with an explicit falsifier.",
+)
+
+update_hypothesis_tool = ToolSpec(
+    name="update_hypothesis",
+    kind="direct",
+    args_model=UpdateHypothesisArgs,
+    description="Update status, confidence, note, or linked evidence for an existing hypothesis.",
+)
+
+handoff_tool = ToolSpec(
+    name="handoff",
+    kind="direct",
+    args_model=Handoff,
+    description=(
+        "End your turn with a structured handoff. Call this when you have no "
+        "more useful actions, when the evidence answers the question, or when "
+        "another role is better placed to continue. Include what you observed, "
+        "what remains open, and the next role."
+    ),
+)
+
+# Supervisor read-only tool specs
+get_mission_digest_tool = ToolSpec(
+    name="get_mission_digest",
+    kind="direct",
+    args_model=EmptyArgs,
+    description="Return the compact mission digest: scope, services, candidates, hypotheses, recent steps, handoffs, budgets, steering and failures.",
+)
+
+get_steps_tool = ToolSpec(
+    name="get_steps",
+    kind="direct",
+    args_model=GetStepsArgs,
+    description="List recent steps with action, target, status, error and linked evidence ids.",
+)
+
+get_handoffs_tool = ToolSpec(
+    name="get_handoffs",
+    kind="direct",
+    args_model=GetHandoffsArgs,
+    description="List recent specialist handoffs with their recommendation, reason, confidence and open questions.",
+)
+
+get_budget_tool = ToolSpec(
+    name="get_budget",
+    kind="direct",
+    args_model=EmptyArgs,
+    description="Return per-role turns, remaining budget, elapsed time, supervisor calls and the no-progress counter.",
+)
+
+
+dirb_scan_tool = ToolSpec(
+    name="dirb_scan",
+    kind="action",
+    action="dirb_scan",
+    args_model=DirbArgs,
+    description=(
+        "Enumerate common web paths on one in-scope HTTP service using a fixed "
+        "wordlist. Use when content discovery is the missing evidence. "
+        "Returns discovered paths as candidate findings."
+    ),
+    param_fields=("path",),
+)
+
+nikto_scan_tool = ToolSpec(
+    name="nikto_scan",
+    kind="action",
+    action="nikto_scan",
+    args_model=NiktoArgs,
+    description=(
+        "Run Nikto web-server checks against one in-scope HTTP service. "
+        "Use when server configuration and known-issue checks are relevant. "
+        "Returns candidate findings with Nikto evidence."
+    ),
+    param_fields=(),
+)
+
+zap_baseline_tool = ToolSpec(
+    name="zap_baseline",
+    kind="action",
+    action="zap_baseline",
+    args_model=ZapArgs,
+    description=(
+        "Run a passive OWASP ZAP baseline scan against one in-scope HTTP service. "
+        "This is a medium-risk action and requires human approval. "
+        "Returns ZAP alerts as candidates; they are not confirmations."
+    ),
+    param_fields=(),
+)
+
+curl_tool = ToolSpec(
+    name="curl_tool",
+    kind="action",
+    action="http_probe",
+    args_model=CurlArgs,
+    description=(
+        "Send one safe HTTP request to a path on an in-scope target. "
+        "Use method, headers, body and expected_status to test one hypothesis. "
+        "The URL is built from the scoped target, so you cannot probe another host. "
+        "Returns status, selected headers and a body excerpt. "
+        "This action requires human approval."
+    ),
+    param_fields=("path", "method", "headers", "body", "expected_status", "finding_id"),
+)
+
+sqlmap_scan_tool = ToolSpec(
+    name="sqlmap_scan",
+    kind="action",
+    action="sqlmap_scan",
+    args_model=SqlmapArgs,
+    description=(
+        "Run a bounded sqlmap check against one in-scope HTTP service. "
+        "Use only when evidence specifically points to SQL injection. "
+        "This is a high-risk action and requires human approval. "
+        "Destructive options are not available."
+    ),
+    param_fields=("parameter",),
+)
+
+update_finding_status_tool = ToolSpec(
+    name="update_finding_status",
+    kind="direct",
+    args_model=UpdateFindingStatusArgs,
+    description=(
+        "Record a validation verdict for one candidate finding. "
+        "confirmed and false_positive require at least one executed curl_tool "
+        "evidence row linked to the finding. State the observed evidence and "
+        "the inference separately."
+    ),
+)
+
+
+ROLE_TOOL_SPECS: dict[str, list[ToolSpec]] = {
+    "recon": [
+        recon_services_tool,
+        read_artifact_tool,
+        list_services_tool,
+        record_hypothesis_tool,
+        update_hypothesis_tool,
+        handoff_tool,
+    ],
+    "discovery": [
+        dirb_scan_tool,
+        nikto_scan_tool,
+        zap_baseline_tool,
+        read_artifact_tool,
+        list_findings_tool,
+        record_hypothesis_tool,
+        update_hypothesis_tool,
+        handoff_tool,
+    ],
+    "validation": [
+        curl_tool,
+        sqlmap_scan_tool,
+        read_artifact_tool,
+        list_findings_tool,
+        update_finding_status_tool,
+        record_hypothesis_tool,
+        update_hypothesis_tool,
+        handoff_tool,
+    ],
+}
+
+ROLE_TOOLS = ROLE_TOOL_SPECS  # compatibility alias
+
+SUPERVISOR_TOOL_SPECS: list[ToolSpec] = [
+    get_mission_digest_tool,
+    list_services_tool,
+    list_findings_tool,
+    get_steps_tool,
+    get_handoffs_tool,
+    get_budget_tool,
+]
+
+
+def lookup_tool(role: str, name: str) -> ToolSpec:
+    target_name = "curl_tool" if name == "http_probe" else name
+    specs = ROLE_TOOL_SPECS.get(role, [])
+    for s in specs:
+        if s.name == target_name or (name == "http_probe" and s.name == "curl_tool"):
+            return s
+    for s in SUPERVISOR_TOOL_SPECS:
+        if s.name == target_name:
+            return s
+    raise KeyError(f"tool {name!r} not found for role {role!r}")
+
+
+def is_direct_tool(role: str, name: str) -> bool:
+    try:
+        spec = lookup_tool(role, name)
+        return spec.kind == "direct"
+    except KeyError:
+        return False
+
+
+async def raise_if_called(**_kwargs):
+    raise RuntimeError("action tools are executed by the loop, not by LangChain")
+
+
+def _direct_tool(spec: ToolSpec):
+    async def _direct_fn(**kwargs):
+        if spec.handler:
+            return await spec.handler(**kwargs)
+        return kwargs
+
+    return tool(
+        spec.name,
+        description=spec.description,
+        args_schema=spec.args_model,
+    )(_direct_fn)
+
+
+def bindable_tools(role: str):
+    specs = ROLE_TOOL_SPECS.get(role, [])
+    tools = []
+    for spec in specs:
+        if spec.kind == "action":
+            tools.append(
+                tool(
+                    spec.name,
+                    description=spec.description,
+                    args_schema=spec.args_model,
+                )(raise_if_called)
+            )
+        else:
+            tools.append(_direct_tool(spec))
+    return tools

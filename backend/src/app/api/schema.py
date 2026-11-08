@@ -6,6 +6,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 from sqlmodel import SQLModel
 
+from app.agents.loop.contracts import EvidenceBoard
 from app.domain.models import Approval, Assessment, Audit, Evidence, Finding, Step
 
 
@@ -36,12 +37,26 @@ class MessageOut(BaseModel):
     assessment_id: int
     role: str
     text: str
+    client_message_id: str | None = None
     created_at: datetime
 
 
 class MessageIn(BaseModel):
     role: Literal["operator", "assistant"]
     text: str = Field(min_length=1, max_length=4000)
+
+
+class ChatIn(BaseModel):
+    text: str = Field(min_length=1, max_length=4000)
+    client_message_id: str | None = Field(default=None, max_length=80)
+
+
+class ChatAccepted(BaseModel):
+    assessment_id: int
+    operator_message_id: int
+    accepted: bool = True
+    steering: bool = False
+    message: str = ""
 
 
 class PlanStepOut(BaseModel):
@@ -62,6 +77,10 @@ class AgentView(BaseModel):
     steps: int = 0
     last_message: str | None = None
     risk_score: float | None = None
+    gate_open: bool = False
+    active_role: str | None = None
+    phase: str = ""
+    reasoning_summary: str = ""
 
 
 class AgentAccepted(BaseModel):
@@ -93,3 +112,5 @@ class AssessmentDetail(BaseModel):
     audit: list[Audit] = Field(default_factory=list)
     messages: list[MessageOut] = Field(default_factory=list)
     gate_open: bool = False
+    active_role: str | None = None
+    reasoning: EvidenceBoard = Field(default_factory=EvidenceBoard)

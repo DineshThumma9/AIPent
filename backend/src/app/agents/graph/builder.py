@@ -20,11 +20,11 @@ from langgraph.graph import END, START, StateGraph
 
 from app.agents.graph.nodes import (
     intake_node,
-    make_gate_node,
     report_node,
     review_node,
     supervisor_node,
 )
+from app.agents.loop.builder import build_assessment_graph_v2
 from app.agents.graph.state import AssessmentState, initial_state
 from app.core.config import settings
 from app.domain.models import (
@@ -38,34 +38,15 @@ from app.domain.models import (
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from app.persistence import AssessmentRepo, AuditRepo, StepRepo
+from app.persistence import AssessmentRepo, AuditRepo, SteeringRepo, StepRepo
 
 
 def build_assessment_graph(
     checkpointer=None,
     executor: Callable[..., Any] | None = None,
 ):
-    """Compile the three-role loop.
-
-    ``executor`` is injectable so tests can run the real graph and gate
-    without live scanners.
-    """
-    builder = StateGraph(AssessmentState)
-
-    builder.add_node("intake", intake_node)
-    builder.add_node("supervisor", supervisor_node)
-    builder.add_node("gate", make_gate_node(executor))
-    builder.add_node("review", review_node)
-    builder.add_node("report", report_node)
-
-    builder.add_edge(START, "intake")
-    builder.add_edge("intake", "supervisor")
-    builder.add_edge("report", END)
-
-    # All other routing is via Command(goto=...) returned by nodes.
-    # Supervisor invokes specialist sub-graphs inline; gate/review/report
-    # each pick the next node themselves.
-    return builder.compile(checkpointer=checkpointer)
+    """Compile the three-role loop."""
+    return build_assessment_graph_v2(checkpointer=checkpointer, executor=executor)
 
 
 def graph_config(assessment_id: int) -> dict:
@@ -113,6 +94,9 @@ async def prepare_run(
         approval.outcome = "superseded"
         approval.decided_at = utcnow()
 
+    steering_repo = SteeringRepo(session)
+    await steering_repo.expire_for_new_run(assessment_id)
+
     from app.integrations.juiceshop import capture_baseline
 
     try:
@@ -132,23 +116,30 @@ async def prepare_run(
     await repo.session.commit()
 
 
-_graph: Any = None
+_graphs: dict[str, Any] = {}
 _graph_conn: Any = None
 _graph_lock = asyncio.Lock()
 
 
 async def get_assessment_graph():
     """Return the compiled graph backed by one AsyncSqliteSaver connection."""
-    global _graph, _graph_conn
-    if _graph is None:
+    global _graphs, _graph_conn
+    loop_version = settings.agent_loop
+    if loop_version not in _graphs:
         async with _graph_lock:
-            if _graph is None:
+            if loop_version not in _graphs:
                 graph_path = settings.graph_path
                 graph_path.parent.mkdir(parents=True, exist_ok=True)
                 import aiosqlite
 
-                _graph_conn = await aiosqlite.connect(str(graph_path))
+                if _graph_conn is None:
+                    _graph_conn = await aiosqlite.connect(str(graph_path))
                 saver = AsyncSqliteSaver(_graph_conn)
                 await saver.setup()
-                _graph = build_assessment_graph(checkpointer=saver)
-    return _graph
+                if loop_version == "v2":
+                    from app.agents.loop.builder import build_assessment_graph_v2
+
+                    _graphs[loop_version] = build_assessment_graph_v2(checkpointer=saver)
+                else:
+                    _graphs[loop_version] = build_assessment_graph(checkpointer=saver)
+    return _graphs[loop_version]

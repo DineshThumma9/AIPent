@@ -115,6 +115,7 @@ async def _add_missing_columns(engine: AsyncEngine) -> None:
         "assessment": {"risk_score": "FLOAT"},
         "step": {"target": "TEXT"},
         "approval": {"detail": "JSON"},
+        "message": {"client_message_id": "TEXT"},
     }
     async with engine.begin() as connection:
         for table, columns in additions.items():

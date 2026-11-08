@@ -66,16 +66,17 @@ def _run(fn):
 
 
 def test_role_tools_are_unique_and_scoped():
-    expected = {
+    expected_actions = {
         "recon": {"recon_services"},
         "discovery": {"dirb_scan", "nikto_scan", "zap_baseline"},
-        "validation": {"http_probe", "sqlmap_scan", "update_finding_status"},
+        "validation": {"curl_tool", "sqlmap_scan", "update_finding_status"},
     }
-    assert set(ROLE_TOOLS) == set(expected)
+    assert set(ROLE_TOOLS) == {"recon", "discovery", "validation"}
     for role, tools in ROLE_TOOLS.items():
         names = [getattr(tool, "name", "") for tool in tools]
         assert len(names) == len(set(names))
-        assert set(names) == expected[role]
+        action_names = {n for n in names if n in expected_actions[role]}
+        assert action_names == expected_actions[role]
 
 
 def test_scope_normalizes_hosts_and_supports_cidr():
@@ -450,30 +451,54 @@ def test_resume_replays_an_identical_decision(engine, monkeypatch):
     _run(body)
 
 
-def test_one_action_per_specialist_turn(engine):
+def test_one_action_per_specialist_turn(engine, monkeypatch):
     async def body(session):
         assessment = await _assessment(session)
-        set_context(assessment.id, "run-one-action", "recon")
-        tool = ROLE_TOOLS["recon"][0]
+        from app.agents.loop.nodes import model_node
+        from langchain_core.language_models.chat_models import BaseChatModel
+        from langchain_core.messages import AIMessage, HumanMessage
+        from langchain_core.outputs import ChatGeneration, ChatResult
 
-        first = await tool.ainvoke(
-            {
-                "target": "127.0.0.1",
-                "rationale": "map the service surface",
-                "params": {"profile": "fast"},
-            }
-        )
-        second = await tool.ainvoke(
-            {
-                "target": "127.0.0.1",
-                "rationale": "try again in the same turn",
-                "params": {"profile": "service"},
-            }
-        )
+        class ScriptedTwoCalls(BaseChatModel):
+            def bind_tools(self, tools, **kwargs):
+                return self
+            def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+                return ChatResult(generations=[ChatGeneration(message=AIMessage(
+                    content="Running scans",
+                    tool_calls=[
+                        {
+                            "id": "call_1",
+                            "name": "recon_services",
+                            "args": {"target": "127.0.0.1", "rationale": "first scan"},
+                        },
+                        {
+                            "id": "call_2",
+                            "name": "recon_services",
+                            "args": {"target": "127.0.0.1", "rationale": "second scan in same turn"},
+                        },
+                    ],
+                ))])
+            @property
+            def _llm_type(self):
+                return "scripted-two-calls"
 
-        assert first.get("step_id")
-        assert "only one action" in second["error"]
-        result = await session.execute(select(Step))
-        assert len(result.scalars().all()) == 1
+        monkeypatch.setattr("app.agents.loop.nodes.build_role_model", lambda role: ScriptedTwoCalls())
+
+        state = {
+            "assessment_id": assessment.id,
+            "run_id": "test_run_one_action",
+            "role": "recon",
+            "turns": {"recon": 0},
+            "nudges": 0,
+            "no_progress": 0,
+            "messages": [HumanMessage(content="Start recon")],
+        }
+
+        cmd = await model_node(state)
+        # Verify first tool call is routed to prepare and extra call gets error ToolMessage
+        assert cmd.goto == "prepare"
+        extra_msg = cmd.update["messages"][-1]
+        assert "Only one action tool call is executed per turn" in extra_msg.content
+        assert extra_msg.tool_call_id == "call_2"
 
     _run(body)

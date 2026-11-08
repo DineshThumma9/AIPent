@@ -3,6 +3,7 @@ import {
   AssessmentDetailSchema,
   ApprovalSchema,
   AuditEventSchema,
+  EvidenceBoardSchema,
   EvidenceSchema,
   FindingSchema,
   MessageSchema,
@@ -19,6 +20,7 @@ export const STREAM_EVENT_TYPES = [
   'audit',
   'report',
   'message',
+  'reasoning',
   'error',
   'heartbeat',
 ] as const
@@ -75,6 +77,12 @@ export const StreamEventSchema = z.discriminatedUnion('type', [
     'message',
     z.object({
       message: MessageSchema,
+    }),
+  ),
+  envelope(
+    'reasoning',
+    z.object({
+      board: EvidenceBoardSchema,
     }),
   ),
   envelope(
@@ -166,8 +174,16 @@ export function applyEvent(
       return detail
         ? {
             ...detail,
-            messages: upsert(detail.messages, event.data.message),
+            messages: upsert(detail.messages, event.data.message).sort(
+              (a, b) =>
+                Date.parse(a.created_at) - Date.parse(b.created_at) || a.id - b.id,
+            ),
           }
+        : detail
+
+    case 'reasoning':
+      return detail
+        ? { ...detail, reasoning: event.data.board }
         : detail
 
     case 'error':
@@ -201,6 +217,8 @@ export function summarizeEvent(event: StreamEvent): string {
       return 'heartbeat'
     case 'message':
       return 'new message'
+    case 'reasoning':
+      return 'reasoning updated'
   }
   return 'event'
 }

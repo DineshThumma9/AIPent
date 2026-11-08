@@ -35,6 +35,7 @@ class NmapParams:
     profile: Literal["host_discovery", "fast", "service", "full_tcp", "full_service"] = "fast"
     ports: Literal["top100", "top1000", "all"] | list[int] = "top100"
     timing: int = 4
+    scripts: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

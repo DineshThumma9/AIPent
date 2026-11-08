@@ -150,6 +150,16 @@ async def get_view(
         status = assessment.status if assessment else "missing"
         risk_score = assessment.risk_score if assessment else None
 
+    active_role = values.get("role")
+    gate_open = bool(state.next) and pending is not None
+    phase = active_role or ""
+    supervisor_decision = values.get("supervisor_decision") or {}
+    reasoning_summary = (
+        supervisor_decision.get("why")
+        or values.get("supervisor_directive")
+        or ""
+    )
+
     return AgentView(
         assessment_id=assessment_id,
         status=status,
@@ -162,6 +172,10 @@ async def get_view(
         steps=values.get("step_count", 0) or 0,
         last_message=content,
         risk_score=risk_score,
+        gate_open=gate_open,
+        active_role=active_role,
+        phase=phase,
+        reasoning_summary=reasoning_summary,
     )
 
 

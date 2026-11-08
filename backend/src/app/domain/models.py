@@ -192,4 +192,17 @@ class Message(SQLModel, table=True):
     assessment_id: int = Field(foreign_key="assessment.id", index=True)
     role: str
     text: str
+    client_message_id: str | None = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=utcnow)
+
+
+class SteeringNote(SQLModel, table=True):
+    """Operator directive queued for an active or future run."""
+
+    id: int | None = Field(default=None, primary_key=True)
+    assessment_id: int = Field(foreign_key="assessment.id", index=True)
+    run_id: str | None = None
+    text: str
+    status: str = "pending"  # "pending", "consumed", "expired"
+    created_at: datetime = Field(default_factory=utcnow)
+    consumed_at: datetime | None = None

@@ -43,6 +43,7 @@ DEFAULT_ACTION_POLICIES: dict[str, ActionPolicy] = {
     "dirb_scan": ActionPolicy(risk="low", approve=False),
     "zap_baseline": ActionPolicy(risk="medium", approve=True),
     "http_probe": ActionPolicy(risk="medium", approve=True),
+    "curl_tool": ActionPolicy(risk="medium", approve=True),
     "sqlmap_scan": ActionPolicy(risk="high", approve=True),
 }
 

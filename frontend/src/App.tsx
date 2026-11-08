@@ -13,18 +13,11 @@ import {
   resumeAgent,
   runAgent,
   runScan,
+  sendChat,
   stopAgent,
-  updateAssessmentRequest,
 } from './lib/api'
-import {
-  classifyIntent,
-  explainReply,
-  findingsReply,
-  statusReply,
-  steeringReply,
-  stopReply,
-} from './lib/chat'
 import type { LocalMessage } from './lib/chatStorage'
+import { applyTheme, readTheme } from './lib/theme'
 import { actionLabel, deriveMission } from './lib/mission'
 import type { Assessment, AssessmentInput, Message } from './lib/schemas'
 import { useSelected } from './store'
@@ -94,6 +87,14 @@ export default function App() {
     }
   })
 
+  const [theme, setTheme] = useState<'light' | 'dark' | 'system'>(() =>
+    readTheme(),
+  )
+
+  useEffect(() => {
+    applyTheme(theme)
+  }, [theme])
+
   function handleToggleRail() {
     setRailCollapsed((prev) => {
       const next = !prev
@@ -120,8 +121,31 @@ export default function App() {
     }
   }
 
-  function messagesFor(id: number): LocalMessage[] {
-    return chats[id] ?? []
+  function mergeMessages(
+    local: LocalMessage[],
+    server: Message[],
+  ): LocalMessage[] {
+    const byClient = new Map(
+      server
+        .filter((m) => m.client_message_id)
+        .map((m) => [m.client_message_id as string, m]),
+    )
+    const next = local
+      .filter(
+        (m) =>
+          !m.id.startsWith('local-') ||
+          !byClient.has(m.id.replace('local-', '')),
+      )
+      .map((m) => {
+        if (!m.id.startsWith('local-')) return m
+        const match = byClient.get(m.id.replace('local-', ''))
+        return match ? toLocalMessage(match) : m
+      })
+    for (const message of server) {
+      if (!next.some((m) => m.id === String(message.id)))
+        next.push(toLocalMessage(message))
+    }
+    return next.sort((a, b) => Date.parse(a.at) - Date.parse(b.at)).slice(-120)
   }
 
   async function pushMessage(
@@ -227,7 +251,7 @@ export default function App() {
         'assistant',
         `Recon is opening the service surface on ${
           detail.targets.join(', ') || 'the scoped target'
-        }. The first queued action will appear here for approval.`,
+        }. The first action will appear here for approval.`,
       )
     } catch (cause) {
       const message = causeText(cause)
@@ -270,9 +294,17 @@ export default function App() {
 
   const resumeRef = useRef(false)
 
-  async function handleDecision(decision: 'approved' | 'rejected') {
+  async function handleDecision(
+    decision: 'approved' | 'rejected',
+    customReason?: string,
+  ) {
     if (!detail || resumeRef.current) return
     const pending = mission?.pendingApproval ?? null
+    const finalReason =
+      customReason?.trim() ||
+      (decision === 'approved'
+        ? 'Approved from the mission desk'
+        : 'Rejected from the mission desk')
     setActionError(null)
     setAgentBusy(true)
     resumeRef.current = true
@@ -280,10 +312,7 @@ export default function App() {
       await resumeAgent(detail.id, {
         decision,
         actor: 'analyst',
-        reason:
-          decision === 'approved'
-            ? 'Approved from the mission desk'
-            : 'Rejected from the mission desk',
+        reason: finalReason,
         // The backend enforces approval.argv == step.argv integrity when the
         // gate executes, so the human approves exactly what runs. The IDs are
         // echoed for audit traceability; the gate resolves the pending step
@@ -306,11 +335,11 @@ export default function App() {
         'assistant',
         pending
           ? decision === 'approved'
-            ? `Approved ${actionLabel(pending.action)}. The role will read the observation and continue.`
-            : `Rejected ${actionLabel(pending.action)}. The command will not run; the role will adapt from the refusal.`
+            ? `Approved ${actionLabel(pending.action)}.${customReason?.trim() ? ` Note: ${customReason.trim()}` : ''} The role will read the observation and continue.`
+            : `Rejected ${actionLabel(pending.action)}${customReason?.trim() ? ` (${customReason.trim()})` : ''}. The command will not run; the role will adapt from the refusal.`
           : decision === 'approved'
             ? 'Decision approved. The run will continue.'
-            : 'Decision rejected. The run will stop at this gate.',
+            : `Decision rejected${customReason?.trim() ? ` (${customReason.trim()})` : ''}. The run will stop at this gate.`,
       )
     } catch (cause) {
       const message = causeText(cause)
@@ -327,65 +356,45 @@ export default function App() {
   }
 
   async function handleChat(text: string) {
-    if (!detail || !mission) return
-    const current = mission
-    await pushMessage(detail.id, 'operator', text)
-
-    const intent = classifyIntent(text)
-
-    if (intent === 'stop') {
-      await pushMessage(detail.id, 'assistant', stopReply(current))
-      return
-    }
-
-    if (intent === 'status') {
-      await pushMessage(detail.id, 'assistant', statusReply(detail, current))
-      return
-    }
-
-    if (intent === 'summary') {
-      await pushMessage(detail.id, 'assistant', findingsReply(current))
-      return
-    }
-
-    if (intent === 'explain') {
-      await pushMessage(detail.id, 'assistant', explainReply(detail, current))
-      return
-    }
-
-    if (current.running) {
-      await pushMessage(detail.id, 'assistant', steeringReply(current))
-      return
-    }
-
-    if (intent !== 'start') {
-      await pushMessage(detail.id, 'assistant', steeringReply(current))
-      return
-    }
-
+    if (!detail) return
+    const clientId = crypto.randomUUID()
     setChatBusy(true)
     setActionError(null)
+
+    // Optimistic operator turn. The server row replaces it by client_message_id.
+    const optimistic: LocalMessage = {
+      id: `local-${clientId}`,
+      role: 'operator',
+      text,
+      at: new Date().toISOString(),
+    }
+    setChats((prev) => ({
+      ...prev,
+      [detail.id]: [...(prev[detail.id] ?? []), optimistic],
+    }))
+
     try {
-      await updateAssessmentRequest(detail.id, text)
-      await runAgent(detail.id)
-      // Do not fetch the assessment here. The graph starts in a background
-      // task and the first gate may not be reached yet. Let the SSE stream
-      // push the updated state as it happens.
-      await pushMessage(
-        detail.id,
-        'assistant',
-        `Recon is opening the service surface on ${
-          detail.targets.join(', ') || 'the scoped target'
-        }. The first queued action will appear here for approval.`,
-      )
+      await sendChat(detail.id, { text, client_message_id: clientId })
+      // The assistant reply arrives through SSE. Fallback: one fetch after a
+      // short delay in case the stream is reconnecting.
+      setTimeout(() => {
+        listMessages(detail.id)
+          .then((messages) => {
+            setChats((prev) => ({
+              ...prev,
+              [detail.id]: mergeMessages(prev[detail.id] ?? [], messages),
+            }))
+          })
+          .catch(() => {})
+      }, 1500)
     } catch (cause) {
-      const message = causeText(cause)
-      setActionError(message)
-      await pushMessage(
-        detail.id,
-        'assistant',
-        `I could not start the run: ${message}. Check that the backend is running, then try again.`,
-      )
+      setActionError(causeText(cause))
+      setChats((prev) => ({
+        ...prev,
+        [detail.id]: (prev[detail.id] ?? []).filter(
+          (m) => m.id !== optimistic.id,
+        ),
+      }))
     } finally {
       setChatBusy(false)
     }
@@ -399,6 +408,8 @@ export default function App() {
         connection={stream.connection}
         lastEventAt={stream.lastEventAt}
         rejected={stream.rejected}
+        theme={theme}
+        setTheme={setTheme}
       />
 
       <div className="frame" data-collapsed={railCollapsed}>
@@ -428,12 +439,13 @@ export default function App() {
                 key={detail.id}
                 detail={detail}
                 mission={mission}
-                messages={messagesFor(detail.id)}
+                messages={chats[detail.id] ?? []}
                 busy={agentBusy || chatBusy}
                 gateOpen={
                   mission.gateOpen &&
                   mission.pendingApproval?.id !== settledApprovalId
                 }
+                settledApprovalId={settledApprovalId}
                 scanning={scanning}
                 onSend={handleChat}
                 onDecision={handleDecision}

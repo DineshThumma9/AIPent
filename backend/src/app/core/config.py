@@ -35,6 +35,12 @@ class Settings(BaseSettings):
     scan_timeout: int = 300
     run_timeout: int = 900
 
+    agent_loop: Literal["legacy", "v2"] = "v2"
+    supervisor_tool_calls: int = 4
+    supervisor_calls_per_run: int = 10
+    max_no_progress: int = 3
+    max_role_retries: int = 2
+
     nikto_bin: str = ""
     zap_image: str = "ghcr.io/zaproxy/zaproxy:stable"
 

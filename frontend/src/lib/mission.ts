@@ -2,6 +2,7 @@ import type {
   Approval,
   AssessmentDetail,
   Evidence,
+  EvidenceBoard,
   Finding,
   PlanStep,
 } from './schemas'
@@ -37,6 +38,8 @@ export type HandoffView = {
   decisions: Record<string, unknown>[]
   findingIds: number[]
   stepIds: number[]
+  // next_role is the canonical field; next_recommendation is the legacy alias.
+  nextRole?: string | null
 }
 
 export type RoleView = {
@@ -54,6 +57,7 @@ export type MissionView = {
   running: boolean
   gateOpen: boolean
   activeRole: RoleName | null
+  reasoning: EvidenceBoard
   roles: RoleView[]
   handoffs: HandoffView[]
   pendingApproval: Approval | null
@@ -88,7 +92,6 @@ export type ThreadEntry =
 const ACTIVE_STATUSES = new Set([
   'planning',
   'running',
-  'awaiting_approval',
   'reporting',
 ])
 const TERMINAL_STATUSES = new Set([
@@ -142,7 +145,8 @@ export function actionLabel(action: string): string {
     sqlmap_scan: 'sqlmap scan',
     dirb_scan: 'Directory scan',
     zap_baseline: 'ZAP baseline scan',
-    http_probe: 'HTTP probe',
+    curl_tool: 'HTTP request (curl)',
+    http_probe: 'HTTP request (curl)',
   }
   return labels[action] ?? action.replaceAll('_', ' ')
 }
@@ -196,7 +200,7 @@ export function briefText(detail: AssessmentDetail): string {
   const ports = detail.ports.length
     ? ` on ${detail.ports.join(', ')}`
     : ' on the catalogue default ports'
-  return `Scope is locked to ${targets}${ports}. Recon maps the service surface, discovery turns it into candidate findings, and validation tests each hypothesis with safe probes. Every queued action stops here for approval before it runs.`
+  return `Scope is locked to ${targets}${ports}. Recon maps the service surface, discovery turns it into candidate findings, and validation tests each hypothesis with safe probes. Every action stops here for approval before it runs.`
 }
 
 function runAudit(detail: AssessmentDetail) {
@@ -238,7 +242,14 @@ function handoffsFrom(events: AssessmentDetail['audit']): HandoffView[] {
           role,
           at: event.ts,
           summary: asText(event.payload.summary) ?? '',
-          next: asText(event.payload.next_recommendation) ?? 'review',
+          next:
+            asText(event.payload.next_role) ??
+            asText(event.payload.next_recommendation) ??
+            'review',
+          nextRole:
+            asText(event.payload.next_role) ??
+            asText(event.payload.next_recommendation) ??
+            null,
           needsInput: event.payload.needs_input === true,
           question: asText(event.payload.question),
           openQuestions:
@@ -347,6 +358,12 @@ export function deriveMission(detail: AssessmentDetail): MissionView {
       detail.gate_open &&
       (pendingApproval?.detail.requires_approval ?? true) !== false,
     activeRole,
+    reasoning: detail.reasoning ?? {
+      hypotheses: [],
+      decisions: [],
+      open_questions: [],
+      coverage: {},
+    },
     roles,
     handoffs,
     pendingApproval,

@@ -1,5 +1,7 @@
+import { Sun, Moon } from 'lucide-react'
 import type { StreamConnection } from '../lib/events'
 import { formatClock } from '../lib/format'
+import { applyTheme, resolvedTheme } from '../lib/theme'
 
 const CONNECTION_LABEL: Record<StreamConnection, string> = {
   idle: 'stream idle',
@@ -13,11 +15,16 @@ export function TopBar({
   connection,
   lastEventAt,
   rejected,
+  theme,
+  setTheme,
 }: {
   connection: StreamConnection
   lastEventAt: number | null
   rejected: number
+  theme: 'light' | 'dark' | 'system'
+  setTheme: (theme: 'light' | 'dark' | 'system') => void
 }) {
+  const resolved = resolvedTheme(theme)
   return (
     <header className="topbar">
       <div className="brand">
@@ -40,6 +47,24 @@ export function TopBar({
           </span>
         )}
       </div>
+
+      <button
+        type="button"
+        className="btn btn-ghost btn-small"
+        onClick={() => {
+          const next = resolved === 'dark' ? 'light' : 'dark'
+          setTheme(next)
+          applyTheme(next)
+        }}
+        aria-label="Toggle dark mode"
+        aria-pressed={resolved === 'dark'}
+      >
+        {resolved === 'dark' ? (
+          <Sun size={18} strokeWidth={1.5} aria-hidden="true" />
+        ) : (
+          <Moon size={18} strokeWidth={1.5} aria-hidden="true" />
+        )}
+      </button>
     </header>
   )
 }

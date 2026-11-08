@@ -4,11 +4,13 @@ import {
   AssessmentDetailSchema,
   AssessmentInputSchema,
   AssessmentSchema,
+  ChatAcceptedSchema,
   DecisionInputSchema,
   MessageSchema,
   type Assessment,
   type AssessmentDetail,
   type AssessmentInput,
+  type ChatAccepted,
   type DecisionInput,
   type Message,
 } from './schemas'
@@ -87,5 +89,14 @@ export const createMessage = (id: number, payload: { role: 'operator' | 'assista
     method: 'POST',
     body: JSON.stringify(payload),
   }) as Promise<Message>
+
+export const sendChat = (
+  id: number,
+  body: { text: string; client_message_id?: string },
+) =>
+  req(`/assessments/${id}/chat`, ChatAcceptedSchema, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  }) as Promise<ChatAccepted>
 
 export const reportUrl = (id: number) => `${BASE}/assessments/${id}/report`

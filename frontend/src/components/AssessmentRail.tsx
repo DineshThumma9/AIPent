@@ -118,8 +118,8 @@ export function AssessmentRail({
       )}
 
       <p className="rail-note">
-        Only listed targets are contacted. Every queued action waits for
-        approval and is recorded with its command, artifact and SHA-256.
+        Only listed targets are contacted. Every action waits for approval
+        and is recorded with its command, artifact and SHA-256.
       </p>
     </aside>
   )

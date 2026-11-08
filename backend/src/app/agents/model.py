@@ -68,6 +68,13 @@ def _build_model() -> BaseChatModel:
         raise ValueError(f"{provider} not available")
 
     return models[provider](model_name)
+
+
+def build_role_model(role: str) -> BaseChatModel:
+    """Return the configured chat model for a role."""
+    return _build_model()
+
+
 def build_role_agent(role: str):
     """Build an LLM agent scoped to one role's tools and prompt."""
     if role not in ROLE_PROMPTS:

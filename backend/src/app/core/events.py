@@ -35,8 +35,17 @@ class EventType(StrEnum):
     AUDIT = "audit"
     REPORT = "report"
     MESSAGE = "message"
+    REASONING = "reasoning"
     ERROR = "error"
     HEARTBEAT = "heartbeat"
+
+
+REASONING_EVENT_TYPES = {
+    "hypothesis.created",
+    "hypothesis.updated",
+    "decision.recorded",
+    "handoff.created",
+}
 
 
 class StreamEvent(BaseModel):
@@ -107,6 +116,14 @@ class StreamState:
             if approval.id is not None
         }
         self._audit_id = max((row.id or 0 for row in detail.audit), default=0)
+        self._reasoning_id = max(
+            (
+                row.id or 0
+                for row in detail.audit
+                if row.event_type in REASONING_EVENT_TYPES
+            ),
+            default=0,
+        )
         self._status = detail.status
         self._report = (detail.report_path, detail.report_sha256)
         self._messages = {
@@ -188,6 +205,14 @@ class StreamState:
         for row in new_audit:
             self._audit_id = max(self._audit_id, row.id or 0)
             emit(EventType.AUDIT, {"event": row.model_dump()})
+
+        # Emitted when new reasoning events occur
+        new_reasoning = [
+            row for row in new_audit if row.event_type in REASONING_EVENT_TYPES
+        ]
+        if new_reasoning:
+            self._reasoning_id = max(row.id or 0 for row in new_reasoning)
+            emit(EventType.REASONING, {"board": detail.reasoning.model_dump()})
 
         # Emitted after the work it describes so the feed reads in causal order.
         if detail.status != self._status:

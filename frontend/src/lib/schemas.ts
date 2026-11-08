@@ -97,7 +97,51 @@ export const MessageSchema = z.object({
   assessment_id: z.number().int(),
   role: z.string(),
   text: z.string(),
+  client_message_id: z.string().nullable().default(null),
   created_at: z.string(),
+})
+
+export const HypothesisSchema = z.object({
+  id: z.string(),
+  statement: z.string(),
+  asset: z.string(),
+  endpoint: z.string().nullable().default(null),
+  status: z.enum(['open', 'supported', 'refuted', 'inconclusive']),
+  confidence: z.number(),
+  evidence_ids: z.array(z.number().int()),
+  falsifier: z.string(),
+  created_by: z.string(),
+  updated_at: z.string(),
+})
+
+export const DecisionRecordSchema = z.object({
+  id: z.string(),
+  role: z.string(),
+  action: z.string(),
+  target: z.string(),
+  hypothesis_id: z.string().nullable().default(null),
+  evidence_ids: z.array(z.number().int()),
+  observation: z.string(),
+  expected_observation: z.string().nullable().default(null),
+  would_falsify: z.string().nullable().default(null),
+  confidence: z.number(),
+  outcome: z.string(),
+  created_at: z.string(),
+})
+
+export const EvidenceBoardSchema = z.object({
+  hypotheses: z.array(HypothesisSchema).default([]),
+  decisions: z.array(DecisionRecordSchema).default([]),
+  open_questions: z.array(z.string()).default([]),
+  coverage: z.record(z.string(), z.unknown()).default({}),
+})
+
+export const ChatAcceptedSchema = z.object({
+  assessment_id: z.number().int(),
+  operator_message_id: z.number().int(),
+  accepted: z.boolean(),
+  steering: z.boolean(),
+  message: z.string(),
 })
 
 export const AssessmentDetailSchema = AssessmentSchema.extend({
@@ -107,7 +151,14 @@ export const AssessmentDetailSchema = AssessmentSchema.extend({
   approvals: z.array(ApprovalSchema),
   audit: z.array(AuditEventSchema),
   messages: z.array(MessageSchema).default([]),
+  reasoning: EvidenceBoardSchema.default({
+    hypotheses: [],
+    decisions: [],
+    open_questions: [],
+    coverage: {},
+  }),
   gate_open: z.boolean().default(false),
+  active_role: z.string().nullable().default(null),
 })
 
 export const PlanStepSchema = z.object({
@@ -128,6 +179,10 @@ export const AgentViewSchema = z.object({
   steps: z.number().int(),
   last_message: z.string().nullable(),
   risk_score: z.number().nullable(),
+  gate_open: z.boolean().default(false),
+  active_role: z.string().nullable().default(null),
+  phase: z.string().default(''),
+  reasoning_summary: z.string().default(''),
 })
 
 export const AgentAcceptedSchema = z.object({
@@ -169,3 +224,7 @@ export type AgentView = z.infer<typeof AgentViewSchema>
 export type DecisionInput = z.infer<typeof DecisionInputSchema>
 export type Message = z.infer<typeof MessageSchema>
 export type PlanStep = z.infer<typeof PlanStepSchema>
+export type Hypothesis = z.infer<typeof HypothesisSchema>
+export type DecisionRecord = z.infer<typeof DecisionRecordSchema>
+export type EvidenceBoard = z.infer<typeof EvidenceBoardSchema>
+export type ChatAccepted = z.infer<typeof ChatAcceptedSchema>
