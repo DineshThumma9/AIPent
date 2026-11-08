@@ -118,8 +118,8 @@
 #if data.findings.len() == 0 [
   None recorded.
 ] else [
-  #for f in data.findings [
-    == #f.id · #f.title
+  #for (idx, f) in data.findings.enumerate() [
+    == Finding #(idx + 1): #f.title #text(size: 9pt, fill: luma(120), weight: "regular")[(ID: \##f.id)]
 
     #table(
       columns: (1fr, 1fr, 1fr, 1fr),
@@ -128,7 +128,7 @@
       [*Severity*], [#f.severity], [*Risk*], [#f.score / 10],
       [*Confidence*], [#f.confidence], [*Status*], [#f.status],
       [*Asset*], [#f.asset], [*Endpoint*], [#f.endpoint],
-      [*CVE*], [#if f.cve.len() == 0 [none] else [#f.cve.join(", ")]], [*CWE*], [#if f.cwe.len() == 0 [none] else [#f.cwe.join(", ")]],
+      [*CVE*], [#if f.cve.len() == 0 [-] else [#f.cve.join(", ")]], [*CWE*], [#if f.cwe.len() == 0 [-] else [#f.cwe.join(", ")]],
     )
 
     #v(4pt)
@@ -162,7 +162,7 @@
         - #text(font: "DejaVu Sans Mono")[#fc.cve_id] (#fc.source, #fc.match_reason) #if fc.source_url != "" [ · #text(size: 7.5pt)[#fc.source_url] ]
       ]
       #v(2pt)
-    ] else if f.cve.len() == 0 and f.endpoint != "" and f.endpoint != "/" [
+    ] else if f.cve.len() == 0 and f.endpoint.starts-with("tcp/") [
       #text(size: 8pt, fill: luma(120))[_CVE enrichment not possible; version not exposed._]
       #v(2pt)
     ]
@@ -249,15 +249,25 @@
   No artifact files recorded.
 ] else [
   #table(
-    columns: (auto, 1fr, auto, 1fr),
-    inset: 5pt,
+    columns: (30pt, 1.4fr, 1.8fr, 1fr),
+    inset: 4pt,
     stroke: 0.4pt + luma(200),
-    [*Step*], [*Artifact*], [*SHA-256*], [*Target*],
+    [*Step*], [*Action & Evidence Artifact*], [*SHA-256 (Hash)*], [*Target*],
     ..data.artifacts.map(a => (
-      [#a.seq],
-      [#a.path],
-      [#text(size: 7pt)[#a.sha]],
-      [#a.target],
+      align(center)[#a.seq],
+      [
+        #text(weight: "bold", size: 8pt)[#if "action_title" in a [#a.action_title] else [#a.action]] \
+        #text(size: 7pt, fill: luma(110), font: "DejaVu Sans Mono")[#a.path]
+      ],
+      [#text(size: 6.5pt, font: "DejaVu Sans Mono")[
+        #if a.sha.len() == 64 [
+          #a.sha.slice(0, 32) \
+          #a.sha.slice(32)
+        ] else [
+          #a.sha
+        ]
+      ]],
+      [#text(size: 8pt)[#a.target]],
     )).flatten(),
   )
 ]

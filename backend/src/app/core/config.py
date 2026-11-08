@@ -29,27 +29,27 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_file: Path | None = None
 
-    max_steps: int = 12
-    max_agent_turns: int = 12
-    agent_recursion_limit: int = 30
+    max_steps: int = 15
+    max_agent_turns: int = 15
+    agent_recursion_limit: int = 40
     scan_timeout: int = 300
     run_timeout: int = 900
 
     agent_loop: Literal["legacy", "v2"] = "v2"
-    supervisor_tool_calls: int = 4
+    supervisor_tool_calls: int = 5
     supervisor_calls_per_run: int = 10
     max_no_progress: int = 3
-    max_role_retries: int = 2
+    max_role_retries: int = 3
 
     nikto_bin: str = ""
     zap_image: str = "ghcr.io/zaproxy/zaproxy:stable"
 
     llm_provider: str = "ollama"
-    llm_model: str = "beam:cloud"
+    llm_model: str = "openai/gpt-oss:120b"
     summarization_llm: str = "openai/gpt-oss-20b"
     llm_base_url: str | None = None
     llm_timeout: int = 120
-    llm_max_tokens: int = 4000
+    llm_max_tokens: int = 6000
     model_exit_behavior: Literal["end", "error"] = "end"
     tool_exit_behaviour: Literal["continue", "error", "end"] = "continue"
 

@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 from urllib.parse import urlsplit
 
-from app.adapters import hashcat, nikto, nmap, sslscan, whatweb, zap
+from app.adapters import hashcat, nikto, nmap, whatweb, zap
 from app.adapters.base import FindingDraft
 from app.core.config import settings
 from app.domain.models import Assessment
@@ -183,20 +183,6 @@ def _whatweb_argv(
     ]
 
 
-def _sslscan_argv(
-    assessment: Assessment, target: str, output: Path, params: dict[str, Any] | None = None
-) -> list[str]:
-    p = params or {}
-    port = p.get("port") or _web_port(assessment)
-    return [
-        "sslscan",
-        "--no-colour",
-        "--xml",
-        str(output),
-        f"{target}:{port}",
-    ]
-
-
 def _hashcat_argv(
     assessment: Assessment, target: str, output: Path, params: dict[str, Any] | None = None
 ) -> list[str]:
@@ -298,19 +284,6 @@ ACTIONS: dict[str, ActionSpec] = {
         build_argv=_whatweb_argv,
         parse=lambda text, host, port: whatweb.scan(text, host, port),
     ),
-    "sslscan": ActionSpec(
-        name="sslscan",
-        tool="sslscan",
-        suffix=".sslscan.xml",
-        output="file",
-        transport="local",
-        ok_codes=(0,),
-        build_argv=_sslscan_argv,
-        parse=lambda text, host, port: sslscan.scan(text, host, port),
-        param_hints={
-            "port": "Target port (defaults to assessment web port)",
-        },
-    ),
     "nikto_scan": ActionSpec(
         name="nikto_scan",
         tool="nikto",
@@ -379,6 +352,24 @@ ACTIONS: dict[str, ActionSpec] = {
 }
 
 
+def _clean_host_and_port(target: str, default_port: int) -> tuple[str, int]:
+    clean = target.strip()
+    if clean.startswith("http://"):
+        clean = clean[7:]
+    elif clean.startswith("https://"):
+        clean = clean[8:]
+    clean = clean.split("/")[0]
+    port = default_port
+    if ":" in clean:
+        parts = clean.split(":")
+        clean = parts[0]
+        try:
+            port = int(parts[1])
+        except ValueError:
+            pass
+    return clean, port
+
+
 def transport_target(target: str) -> str:
     """Map a scope target to its container-visible alias.
 
@@ -388,10 +379,11 @@ def transport_target(target: str) -> str:
     if not settings.mcp_enabled or settings.mcp_transport != "gateway":
         return target
 
-    if target in {"127.0.0.1", "localhost"}:
+    host, _ = _clean_host_and_port(target, 80)
+    if host in {"127.0.0.1", "localhost"}:
         return settings.lab_target_alias
 
-    return target
+    return host
 
 
 def mcp_tool_call(
@@ -406,7 +398,9 @@ def mcp_tool_call(
     thing a human approves is exactly the thing that runs.
     """
     alias = transport_target(target)
-    port = _web_port(assessment)
+    _, parsed_port = _clean_host_and_port(target, _web_port(assessment))
+    port = parsed_port
+    target_url = f"http://{alias}:{port}"
     if action in {"recon_services", "nmap_scan", "nmap_nse"}:
         p = NmapParams(**(params or {}))
         for s in p.scripts:
@@ -422,23 +416,29 @@ def mcp_tool_call(
             "flags": nmap.mcp_flags(top_ports=p.ports, timing=p.timing, scripts=p.scripts),
         }
     if action == "whatweb":
-        return "whatweb", {"target_url": f"http://{alias}:{port}"}
-    if action == "sslscan":
-        target_port = (params or {}).get("port") or port
-        return "sslscan", {"target": f"{alias}:{target_port}"}
+        return "whatweb_scan", {"target_url": target_url}
     if action == "nikto_scan":
-        return "nikto_scan", {"target_url": f"http://{alias}:{port}"}
+        return "nikto_scan", {"target_url": target_url}
     if action == "zap_baseline":
-        return "zap_baseline", {"target_url": f"http://{alias}:{port}"}
+        return "zap_baseline", {"target_url": target_url}
     if action == "sqlmap_scan":
         return "sqlmap_scan", {
-            "target_url": f"http://{alias}:{port}",
+            "target_url": target_url,
             "params": "--batch --dbs",
         }
     if action == "dirb_scan":
         return "dirb_scan", {
-            "target_url": f"http://{alias}:{port}",
+            "target_url": target_url,
             "wordlist": "/usr/share/wordlists/dirb/common.txt",
+        }
+    if action == "hashcat_crack":
+        p = params or {}
+        hash_string = p.get("hash_value") or p.get("hash_string") or target
+        hash_type = str(p.get("hash_mode") or "0")
+        return "hashcat_crack", {
+            "hash_string": hash_string,
+            "hash_type": hash_type,
+            "wordlist": "/usr/share/wordlists/rockyou.txt",
         }
     raise UnknownAction(action)
 
@@ -472,6 +472,7 @@ def resolve_argv(
         settings.mcp_enabled
         and settings.mcp_transport == "gateway"
         and spec.transport != "http"
+        and action != "hashcat_crack"
     ):
         return mcp_command(action, assessment, target, params=params)
     output = _artifact_dir(assessment.id or 0) / f"{step_id}{spec.suffix}"
@@ -558,13 +559,6 @@ def inject_output_path(argv: list[str], output_path: str, spec: ActionSpec) -> l
                 result[idx + 1] = output_path
         except ValueError:
             result.extend(["--log-json", output_path])
-    elif spec.tool == "sslscan":
-        try:
-            idx = result.index("--xml")
-            if idx + 1 < len(result):
-                result[idx + 1] = output_path
-        except ValueError:
-            result.extend(["--xml", output_path])
     elif spec.tool == "hashcat":
         try:
             idx = result.index("--outfile")

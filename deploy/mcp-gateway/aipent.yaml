@@ -17,8 +17,10 @@ registry:
         description: Run SQLMap to detect and exploit SQL injection flaws (batch mode).
       - name: dirb_scan
         description: Run Dirb for web content / directory brute-forcing.
-      - name: whatweb
-        description: 
+      - name: whatweb_scan
+        description: Run WhatWeb to identify CMS, web technologies, and headers of a website.
+      - name: hashcat_crack
+        description: Run Hashcat to crack an inline hash string.
     
   vulnify:
     name: vulnify

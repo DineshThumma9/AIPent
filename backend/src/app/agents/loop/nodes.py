@@ -46,7 +46,10 @@ from app.agents.loop.tool_specs import bindable_tools, is_direct_tool, lookup_to
 from app.agents.model import build_role_model
 from app.core.config import settings
 from app.core.db import get_async_session_ctx
+from app.core.log import get_logger
 from app.core.policy import policy_for
+
+logger = get_logger("agent.nodes")
 from app.domain.models import (
     Approval,
     Assessment,
@@ -62,6 +65,8 @@ from app.persistence.steering_repo import SteeringRepo
 from app.persistence.step_repo import StepRepo
 from app.reporting.narrative import build_narrative_context, write_narrative_result
 from app.reporting.report import generate_report
+import asyncio
+from pathlib import Path 
 
 
 async def intake_node(state: AssessmentState) -> Command:
@@ -320,7 +325,31 @@ async def model_node(state: AssessmentState) -> Command:
             )
         )
 
-    ai = await model.ainvoke(messages)
+    ai = None
+    for attempt in range(1, 4):
+        try:
+            ai = await model.ainvoke(messages)
+            break
+        except Exception as exc:
+            if attempt == 3:
+                logger.error(f"model_ainvoke_exhausted role={role} error={exc}")
+                signal = FailureSignal(
+                    role=role,  # type: ignore[arg-type]
+                    kind="model_error",
+                    summary=f"Model invocation failed after retries: {exc}",
+                    attempts=turns.get(role, 0),
+                )
+                return Command(
+                    update={
+                        "messages": messages,
+                        "turns": turns,
+                        "last_message": signal.summary,
+                        "failure_signal": signal.model_dump(),
+                    },
+                    goto="supervisor",
+                )
+            logger.warning(f"model_ainvoke_retry role={role} attempt={attempt} error={exc}")
+            await asyncio.sleep(1.5 * attempt)
     messages.append(ai)
     turns[role] = turns.get(role, 0) + 1
 
@@ -1221,7 +1250,7 @@ async def report_writer_node(state: AssessmentState) -> Command:
                 )
             await session.commit()
         except Exception as exc:
-            log.exception("report_writer_node unexpected exception: %s", exc)
+            logger.exception("report_writer_node unexpected exception: %s", exc)
             session.add(
                 Audit(
                     assessment_id=assessment_id,

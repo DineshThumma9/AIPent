@@ -25,6 +25,8 @@ async def read_artifact(
     step_id: int,
     max_chars: int = 4000,
     search: str | None = None,
+    offset: int = 0,
+    **kwargs: Any,
 ) -> Observation:
     step = await session.get(Step, step_id)
     if step is None or step.assessment_id != assessment_id:
@@ -62,10 +64,11 @@ async def read_artifact(
             )
 
         content = path.read_text(encoding="utf-8", errors="replace")
-        max_chars = min(max_chars, 8000)
+        max_chars = min(max(max_chars, 100), 8000)
+        offset = max(0, int(offset or 0))
 
         if search:
-            idx = content.lower().find(search.lower())
+            idx = content.lower().find(search.lower(), offset)
             if idx != -1:
                 start = max(0, idx - 200)
                 end = min(len(content), start + max_chars)
@@ -73,7 +76,7 @@ async def read_artifact(
             else:
                 excerpt = f"Search term {search!r} not found in artifact."
         else:
-            excerpt = content[:max_chars]
+            excerpt = content[offset : offset + max_chars]
 
         return Observation(
             ok=True,
@@ -81,7 +84,7 @@ async def read_artifact(
             action="read_artifact",
             target=step.target,
             step_id=step.id,
-            summary=f"Read {len(excerpt)} chars from artifact for step {step_id}:\n{excerpt}",
+            summary=f"Read {len(excerpt)} chars from artifact for step {step_id} (offset {offset}, total {len(content)} chars):\n{excerpt}",
         )
     except Exception as exc:
         return Observation(
@@ -98,6 +101,7 @@ async def list_services(
     session: AsyncSession,
     assessment_id: int,
     limit: int = 50,
+    **kwargs: Any,
 ) -> Observation:
     repo = FindingRepo(session)
     services = await repo.get_services(assessment_id)
@@ -121,6 +125,7 @@ async def list_findings(
     assessment_id: int,
     status: str | None = None,
     limit: int = 50,
+    **kwargs: Any,
 ) -> Observation:
     repo = FindingRepo(session)
     candidates = await repo.get_candidates(assessment_id)
@@ -146,7 +151,8 @@ async def update_finding_status(
     assessment_id: int,
     finding_id: int,
     status: str,
-    reasoning: str,
+    reasoning: str = "",
+    **kwargs: Any,
 ) -> Observation:
     repo = FindingRepo(session)
     res = await repo.update_status(
@@ -183,6 +189,7 @@ async def lookup_cve_direct(
     product: str | None = None,
     version: str | None = None,
     cpe: str | None = None,
+    **kwargs: Any,
 ) -> Observation:
     from app.intel.cve import get_cve_catalog
 
@@ -276,6 +283,7 @@ async def hash_identify_direct(
     assessment_id: int,
     hash_value: str,
     source_step_id: int,
+    **kwargs: Any,
 ) -> Observation:
     """Identify the hash type using local heuristics, verifying it appears in the artifact."""
     from app.domain.models import Audit
@@ -388,39 +396,49 @@ async def run_direct(
     run_id = state["run_id"]
     role = state["role"]
 
-    if spec.name == "read_artifact":
-        return await read_artifact(session, assessment_id, **args)
-    if spec.name == "list_services":
-        return await list_services(session, assessment_id, **args)
-    if spec.name == "list_findings":
-        return await list_findings(session, assessment_id, **args)
-    if spec.name == "lookup_cve":
-        return await lookup_cve_direct(session, assessment_id, **args)
-    if spec.name == "hash_identify":
-        return await hash_identify_direct(session, assessment_id, **args)
-    if spec.name == "record_hypothesis":
-        return await record_hypothesis(
-            session=session,
-            assessment_id=assessment_id,
-            run_id=run_id,
-            role=role,
-            **args,
-        )
-    if spec.name == "update_hypothesis":
-        return await update_hypothesis(
-            session=session,
-            assessment_id=assessment_id,
-            run_id=run_id,
-            role=role,
-            **args,
-        )
-    if spec.name == "update_finding_status":
-        return await update_finding_status(
-            session=session,
-            assessment_id=assessment_id,
-            finding_id=args["finding_id"],
-            status=args["status"],
-            reasoning=args.get("reasoning", ""),
-        )
+    try:
+        if spec.name == "read_artifact":
+            return await read_artifact(session, assessment_id, **args)
+        if spec.name == "list_services":
+            return await list_services(session, assessment_id, **args)
+        if spec.name == "list_findings":
+            return await list_findings(session, assessment_id, **args)
+        if spec.name == "lookup_cve":
+            return await lookup_cve_direct(session, assessment_id, **args)
+        if spec.name == "hash_identify":
+            return await hash_identify_direct(session, assessment_id, **args)
+        if spec.name == "record_hypothesis":
+            return await record_hypothesis(
+                session=session,
+                assessment_id=assessment_id,
+                run_id=run_id,
+                role=role,
+                **args,
+            )
+        if spec.name == "update_hypothesis":
+            return await update_hypothesis(
+                session=session,
+                assessment_id=assessment_id,
+                run_id=run_id,
+                role=role,
+                **args,
+            )
+        if spec.name == "update_finding_status":
+            return await update_finding_status(
+                session=session,
+                assessment_id=assessment_id,
+                finding_id=args.get("finding_id", 0),
+                status=args.get("status", "suspected"),
+                reasoning=args.get("reasoning", ""),
+            )
 
-    raise ValueError(f"unknown direct tool {spec.name}")
+        raise ValueError(f"unknown direct tool {spec.name}")
+    except Exception as exc:
+        return Observation(
+            ok=False,
+            status="error",
+            action=spec.name,
+            target=str(args.get("target") or args.get("step_id") or "direct_tool"),
+            summary=f"Direct tool {spec.name} failed with error: {exc}",
+            errors=[str(exc)],
+        )

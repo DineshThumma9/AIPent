@@ -314,3 +314,9 @@ def get_cve_catalog(db_path: Path | str | None = None) -> CveCatalog:
     if _catalog_instance is None or db_path is not None:
         _catalog_instance = CveCatalog(db_path)
     return _catalog_instance
+
+
+def cve_snapshot_label(catalog: CveCatalog | None = None) -> str:
+    """Return formatted snapshot label for reports and prompts."""
+    cat = catalog or get_cve_catalog()
+    return f"{settings.vulnify_release} (2026-11-02)" if cat.is_available else "CVE enrichment disabled"

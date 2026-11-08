@@ -8,6 +8,7 @@ from __future__ import annotations
 from app.agents.middleware import middleware_setup
 from typing import Any
 
+import httpx
 from langchain_groq import ChatGroq
 from langchain_huggingface import ChatHuggingFace
 from langchain_mistralai import ChatMistralAI
@@ -24,6 +25,12 @@ from ..domain.models import ThinkingLevel
 log = get_logger("agent.model")
 
 
+def _ollama_headers() -> dict[str, str]:
+    if settings.ollama_api_key:
+        return {"Authorization": f"Bearer {settings.ollama_api_key}"}
+    return {}
+
+
 models =   {
 
 "groq": lambda model_name:ChatGroq(
@@ -38,7 +45,14 @@ models =   {
     base_url=settings.ollama_base_url,
     num_predict=settings.llm_max_tokens,
     timeout=settings.llm_timeout,
-    client_kwargs={"headers": {"Authorization": f"Bearer {settings.ollama_api_key}"}} if settings.ollama_base_url and settings.ollama_api_key else {},
+    sync_client_kwargs={
+        "headers": _ollama_headers(),
+        "transport": httpx.HTTPTransport(retries=3),
+    },
+    async_client_kwargs={
+        "headers": _ollama_headers(),
+        "transport": httpx.AsyncHTTPTransport(retries=3),
+    },
 ),
 
 "mistral": lambda model_name: ChatMistralAI(

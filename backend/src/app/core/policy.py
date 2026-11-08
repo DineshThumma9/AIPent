@@ -41,7 +41,6 @@ DEFAULT_ACTION_POLICIES: dict[str, ActionPolicy] = {
     "nmap_scan": ActionPolicy(risk="low", approve=False),
     "nmap_nse": ActionPolicy(risk="low", approve=False),
     "whatweb": ActionPolicy(risk="low", approve=False),
-    "sslscan": ActionPolicy(risk="low", approve=False),
     "nikto_scan": ActionPolicy(risk="low", approve=False),
     "dirb_scan": ActionPolicy(risk="low", approve=False),
     "zap_baseline": ActionPolicy(risk="medium", approve=True),

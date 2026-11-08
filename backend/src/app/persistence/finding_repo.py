@@ -52,8 +52,6 @@ class FindingRepo(BaseRepo):
         )
         self.session.add(finding)
         await self.session.flush()
-        await self.session.commit()
-        await self.session.refresh(finding)
 
         if cve and finding.id:
             for item in cve:
@@ -62,8 +60,11 @@ class FindingRepo(BaseRepo):
                     cve_id=item,
                     source="scanner_reference",
                     match_reason="scanner_reference",
+                    commit=False,
                 )
 
+        await self.session.commit()
+        await self.session.refresh(finding)
         return finding
 
     async def record_finding_cve(
@@ -75,6 +76,7 @@ class FindingRepo(BaseRepo):
         match_reason: str = "cpe_exact",
         confidence: str = "high",
         catalog_release: str | None = None,
+        commit: bool = True,
     ) -> FindingCve:
         from app.core.config import settings
         from app.intel.cve import get_cve_catalog
@@ -106,8 +108,11 @@ class FindingRepo(BaseRepo):
             confidence=confidence,
         )
         self.session.add(fc)
-        await self.session.commit()
-        await self.session.refresh(fc)
+        if commit:
+            await self.session.commit()
+            await self.session.refresh(fc)
+        else:
+            await self.session.flush()
         return fc
 
     async def get_cves_for_finding(self, finding_id: int) -> list[FindingCve]:

@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# AIPENT CLI runner wrapper
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export PYTHONPATH="$SCRIPT_DIR/backend/src:$PYTHONPATH"
+
+exec "$SCRIPT_DIR/backend/.venv/bin/python" -m app.cli "$@"

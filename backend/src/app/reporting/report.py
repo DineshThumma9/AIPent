@@ -50,6 +50,42 @@ def _clean_text(text: str | None) -> str:
     return text.strip()
 
 
+def _clean_endpoint(endpoint: str | None) -> str:
+    if not endpoint:
+        return ""
+    ep = endpoint.strip()
+    # Normalize double scheme like http://http://
+    ep = re.sub(r"^(https?://)+", r"http://", ep)
+    # Normalize double ports like :3000:3000
+    ep = re.sub(r":(\d+):\1", r":\1", ep)
+    return ep
+
+
+def _clean_finding_title(title: str | None) -> str:
+    cleaned = _clean_text(title)
+    if not cleaned:
+        return ""
+    m_interesting = re.match(r"^([^:]+):\s*This might be interesting\.?$", cleaned, re.IGNORECASE)
+    if m_interesting:
+        return f"Potentially Sensitive File / Path: {m_interesting.group(1).strip()}"
+    if "robots.txt" in cleaned.lower() and ("manual" in cleaned.lower() or "entry" in cleaned.lower()):
+        return "Robots.txt Discloses Potentially Sensitive Entries"
+    return cleaned
+
+
+ACTION_TITLES = {
+    "recon_services": "Port & Service Scan (Nmap)",
+    "whatweb": "Technology Fingerprinting (WhatWeb)",
+    "dirb_scan": "Directory Enumeration (Dirb)",
+    "nikto_scan": "Web Server Scan (Nikto)",
+    "zap_baseline": "Baseline Web Audit (ZAP)",
+    "curl_tool": "HTTP Verification Probe",
+    "sqlmap_scan": "SQL Injection Test (Sqlmap)",
+    "hashcat_crack": "Offline Hash Analysis (Hashcat)",
+    "sslscan": "TLS/SSL Configuration Scan",
+}
+
+
 async def build_report_data(
     session: AsyncSession,
     assessment: Assessment,
@@ -120,7 +156,7 @@ async def build_report_data(
     for finding in ordered:
         score = scores[finding.id]
         rows = [row for row in evidence if row.finding_id == finding.id]
-        clean_title = _clean_text(finding.title)
+        clean_title = _clean_finding_title(finding.title)
         item = by_id.get(finding.id)
         fc_rows = cves_by_finding.get(finding.id, [])
         corroborating = sorted(
@@ -140,8 +176,8 @@ async def build_report_data(
                 "score": score["score"],
                 "confidence": round(finding.confidence, 2),
                 "status": finding.status,
-                "asset": finding.asset,
-                "endpoint": finding.endpoint or "",
+                "asset": _clean_endpoint(finding.asset),
+                "endpoint": _clean_endpoint(finding.endpoint),
                 "description": _clean_text(finding.description),
                 "impact": _clean_text(finding.impact),
                 "remediation": _clean_text(finding.remediation),
@@ -171,10 +207,8 @@ async def build_report_data(
             }
         )
 
-    from app.core.config import settings
-    from app.intel.cve import get_cve_catalog
-    catalog = get_cve_catalog()
-    cve_snapshot = f"{settings.vulnify_release} (2026-11-02)" if catalog.is_available else "CVE enrichment disabled"
+    from app.intel.cve import cve_snapshot_label
+    cve_snapshot = cve_snapshot_label()
 
     return {
         "assessment": {
@@ -212,9 +246,12 @@ async def build_report_data(
         "artifacts": [
             {
                 "seq": step.seq,
-                "path": step.output_path or "",
+                "action": step.action,
+                "action_title": ACTION_TITLES.get(step.action, step.action.replace("_", " ").title()),
+                "path": Path(step.output_path).name if step.output_path else "",
+                "full_path": step.output_path or "",
                 "sha": step.output_sha256 or "",
-                "target": step.target or "",
+                "target": _clean_endpoint(step.target) if step.target else "",
             }
             for step in steps
             if step.output_path

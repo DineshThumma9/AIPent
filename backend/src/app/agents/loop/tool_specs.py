@@ -58,7 +58,10 @@ class ReconServicesArgs(ActionReasoning):
 
 
 class ReadArtifactArgs(BaseModel):
+    model_config = {"extra": "ignore"}
+
     step_id: int = Field(description="Step id whose artifact to inspect.")
+    offset: int = Field(default=0, ge=0, description="Character offset from start of artifact to read from.")
     max_chars: int = Field(default=4000, le=8000, description="Max characters to read.")
     search: str | None = Field(default=None, description="Optional substring to search within artifact.")
 
@@ -94,10 +97,6 @@ class DirbArgs(ActionReasoning):
 
 class WhatwebArgs(ActionReasoning):
     pass
-
-
-class SslscanArgs(ActionReasoning):
-    port: int | None = Field(default=None, description="Optional target port to scan (defaults to web port).")
 
 
 class HashIdentifyArgs(BaseModel):
@@ -321,18 +320,6 @@ whatweb_tool = ToolSpec(
     param_fields=(),
 )
 
-sslscan_tool = ToolSpec(
-    name="sslscan",
-    kind="action",
-    action="sslscan",
-    args_model=SslscanArgs,
-    description=(
-        "Run sslscan to determine supported TLS/SSL protocols, cipher suites, and certificate "
-        "validity on in-scope ports. Identifies deprecated SSL/TLS protocols and expired certificates."
-    ),
-    param_fields=("port",),
-)
-
 hash_identify_tool = ToolSpec(
     name="hash_identify",
     kind="direct",
@@ -399,7 +386,6 @@ ROLE_TOOL_SPECS: dict[str, list[ToolSpec]] = {
     "recon": [
         recon_services_tool,
         whatweb_tool,
-        sslscan_tool,
         lookup_cve_tool,
         read_artifact_tool,
         list_services_tool,
@@ -408,6 +394,7 @@ ROLE_TOOL_SPECS: dict[str, list[ToolSpec]] = {
         handoff_tool,
     ],
     "discovery": [
+        curl_tool,
         dirb_scan_tool,
         nikto_scan_tool,
         zap_baseline_tool,

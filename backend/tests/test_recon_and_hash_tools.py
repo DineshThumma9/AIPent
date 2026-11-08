@@ -372,3 +372,84 @@ async def test_finding_repo_requires_curl_tool_evidence(engine):
         )
         assert "error" not in result
         assert result["status"] == "confirmed"
+
+
+@pytest.mark.asyncio
+async def test_hashcat_stays_local_when_mcp_gateway_enabled(monkeypatch):
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "mcp_enabled", True)
+    monkeypatch.setattr(settings, "mcp_transport", "gateway")
+
+    assessment = Assessment(id=1, title="Lab", targets=["127.0.0.1"], ports=[80])
+    # resolve_argv must not crash with UnknownAction("hashcat_crack")
+    argv = resolve_argv(
+        "hashcat_crack",
+        assessment,
+        "127.0.0.1",
+        step_id=10,
+        params={"hash_mode": 0, "source_step_id": 1},
+    )
+    assert argv[0] == "hashcat"
+
+
+@pytest.mark.asyncio
+async def test_execute_action_hashcat_uncracked_creates_empty_artifact(engine, monkeypatch, tmp_path):
+    import subprocess
+    from app.actions import catalogue
+    from app.actions.executor import execute_action
+
+    monkeypatch.setattr(catalogue, "ARTIFACT_DIR", tmp_path)
+
+    async with get_async_session_ctx() as session:
+        assessment = Assessment(id=20, title="Lab", targets=["127.0.0.1"], ports=[80])
+        session.add(assessment)
+        await session.commit()
+
+        # Mock _run to simulate hashcat exiting 0 without creating an outfile (uncracked outcome)
+        async def mock_run(argv, timeout, assessment_id=None):
+            return subprocess.CompletedProcess(argv, 0, stdout="All hashes exhausted\n", stderr="")
+
+        monkeypatch.setattr("app.actions.executor._run", mock_run)
+
+        # execute_action should touch the artifact and produce 0 findings without raising RuntimeError
+        step = await execute_action(session, assessment.id, "hashcat_crack")
+        assert step.exit_code == 0
+        assert step.output_path is not None
+        assert Path(step.output_path).exists()
+        assert Path(step.output_path).read_text() == ""
+
+
+@pytest.mark.asyncio
+async def test_execute_action_hashcat_cracked_creates_finding(engine, monkeypatch, tmp_path):
+    import subprocess
+    from app.actions import catalogue
+    from app.actions.executor import execute_action
+
+    monkeypatch.setattr(catalogue, "ARTIFACT_DIR", tmp_path)
+
+    async with get_async_session_ctx() as session:
+        assessment = Assessment(id=21, title="Lab", targets=["127.0.0.1"], ports=[80])
+        session.add(assessment)
+        await session.commit()
+
+        # Mock _run to write cracked hash into the expected outfile
+        async def mock_run(argv, timeout, assessment_id=None):
+            outfile_idx = argv.index("--outfile") + 1
+            outfile_path = Path(argv[outfile_idx])
+            outfile_path.parent.mkdir(parents=True, exist_ok=True)
+            outfile_path.write_text("5d41402abc4b2a76b9719d911017c592\n")
+            return subprocess.CompletedProcess(argv, 0, stdout="Cracked: 1\n", stderr="")
+
+        monkeypatch.setattr("app.actions.executor._run", mock_run)
+
+        step = await execute_action(session, assessment.id, "hashcat_crack")
+        assert step.exit_code == 0
+        assert Path(step.output_path).exists()
+
+        # Verify high-severity finding was created with plaintext redacted
+        res = await session.execute(select(Finding).where(Finding.assessment_id == assessment.id))
+        findings = list(res.scalars().all())
+        assert len(findings) == 1
+        assert findings[0].severity == "high"
+        assert "Weak password policy" in findings[0].title
+

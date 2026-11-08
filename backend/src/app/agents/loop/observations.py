@@ -172,6 +172,7 @@ async def observation_from_step(session: AsyncSession, step: Step) -> Observatio
     if step.action == "curl_tool":
         http_status = None
         body_excerpt = ""
+        body_full = ""
         from pathlib import Path
         if step.output_path and Path(step.output_path).exists():
             try:
@@ -179,7 +180,8 @@ async def observation_from_step(session: AsyncSession, step: Step) -> Observatio
                 p_data = json.loads(Path(step.output_path).read_text(encoding="utf-8", errors="replace"))
                 res = p_data.get("curl_result") or p_data.get("probe_result") or {}
                 http_status = res.get("status_code")
-                body_excerpt = (res.get("body_preview") or res.get("body") or "")[:200]
+                body_full = res.get("body_preview") or res.get("body") or ""
+                body_excerpt = body_full[:500]
             except Exception:
                 pass
         status_part = f"HTTP {http_status}" if http_status is not None else "HTTP request succeeded"
@@ -196,6 +198,10 @@ async def observation_from_step(session: AsyncSession, step: Step) -> Observatio
             findings_updated=updated_ids,
             evidence_ids=evidence_ids,
             artifact=artifact_info,
+            facts={
+                "status_code": http_status,
+                "body_preview": body_full[:1000] if body_full else "",
+            },
             errors=[],
             next_hint="Compare observed HTTP status and response against expected_observation and would_falsify.",
         )

@@ -288,7 +288,7 @@ async def execute_action(
     transport = (
         "mcp"
         if (
-            action != "curl_tool"
+            action not in ("curl_tool", "hashcat_crack")
             and settings.mcp_enabled
             and settings.mcp_transport == "gateway"
         )
@@ -359,8 +359,12 @@ async def execute_action(
 
             if spec.output == "file":
                 if not artifact.exists():
-                    detail = (process.stderr or process.stdout).strip()[-500:]
-                    raise RuntimeError(detail or f"{spec.tool} produced no report")
+                    if spec.tool == "hashcat":
+                        artifact.parent.mkdir(parents=True, exist_ok=True)
+                        artifact.touch()
+                    else:
+                        detail = (process.stderr or process.stdout).strip()[-500:]
+                        raise RuntimeError(detail or f"{spec.tool} produced no report")
                 text = artifact.read_text(encoding="utf-8", errors="replace")
             else:
                 text = process.stdout

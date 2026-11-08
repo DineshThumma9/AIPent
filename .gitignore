@@ -50,3 +50,5 @@ pro.txt
 *.db
 *.db*
 vulnify.db*
+observations/
+data/
