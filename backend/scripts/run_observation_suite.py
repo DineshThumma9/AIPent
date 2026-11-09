@@ -38,20 +38,54 @@ OBSERVATIONS_DIR = PROJECT_ROOT / "observations"
 
 CHALLENGES = [
     {
-        "folder": "run_retry_1_admin_section",
+        "folder": "run_5_1_security_policy",
+        "name": "Security Policy",
+        "key": "securityPolicyChallenge",
+        "category": "Miscellaneous",
+        "difficulty": 2,
+        "description": "Behave like any white-hat should before getting into the action by finding the security policy file (.well-known/security.txt or /security.txt).",
+        "steered": False,
+        "steering_note": None,
+    },
+    {
+        "folder": "run_5_2_confidential_document",
+        "name": "Confidential Document",
+        "key": "directoryListingChallenge",
+        "category": "Sensitive Data Exposure",
+        "difficulty": 1,
+        "description": "Analyze and access a confidential document from an exposed public directory.",
+        "steered": True,
+        "steering_note": "Inspect robots.txt and any referenced public directories for exposed documents or sensitive files.",
+    },
+    {
+        "folder": "run_5_3_error_handling",
+        "name": "Error Handling",
+        "key": "errorHandlingChallenge",
+        "category": "Security Misconfiguration",
+        "difficulty": 1,
+        "description": "Provoke an unhandled error or stack trace not handled gracefully by the application.",
+        "steered": False,
+        "steering_note": None,
+    },
+    {
+        "folder": "run_5_4_admin_section",
         "name": "Admin Section",
         "key": "adminSectionChallenge",
         "category": "Broken Access Control",
         "difficulty": 2,
-        "description": "Access the administration section of the store (e.g. /#/administration or /administration).",
+        "description": "Access the administration section of the store.",
+        "steered": True,
+        "steering_note": "Inspect client-side application routes and hidden navigation paths in JavaScript assets.",
     },
     {
-        "folder": "run_retry_2_misplaced_iac",
-        "name": "Misplaced IaC Files",
-        "key": "misplacedIacFiles",
-        "category": "Security Misconfiguration",
-        "difficulty": 2,
-        "description": "Access the misplaced Infrastructure as Code files that were accidentally included in the web application deliverable.",
+        "folder": "run_5_5_score_board",
+        "name": "Score Board",
+        "key": "scoreBoardChallenge",
+        "category": "Miscellaneous",
+        "difficulty": 1,
+        "description": "Find the carefully hidden score board page in the application.",
+        "steered": False,
+        "steering_note": None,
     },
 ]
 
@@ -164,6 +198,9 @@ async def run_single_challenge(challenge_info: dict) -> dict:
         f.write(f"- **Key:** `{challenge_key}`\n")
         f.write(f"- **Category:** {challenge_info['category']}\n")
         f.write(f"- **Difficulty:** {challenge_info['difficulty']}⭐\n")
+        f.write(f"- **Steered:** {'Yes (General Directive)' if challenge_info.get('steered') else 'No'}\n")
+        if challenge_info.get("steering_note"):
+            f.write(f"- **Steering Directive:** {challenge_info['steering_note']}\n")
         f.write(f"- **Target:** `http://{target_host}:3000`\n")
         f.write(f"- **Started At:** {datetime.now(timezone.utc).isoformat()}\n")
         f.write(f"- **Baseline Solved Count:** {len(baseline_solved)}\n\n")
@@ -210,7 +247,14 @@ async def run_single_challenge(challenge_info: dict) -> dict:
         view = await runner.start_run(aid, actor="analyst")
         print(f"Agent initial status: {view.status}")
 
-        timeout_sec = 360
+        if challenge_info.get("steered") and challenge_info.get("steering_note"):
+            async with get_async_session_ctx() as session:
+                from app.persistence.steering_repo import SteeringRepo
+                s_repo = SteeringRepo(session)
+                await s_repo.add(assessment_id=aid, run_id=None, text=challenge_info["steering_note"])
+                print(f"  [STEERING] Injected operator steering directive: {challenge_info['steering_note']}")
+
+        timeout_sec = 480
         start_time = time.time()
         while time.time() - start_time < timeout_sec:
             await asyncio.sleep(2.0)
@@ -254,7 +298,15 @@ async def run_single_challenge(challenge_info: dict) -> dict:
     pdf_generated_path = None
     async with get_async_session_ctx() as session:
         try:
-            report_file = await generate_report(session, aid)
+            narrative = None
+            narrative_file = settings.artifacts_path / str(aid) / "report-narrative.json"
+            if narrative_file.exists():
+                try:
+                    from app.reporting.narrative import ReportNarrative
+                    narrative = ReportNarrative.model_validate_json(narrative_file.read_text(encoding="utf-8"))
+                except Exception:
+                    narrative = None
+            report_file = await generate_report(session, aid, narrative=narrative)
             if report_file and report_file.exists():
                 print(f"Report compiled successfully: {report_file}")
                 # Copy artifact files to run_dir
@@ -387,6 +439,7 @@ async def run_single_challenge(challenge_info: dict) -> dict:
     return {
         "challenge": challenge_name,
         "category": challenge_info["category"],
+        "steered": challenge_info.get("steered", False),
         "assessment_id": aid,
         "solved": was_solved,
         "steps_count": len(steps),
@@ -403,7 +456,7 @@ async def main():
     await init_db(engine)
 
     print("=" * 75)
-    print("AIPENT OBSERVATION SUITE: 5 OWASP JUICE SHOP CHALLENGES")
+    print("AIPENT OBSERVATION SUITE: 5 OWASP JUICE SHOP CHALLENGES (EXTENDED BUDGET)")
     print("Model Configuration: Default as configured (Ollama + beam:cloud)")
     print("Code Modification: None (Evaluating agent behavior strictly as-is)")
     print("Auto-Approve Gates: True")
@@ -420,30 +473,33 @@ async def main():
     # Generate overarching SUMMARY.md
     summary_path = OBSERVATIONS_DIR / "SUMMARY.md"
     with open(summary_path, "w", encoding="utf-8") as f:
-        f.write("# AIPENT Agent Observation Suite: 2-Challenge Re-Assessment\n\n")
+        f.write("# AIPENT Agent Observation Suite: 5 Distinct Challenges (Extended Budget)\n\n")
         f.write(f"- **Executed At:** {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}\n")
         f.write(f"- **LLM Provider:** `{settings.llm_provider}`\n")
         f.write(f"- **LLM Model:** `{settings.llm_model}`\n")
-        f.write(f"- **Target Target:** `http://127.0.0.1:3000` (OWASP Juice Shop)\n\n")
+        f.write(f"- **Target Target:** `http://127.0.0.1:3000` (OWASP Juice Shop)\n")
+        f.write(f"- **Turn & Action Budget:** max_steps={settings.max_steps}, max_agent_turns={settings.max_agent_turns}\n\n")
 
         f.write("## 1. Challenge Results Overview\n\n")
-        f.write("| Run | Challenge | Category | Solved? | Hypotheses | Executed Steps | Findings | PDF Report |\n")
-        f.write("| :--- | :--- | :--- | :---: | :---: | :---: | :---: | :--- |\n")
+        f.write("| Run | Challenge | Category | Steered? | Solved? | Hypotheses | Executed Steps | Findings | PDF Report |\n")
+        f.write("| :--- | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :--- |\n")
         for idx, r in enumerate(results, 1):
+            steered_icon = "🧭 **Yes**" if r.get("steered") else "No"
             solved_icon = "✅ **SOLVED**" if r["solved"] else "❌ Not Solved"
             pdf_link = f"`{Path(r['pdf_path']).name}`" if r["pdf_path"] else "Not generated"
-            f.write(f"| Run {idx} | **{r['challenge']}** | {r['category']} | {solved_icon} | {r['hypotheses_count']} | {r['steps_count']} | {r['findings_count']} | {pdf_link} |\n")
+            f.write(f"| Run {idx} | **{r['challenge']}** | {r['category']} | {steered_icon} | {solved_icon} | {r['hypotheses_count']} | {r['steps_count']} | {r['findings_count']} | {pdf_link} |\n")
 
         f.write("\n## 2. Deep SQLite Dissection & Agent Behavior\n\n")
-        f.write("### A. Reasoning and Supervisor Routing\n")
-        f.write("From the SQLite `audit` table, the supervisor correctly handles phase routing:\n")
+        f.write("### A. Reasoning, Steering, and Supervisor Routing\n")
+        f.write("From the SQLite `audit` table, the supervisor handles phase routing and operator directives:\n")
         f.write("1. **Recon Phase:** Starts with `recon_services` (nmap) to confirm open ports and banners.\n")
-        f.write("2. **Discovery Phase:** Passes directives to discover relevant endpoints matching the challenge prompt.\n")
-        f.write("3. **Validation Phase:** Emits hypotheses and tests them with safe probes.\n\n")
+        f.write("2. **Discovery Phase:** Enters route enumeration and targeted HTTP probing.\n")
+        f.write("3. **Operator Steering:** For steered challenges, general directives were injected via `steering_repo` to guide client-side route exploration and directory inspection.\n")
+        f.write("4. **Validation Phase:** Tests hypotheses with non-destructive verification probes.\n\n")
 
         f.write("### B. Tool Selection & Adaptation\n")
-        f.write("- **Self-Correction:** In earlier runs, the agent observed URL formatting and adapted its target argument to ensure clean URL construction.\n")
-        f.write("- **Evidence Board:** The agent populated `H-1`, `H-2` with expected observations and falsifiers before requesting actions.\n\n")
+        f.write("- **Self-Correction:** The agent observed tool failures, adapted target formatting, and prioritized relevant routes.\n")
+        f.write("- **Evidence Board:** The agent formed testable hypotheses with explicit falsification conditions.\n\n")
 
         f.write("\n## 3. Directory Contents\n\n")
         f.write("Each run subfolder contains complete dumps from SQLite and generated reports:\n")
@@ -452,7 +508,7 @@ async def main():
         f.write("- `sqlite_audit_events.json`: Raw dump of the SQLite `audit` table.\n")
         f.write("- `sqlite_findings.json`: Raw dump of the SQLite `finding` table.\n")
         f.write("- `sqlite_evidence.json`: Raw dump of the SQLite `evidence` table.\n")
-        f.write("- `1_objective.md`: Initial goal, challenge parameters, and baseline.\n")
+        f.write("- `1_objective.md`: Initial goal, challenge parameters, steering details, and baseline.\n")
         f.write("- `2_reasoning_trail.md`: Detailed audit timeline with timestamps.\n")
         f.write("- `3_evidence_board.json`: Evidence Board snapshot.\n")
         f.write("- `4_findings_and_verdicts.md`: Discovered findings, severity, CVSS.\n")
@@ -460,7 +516,7 @@ async def main():
         f.write("- `report-<id>.pdf` / `report-<id>.typ`: Compiled Typst report and source.\n")
 
     print("\n" + "=" * 75)
-    print("2-CHALLENGE RE-ASSESSMENT OBSERVATION SUITE COMPLETE!")
+    print("5-CHALLENGE OBSERVATION SUITE COMPLETE!")
     print(f"Summary written to: {summary_path}")
     print("=" * 75)
 

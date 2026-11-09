@@ -154,7 +154,7 @@ class FailureSignal(BaseModel):
         "approval_rejected",
     ]
     summary: str = Field(min_length=1, max_length=1500)
-    attempts: int = Field(default=1, ge=1)
+    attempts: int = Field(default=1, ge=0)
     step_ids: list[int] = Field(default_factory=list)
     evidence_ids: list[int] = Field(default_factory=list)
     observation: dict[str, Any] | None = None

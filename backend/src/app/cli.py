@@ -315,7 +315,7 @@ def scan_cmd(
                         note = Prompt.ask("[bold blue]Enter steering guidance for the agent[/]")
                         async with get_async_session_ctx() as s_ctx:
                             s_repo = SteeringRepo(s_ctx)
-                            await s_repo.add(assessment_id=aid, run_id=view.run_id or "run", text=note)
+                            await s_repo.add(assessment_id=aid, run_id=getattr(view, "run_id", None) or "run", text=note)
                         console.print(f"[blue]Steering note recorded:[/] [italic]{note}[/italic]")
                         # Prompt for approval after steering
                         sub_dec = Prompt.ask("Proceed with this action now? ([green]y[/]/[red]n[/])", choices=["y", "n"], default="y")

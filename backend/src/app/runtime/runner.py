@@ -162,6 +162,7 @@ async def get_view(
 
     return AgentView(
         assessment_id=assessment_id,
+        run_id=values.get("run_id"),
         status=status,
         running=is_running(assessment_id) if running is None else running,
         paused=bool(state.next) and pending is not None,

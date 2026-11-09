@@ -337,7 +337,7 @@ async def model_node(state: AssessmentState) -> Command:
                     role=role,  # type: ignore[arg-type]
                     kind="model_error",
                     summary=f"Model invocation failed after retries: {exc}",
-                    attempts=turns.get(role, 0),
+                    attempts=max(1, turns.get(role, 0)),
                 )
                 return Command(
                     update={

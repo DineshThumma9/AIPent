@@ -67,6 +67,7 @@ class PlanStepOut(BaseModel):
 
 class AgentView(BaseModel):
     assessment_id: int
+    run_id: str | None = None
     status: str
     running: bool
     paused: bool

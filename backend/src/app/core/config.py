@@ -29,17 +29,17 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_file: Path | None = None
 
-    max_steps: int = 15
-    max_agent_turns: int = 15
-    agent_recursion_limit: int = 40
-    scan_timeout: int = 300
-    run_timeout: int = 900
+    max_steps: int = 40
+    max_agent_turns: int = 40
+    agent_recursion_limit: int = 120
+    scan_timeout: int = 600
+    run_timeout: int = 1800
 
     agent_loop: Literal["legacy", "v2"] = "v2"
-    supervisor_tool_calls: int = 5
-    supervisor_calls_per_run: int = 10
-    max_no_progress: int = 3
-    max_role_retries: int = 3
+    supervisor_tool_calls: int = 10
+    supervisor_calls_per_run: int = 20
+    max_no_progress: int = 5
+    max_role_retries: int = 5
 
     nikto_bin: str = ""
     zap_image: str = "ghcr.io/zaproxy/zaproxy:stable"
