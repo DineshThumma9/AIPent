@@ -1,7 +1,7 @@
 {
   "probes": [
     {
-      "action": "curl_tool",
+      "action": "curl_request",
       "target": "127.0.0.1",
       "method": "GET",
       "path": "/definitely-random-uuid-404-check-a1b2c3d4",
@@ -10,7 +10,7 @@
       "rationale": "Detect SPA wildcard fallback (404 returns 200 with root HTML)"
     },
     {
-      "action": "curl_tool",
+      "action": "curl_request",
       "target": "127.0.0.1",
       "method": "GET",
       "path": "/#/score-board",
@@ -19,7 +19,7 @@
       "rationale": "Probe for hidden Angular route: /#/score-board"
     },
     {
-      "action": "curl_tool",
+      "action": "curl_request",
       "target": "127.0.0.1",
       "method": "GET",
       "path": "/#/administration",
@@ -28,7 +28,7 @@
       "rationale": "Probe for hidden Angular route: /#/administration"
     },
     {
-      "action": "curl_tool",
+      "action": "curl_request",
       "target": "127.0.0.1",
       "method": "GET",
       "path": "/#/admin",
@@ -37,7 +37,7 @@
       "rationale": "Probe for hidden Angular route: /#/admin"
     },
     {
-      "action": "curl_tool",
+      "action": "curl_request",
       "target": "127.0.0.1",
       "method": "GET",
       "path": "/#/login",
@@ -46,7 +46,7 @@
       "rationale": "Probe for hidden Angular route: /#/login"
     },
     {
-      "action": "curl_tool",
+      "action": "curl_request",
       "target": "127.0.0.1",
       "method": "GET",
       "path": "/#/register",
@@ -55,7 +55,7 @@
       "rationale": "Probe for hidden Angular route: /#/register"
     },
     {
-      "action": "curl_tool",
+      "action": "curl_request",
       "target": "127.0.0.1",
       "method": "GET",
       "path": "/rest/user/profile",
@@ -66,7 +66,7 @@
       "rationale": "Test CORS reflection on API endpoint: /rest/user/profile"
     },
     {
-      "action": "curl_tool",
+      "action": "curl_request",
       "target": "127.0.0.1",
       "method": "GET",
       "path": "/rest/user/login",

@@ -22,7 +22,7 @@ class SkillMetadata:
 
 @dataclass
 class ProbeSpec:
-    action: str = "curl_tool"
+    action: str = "curl_request"
     target: str = ""
     method: str = "GET"
     path: str = "/"

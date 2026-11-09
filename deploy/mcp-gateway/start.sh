@@ -41,13 +41,20 @@ printf 'MCP_API_KEY=%s\n' "$MCP_API_KEY" > "$HOME/.docker/mcp/aipent-secrets.env
 export DOCKER_MCP_IN_CONTAINER=1
 export DOCKER_MCP_ALLOW_INSECURE_REMOTE_URLS=1
 
+# Start curl-mcp daemon on port 7458 if not already running
+if ! nc -z 127.0.0.1 7458 2>/dev/null; then
+  echo "[*] Launching local curl-mcp daemon on port 7458..."
+  "$root/deploy/curl-mcp/start.sh" >/dev/null 2>&1 &
+  sleep 1
+fi
+
 # Only the tools the guided workflow needs. The LLM never sees these
 # names; the backend maps semantic actions onto them.
-tools="${AIPENT_MCP_TOOLS:-nmap_scan,nikto_scan,sqlmap_scan,dirb_scan,whatweb_scan,hashcat_crack,zap_crawl_start,zap_crawl_status,zap_crawl_stop,zap_passive_scan_wait,zap_report_generate,zap_report_read_chunk}"
+tools="${AIPENT_MCP_TOOLS:-nmap_scan,nikto_scan,sqlmap_scan,dirb_scan,whatweb_scan,hashcat_crack,curl_request,zap_crawl_start,zap_crawl_status,zap_crawl_stop,zap_passive_scan_wait,zap_report_generate,zap_report_read_chunk}"
 
 exec docker mcp gateway run \
   --catalog=aipent.yaml \
-  --servers=kali,zap \
+  --servers="${AIPENT_MCP_SERVERS:-kali,zap,curl}" \
   --secrets="$HOME/.docker/mcp/aipent-secrets.env" \
   --transport=sse \
   --host=127.0.0.1 \

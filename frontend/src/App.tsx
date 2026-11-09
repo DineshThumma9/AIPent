@@ -79,17 +79,11 @@ function mergeMessages(
       .filter((m) => m.client_message_id)
       .map((m) => [m.client_message_id as string, m]),
   )
-  const next = local
-    .filter(
-      (m) =>
-        !m.id.startsWith('local-') ||
-        !byClient.has(m.id.replace('local-', '')),
-    )
-    .map((m) => {
-      if (!m.id.startsWith('local-')) return m
-      const match = byClient.get(m.id.replace('local-', ''))
-      return match ? toLocalMessage(match) : m
-    })
+  const next = local.filter(
+    (m) =>
+      !m.id.startsWith('local-') ||
+      !byClient.has(m.id.replace('local-', '')),
+  )
   for (const message of server) {
     if (!next.some((m) => m.id === String(message.id)))
       next.push(toLocalMessage(message))

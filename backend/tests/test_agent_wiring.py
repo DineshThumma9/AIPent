@@ -69,7 +69,7 @@ def test_role_tools_are_unique_and_scoped():
     expected_actions = {
         "recon": {"recon_services"},
         "discovery": {"dirb_scan", "nikto_scan", "zap_baseline"},
-        "validation": {"curl_tool", "sqlmap_scan", "update_finding_status"},
+        "validation": {"curl_request", "sqlmap_scan", "update_finding_status"},
     }
     assert set(ROLE_TOOLS) == {"recon", "discovery", "validation"}
     for role, tools in ROLE_TOOLS.items():
@@ -118,15 +118,12 @@ def test_step_matches_distinguishes_paths_and_methods():
     step = Step(
         assessment_id=1,
         seq=1,
-        action="curl_tool",
+        action="curl_request",
         target="127.0.0.1",
         argv=[
-            "curl_tool",
-            "GET",
-            "http://127.0.0.1:3000/login",
-            "{}",
-            "200",
-            "",
+            "mcp",
+            "curl_request",
+            json.dumps({"url": "http://127.0.0.1:3000/login", "method": "GET"}),
         ],
     )
     assert _step_matches(step, "127.0.0.1", {"path": "/login", "method": "GET"})
@@ -139,7 +136,7 @@ def test_step_matches_distinguishes_paths_and_methods():
     assert not _step_matches(step, "10.0.0.1", {"path": "/login"})
 
 
-def test_resolve_argv_curl_tool_stays_local(monkeypatch, tmp_path):
+def test_resolve_argv_curl_request(monkeypatch, tmp_path):
     monkeypatch.setattr(catalogue, "ARTIFACT_DIR", tmp_path)
     monkeypatch.setattr(settings, "mcp_enabled", True)
     monkeypatch.setattr(settings, "mcp_transport", "gateway")
@@ -148,7 +145,7 @@ def test_resolve_argv_curl_tool_stays_local(monkeypatch, tmp_path):
         id=1, title="Lab", targets=["127.0.0.1"], ports=[3000]
     )
     argv = resolve_argv(
-        "curl_tool",
+        "curl_request",
         assessment,
         "127.0.0.1",
         1,
@@ -161,12 +158,13 @@ def test_resolve_argv_curl_tool_stays_local(monkeypatch, tmp_path):
         },
     )
 
-    assert argv[0] == "curl_tool"
-    assert argv[1] == "POST"
-    assert argv[2] == "http://127.0.0.1:3000/login?next=/"
-    assert json.loads(argv[3]) == {"X-Test": "1"}
-    assert argv[4] == "401"
-    assert argv[5] == "a=1"
+    assert argv[0] == "mcp"
+    assert argv[1] == "curl_request"
+    mcp_args = json.loads(argv[2])
+    assert mcp_args["method"] == "POST"
+    assert "/login?next=/" in mcp_args["url"]
+    assert mcp_args["headers"] == {"X-Test": "1"}
+    assert mcp_args["body"] == "a=1"
 
 
 def test_sqlmap_output_is_stdout():
@@ -273,14 +271,14 @@ def test_update_finding_status_requires_executed_probe_evidence(engine):
         blocked = await repo.update_status(
             finding.id, assessment.id, "confirmed", "looks real"
         )
-        assert "no executed curl_tool evidence" in blocked["error"]
+        assert "no executed curl_request evidence" in blocked["error"]
 
         session.add(
             Evidence(
                 finding_id=finding.id,
                 step_id=None,
                 locator={
-                    "tool": "curl_tool",
+                    "tool": "curl_request",
                     "url": "http://127.0.0.1:3000/login",
                     "http_status": 500,
                 },
@@ -428,8 +426,8 @@ def test_resume_replays_an_identical_decision(engine, monkeypatch):
         assessment = await _assessment(session)
         approval = Approval(
             assessment_id=assessment.id,
-            action="curl_tool",
-            argv=["curl_tool"],
+            action="curl_request",
+            argv=["mcp", "curl_request"],
             decision=Decision.APPROVED.value,
         )
         session.add(approval)

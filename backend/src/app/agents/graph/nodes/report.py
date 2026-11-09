@@ -20,12 +20,12 @@ async def report_node(state: AssessmentState) -> dict:
         assessment = await repo.get(assessment_id)
         if assessment is None:
             raise LookupError(f"assessment {assessment_id} not found")
-        assessment.status = AssessmentStatus.REPORTING.value
+        assessment.status = AssessmentStatus.COMPLETED.value
+        assessment.finished_at = utcnow()
         await repo.session.commit()
         try:
             path = await generate_report(session, assessment_id)
-            assessment.status = AssessmentStatus.COMPLETED.value
-            assessment.finished_at = utcnow()
+            assessment.report_path = str(path)
             await repo.session.commit()
             return {
                 "finished": True,

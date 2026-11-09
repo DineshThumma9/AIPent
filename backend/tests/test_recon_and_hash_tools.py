@@ -298,12 +298,12 @@ def test_hashcat_adapter_strict_plaintext_redaction():
         assert word.lower() not in finding_text, f"Plaintext secret {word} leaked in finding draft!"
 
 
-# --- curl_tool Verification (Replacing http_probe) ---
+# --- curl_request Verification ---
 
 def test_curl_tool_argv_resolution():
     assessment = Assessment(id=1, title="Lab", targets=["127.0.0.1"], ports=[3000])
     argv = resolve_argv(
-        "curl_tool",
+        "curl_request",
         assessment,
         "127.0.0.1",
         step_id=99,
@@ -315,12 +315,13 @@ def test_curl_tool_argv_resolution():
             "body": "{}",
         },
     )
-    assert argv[0] == "curl_tool"
-    assert argv[1] == "POST"
-    assert argv[2] == "http://127.0.0.1:3000/api/users"
-    assert json.loads(argv[3]) == {"Authorization": "Bearer token"}
-    assert argv[4] == "200"
-    assert argv[5] == "{}"
+    assert argv[0] == "mcp"
+    assert argv[1] == "curl_request"
+    mcp_args = json.loads(argv[2])
+    assert mcp_args["method"] == "POST"
+    assert "/api/users" in mcp_args["url"]
+    assert mcp_args["headers"] == {"Authorization": "Bearer token", "Content-Type": "application/json"}
+    assert mcp_args["body"] == "{}"
 
 
 @pytest.mark.asyncio
@@ -343,7 +344,7 @@ async def test_finding_repo_requires_curl_tool_evidence(engine):
 
         repo = FindingRepo(session)
 
-        # Attempt to confirm without curl_tool evidence -> blocked
+        # Attempt to confirm without curl_request evidence -> blocked
         result = await repo.update_status(
             finding_id=finding.id,
             assessment_id=10,
@@ -351,24 +352,24 @@ async def test_finding_repo_requires_curl_tool_evidence(engine):
             reasoning="looks open",
         )
         assert "error" in result
-        assert "no executed curl_tool evidence is linked" in result["error"]
+        assert "no executed curl_request evidence is linked" in result["error"]
 
-        # Add executed curl_tool evidence row
+        # Add executed curl_request evidence row
         session.add(
             Evidence(
                 finding_id=finding.id,
-                locator={"tool": "curl_tool", "url": "http://127.0.0.1:3000/admin", "http_status": 200},
+                locator={"tool": "curl_request", "url": "http://127.0.0.1:3000/admin", "http_status": 200},
                 excerpt="HTTP 200 OK",
             )
         )
         await session.commit()
 
-        # Confirm with curl_tool evidence -> succeeds
+        # Confirm with curl_request evidence -> succeeds
         result = await repo.update_status(
             finding_id=finding.id,
             assessment_id=10,
             status="confirmed",
-            reasoning="verified with curl_tool returning 200",
+            reasoning="verified with curl_request returning 200",
         )
         assert "error" not in result
         assert result["status"] == "confirmed"

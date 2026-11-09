@@ -1,5 +1,6 @@
 """Step and Approval persistence."""
 
+import json
 from typing import Any
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -45,13 +46,24 @@ def _step_matches(
     """
     if row.target != target:
         return False
-    if row.action != "curl_tool":
+    if row.action != "curl_request":
         return True
     probe = params or {}
     method = str(probe.get("method", "GET")).upper()
-    path = str(probe.get("path") or "/")
+    path = str(probe.get("path") or probe.get("url") or "/")
+    if path.startswith("http"):
+        path = urlsplit(path).path
     if not path.startswith("/"):
         path = "/" + path
+    if len(row.argv) >= 3 and row.argv[0] == "mcp":
+        try:
+            mcp_args = json.loads(row.argv[2]) if isinstance(row.argv[2], str) else row.argv[2]
+            if isinstance(mcp_args, dict):
+                if mcp_args.get("method", "GET").upper() != method:
+                    return False
+                return urlsplit(mcp_args.get("url", "")).path == path
+        except Exception:
+            return False
     if len(row.argv) < 3 or row.argv[1].upper() != method:
         return False
     return urlsplit(row.argv[2]).path == path
@@ -110,11 +122,11 @@ class StepRepo(BaseRepo):
                 )
             }
 
-        if action == "curl_tool":
+        if action == "curl_request":
             probes = sum(
                 1
                 for event in run_events
-                if (event.payload or {}).get("action") == "curl_tool"
+                if (event.payload or {}).get("action") == "curl_request"
             )
             if probes >= settings.max_validation_probes:
                 return {
@@ -271,7 +283,7 @@ class StepRepo(BaseRepo):
         result = await self.session.execute(
             select(func.count(Step.id)).where(
                 Step.assessment_id == assessment_id,
-                Step.action == "curl_tool",
+                Step.action == "curl_request",
                 Step.status.in_(ACTIVE_STATES),
             )
         )

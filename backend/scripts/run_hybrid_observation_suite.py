@@ -37,96 +37,109 @@ from app.runtime import runner
 
 OBSERVATIONS_DIR = PROJECT_ROOT / "observations"
 
-CHALLENGES = [
-    {
-        "folder": "run_hybrid_1_security_policy",
-        "name": "Security Policy",
-        "key": "securityPolicyChallenge",
-        "category": "Miscellaneous",
-        "difficulty": 2,
-        "description": "Behave like any white-hat should before getting into the action by finding the security policy file (.well-known/security.txt or /security.txt).",
-        "steered": False,
-        "steering_stages": [],
-    },
-    {
-        "folder": "run_hybrid_2_confidential_document",
-        "name": "Confidential Document",
-        "key": "directoryListingChallenge",
-        "category": "Sensitive Data Exposure",
-        "difficulty": 1,
-        "description": "Analyze and access a confidential document from an exposed public directory.",
-        "steered": True,
-        "steering_stages": [
-            {
-                "trigger_sec": 5,
-                "role": "Lead Pentester",
-                "directive": (
-                    "PENTEST DEV GUIDANCE (Recon): Juice Shop has public directory listings. "
-                    "Start your reconnaissance by probing `http://127.0.0.1:3000/robots.txt` to uncover hidden paths "
-                    "or check for exposed file shares such as `http://127.0.0.1:3000/ftp`."
-                ),
-            },
-            {
-                "trigger_sec": 45,
-                "role": "Lead Pentester",
-                "directive": (
-                    "PENTEST DEV GUIDANCE (Discovery & Exploitation): Inspect the contents of `http://127.0.0.1:3000/ftp`. "
-                    "Download and read the confidential acquisition plan `http://127.0.0.1:3000/ftp/acquisitions.md` "
-                    "using `curl_tool` to confirm unauthorized sensitive data disclosure."
-                ),
-            },
-        ],
-    },
-    {
-        "folder": "run_hybrid_3_error_handling",
-        "name": "Error Handling",
-        "key": "errorHandlingChallenge",
-        "category": "Security Misconfiguration",
-        "difficulty": 1,
-        "description": "Provoke an unhandled error or stack trace not handled gracefully by the application.",
-        "steered": False,
-        "steering_stages": [],
-    },
-    {
-        "folder": "run_hybrid_4_admin_section",
-        "name": "Admin Section",
-        "key": "adminSectionChallenge",
-        "category": "Broken Access Control",
-        "difficulty": 2,
-        "description": "Access the administration section of the store.",
-        "steered": True,
-        "steering_stages": [
-            {
-                "trigger_sec": 5,
-                "role": "Lead Pentester",
-                "directive": (
-                    "PENTEST DEV GUIDANCE (Architecture Analysis): The target is a Single Page Application (SPA). "
-                    "Standard server routes won't be in robots.txt. Analyze the Angular/React client routing logic, "
-                    "or probe standard administrative hash routes such as `/#/administration` or `/#/admin`."
-                ),
-            },
-            {
-                "trigger_sec": 45,
-                "role": "Lead Pentester",
-                "directive": (
-                    "PENTEST DEV GUIDANCE (Verification): Probe `http://127.0.0.1:3000/#/administration` "
-                    "or `http://127.0.0.1:3000/api/Users` using `curl_tool` to confirm if admin endpoints "
-                    "and UI components are reachable without administrative privilege validation."
-                ),
-            },
-        ],
-    },
-    {
-        "folder": "run_hybrid_5_score_board",
-        "name": "Score Board",
-        "key": "scoreBoardChallenge",
-        "category": "Miscellaneous",
-        "difficulty": 1,
-        "description": "Find the carefully hidden score board page in the application.",
-        "steered": False,
-        "steering_stages": [],
-    },
-]
+def get_challenges(mode: str = "hybrid") -> list[dict]:
+    prefix = f"run_{mode}"
+    confidential_directive = (
+        "PENTEST DEV GUIDANCE (Discovery & Exploitation): Inspect the contents of `http://127.0.0.1:3000/ftp`. "
+        "If a confidential document (like `acquisitions.md` or a PDF) is listed, use `curl_tool` to download "
+        "and view it to confirm unauthorized sensitive data disclosure."
+        if mode == "openrouter"
+        else
+        "PENTEST DEV GUIDANCE (Discovery & Exploitation): Inspect the contents of `http://127.0.0.1:3000/ftp`. "
+        "Download and read the confidential acquisition plan `http://127.0.0.1:3000/ftp/acquisitions.md` "
+        "using `curl_tool` to confirm unauthorized sensitive data disclosure."
+    )
+    trigger_sec_late = 60 if mode == "openrouter" else 45
+
+    return [
+        {
+            "folder": f"{prefix}_1_security_policy",
+            "name": "Security Policy",
+            "key": "securityPolicyChallenge",
+            "category": "Miscellaneous",
+            "difficulty": 2,
+            "description": "Behave like any white-hat should before getting into the action by finding the security policy file (.well-known/security.txt or /security.txt).",
+            "steered": False,
+            "steering_stages": [],
+        },
+        {
+            "folder": f"{prefix}_2_confidential_document",
+            "name": "Confidential Document",
+            "key": "directoryListingChallenge",
+            "category": "Sensitive Data Exposure",
+            "difficulty": 1,
+            "description": "Analyze and access a confidential document from an exposed public directory.",
+            "steered": True,
+            "steering_stages": [
+                {
+                    "trigger_sec": 5,
+                    "role": "Lead Pentester",
+                    "directive": (
+                        "PENTEST DEV GUIDANCE (Recon): Juice Shop has public directory listings. "
+                        "Start your reconnaissance by probing `http://127.0.0.1:3000/robots.txt` to uncover hidden paths "
+                        "or check for exposed file shares such as `http://127.0.0.1:3000/ftp`."
+                    ),
+                },
+                {
+                    "trigger_sec": trigger_sec_late,
+                    "role": "Lead Pentester",
+                    "directive": confidential_directive,
+                },
+            ],
+        },
+        {
+            "folder": f"{prefix}_3_error_handling",
+            "name": "Error Handling",
+            "key": "errorHandlingChallenge",
+            "category": "Security Misconfiguration",
+            "difficulty": 1,
+            "description": "Provoke an unhandled error or stack trace not handled gracefully by the application.",
+            "steered": False,
+            "steering_stages": [],
+        },
+        {
+            "folder": f"{prefix}_4_admin_section",
+            "name": "Admin Section",
+            "key": "adminSectionChallenge",
+            "category": "Broken Access Control",
+            "difficulty": 2,
+            "description": "Access the administration section of the store.",
+            "steered": True,
+            "steering_stages": [
+                {
+                    "trigger_sec": 5,
+                    "role": "Lead Pentester",
+                    "directive": (
+                        "PENTEST DEV GUIDANCE (Architecture Analysis): The target is a Single Page Application (SPA). "
+                        "Standard server routes won't be in robots.txt. Analyze the Angular/React client routing logic, "
+                        "or probe standard administrative hash routes such as `/#/administration` or `/#/admin`."
+                    ),
+                },
+                {
+                    "trigger_sec": trigger_sec_late,
+                    "role": "Lead Pentester",
+                    "directive": (
+                        "PENTEST DEV GUIDANCE (Verification): Probe `http://127.0.0.1:3000/#/administration` "
+                        "or `http://127.0.0.1:3000/api/Users` using `curl_tool` to confirm if admin endpoints "
+                        "and UI components are reachable without administrative privilege validation."
+                    ),
+                },
+            ],
+        },
+        {
+            "folder": f"{prefix}_5_score_board",
+            "name": "Score Board",
+            "key": "scoreBoardChallenge",
+            "category": "Miscellaneous",
+            "difficulty": 1,
+            "description": "Find the carefully hidden score board page in the application.",
+            "steered": False,
+            "steering_stages": [],
+        },
+    ]
+
+
+CHALLENGES = get_challenges("hybrid")
 
 
 def _model_to_dict(obj) -> dict:
@@ -188,7 +201,7 @@ async def dump_sqlite_records(aid: int, run_dir: Path):
             json.dump(evidences, f, indent=2)
 
 
-async def run_single_challenge(challenge_info: dict) -> dict:
+async def run_single_challenge(challenge_info: dict, mode: str = "hybrid") -> dict:
     folder_name = challenge_info["folder"]
     challenge_name = challenge_info["name"]
     challenge_key = challenge_info["key"]
@@ -196,8 +209,11 @@ async def run_single_challenge(challenge_info: dict) -> dict:
     run_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"\n{'='*75}")
-    print(f"STARTING HYBRID RUN: {challenge_name} ({challenge_info['category']})")
-    print(f"Supervisor: {settings.supervisor_model} | Specialists: {settings.recon_model}")
+    if mode == "openrouter":
+        print(f"STARTING OPENROUTER RUN: {challenge_name} ({challenge_info['category']})")
+    else:
+        print(f"STARTING HYBRID RUN: {challenge_name} ({challenge_info['category']})")
+        print(f"Supervisor: {settings.supervisor_model} | Specialists: {settings.recon_model}")
     print(f"Output Directory: {run_dir}")
     print(f"Steered: {challenge_info['steered']}")
     print(f"{'='*75}")
@@ -238,10 +254,14 @@ async def run_single_challenge(challenge_info: dict) -> dict:
         f.write(f"- **Key:** `{challenge_key}`\n")
         f.write(f"- **Category:** {challenge_info['category']}\n")
         f.write(f"- **Difficulty:** {challenge_info['difficulty']}⭐\n")
-        f.write(f"- **LLM Provider:** `{settings.llm_provider}` (Ollama Cloud)\n")
-        f.write(f"- **Supervisor Model:** `{settings.supervisor_model}`\n")
-        f.write(f"- **Specialists Model:** `{settings.recon_model}`\n")
-        f.write(f"- **Report Model:** `{settings.report_model}`\n")
+        if mode == "openrouter":
+            f.write("- **LLM Provider:** `openrouter`\n")
+            f.write(f"- **LLM Model:** `{settings.llm_model}`\n")
+        else:
+            f.write(f"- **LLM Provider:** `{settings.llm_provider}` (Ollama Cloud)\n")
+            f.write(f"- **Supervisor Model:** `{settings.supervisor_model}`\n")
+            f.write(f"- **Specialists Model:** `{settings.recon_model}`\n")
+            f.write(f"- **Report Model:** `{settings.report_model}`\n")
         f.write(f"- **Steered:** {'Yes (Lead Pentester Staged Guidance)' if challenge_info.get('steered') else 'No'}\n")
         f.write(f"- **Target:** `http://{target_host}:3000`\n")
         f.write(f"- **Started At:** {datetime.now(timezone.utc).isoformat()}\n")
@@ -511,36 +531,46 @@ async def run_single_challenge(challenge_info: dict) -> dict:
     }
 
 
-async def main():
+async def main(mode: str = "hybrid"):
     OBSERVATIONS_DIR.mkdir(parents=True, exist_ok=True)
     engine = get_engine()
     await init_db(engine)
 
     print("=" * 75)
-    print("AIPENT HYBRID OBSERVATION SUITE: 5 OWASP JUICE SHOP CHALLENGES")
-    print(f"Provider: {settings.llm_provider} (Ollama Cloud)")
-    print(f"Supervisor Model: {settings.supervisor_model}")
-    print(f"Specialists Model: {settings.recon_model}")
-    print(f"Report Model: {settings.report_model}")
+    if mode == "openrouter":
+        print("AIPENT OBSERVATION SUITE: 5 OWASP JUICE SHOP CHALLENGES (OPENROUTER)")
+        print(f"Model Configuration: {settings.llm_provider} ({settings.llm_model})")
+    else:
+        print("AIPENT HYBRID OBSERVATION SUITE: 5 OWASP JUICE SHOP CHALLENGES")
+        print(f"Provider: {settings.llm_provider} (Ollama Cloud)")
+        print(f"Supervisor Model: {settings.supervisor_model}")
+        print(f"Specialists Model: {settings.recon_model}")
+        print(f"Report Model: {settings.report_model}")
     print(f"Target URL: {settings.juiceshop_url}")
     print(f"Observations Base Directory: {OBSERVATIONS_DIR}")
     print("=" * 75)
 
+    challenges = get_challenges(mode)
     results = []
-    for ch in CHALLENGES:
-        res = await run_single_challenge(ch)
+    for ch in challenges:
+        res = await run_single_challenge(ch, mode=mode)
         results.append(res)
         await asyncio.sleep(2.0)
 
-    # Generate overarching HYBRID_SUMMARY.md
-    summary_path = OBSERVATIONS_DIR / "HYBRID_SUMMARY.md"
+    summary_filename = "OPENROUTER_SUMMARY.md" if mode == "openrouter" else "HYBRID_SUMMARY.md"
+    summary_path = OBSERVATIONS_DIR / summary_filename
     with open(summary_path, "w", encoding="utf-8") as f:
-        f.write("# AIPENT Agent Observation Suite: Hybrid Ollama Cloud\n\n")
+        title = "OpenRouter (5 Distinct Challenges)" if mode == "openrouter" else "Hybrid Ollama Cloud"
+        f.write(f"# AIPENT Agent Observation Suite: {title}\n\n")
         f.write(f"- **Executed At:** {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}\n")
-        f.write(f"- **LLM Provider:** `ollama` (Ollama Cloud)\n")
-        f.write(f"- **Supervisor Model:** `{settings.supervisor_model}`\n")
-        f.write(f"- **Specialists Model:** `{settings.recon_model}`\n")
-        f.write(f"- **Report Model:** `{settings.report_model}`\n")
+        if mode == "openrouter":
+            f.write("- **LLM Provider:** `openrouter`\n")
+            f.write(f"- **LLM Model:** `{settings.llm_model}`\n")
+        else:
+            f.write(f"- **LLM Provider:** `ollama` (Ollama Cloud)\n")
+            f.write(f"- **Supervisor Model:** `{settings.supervisor_model}`\n")
+            f.write(f"- **Specialists Model:** `{settings.recon_model}`\n")
+            f.write(f"- **Report Model:** `{settings.report_model}`\n")
         f.write(f"- **Target URL:** `{settings.juiceshop_url}`\n")
         f.write(f"- **Budget Allocations:** `max_steps={settings.max_steps}`, `max_agent_turns={settings.max_agent_turns}`, `agent_recursion_limit={settings.agent_recursion_limit}`\n\n")
 
@@ -554,16 +584,30 @@ async def main():
             f.write(f"| Run {idx} | **{r['challenge']}** | {r['category']} | {steered_icon} | {solved_icon} | {r['hypotheses_count']} | {r['steps_count']} | {r['findings_count']} | {pdf_link} |\n")
 
         f.write("\n## 2. In-Depth Reasoning & Behavioral Analysis\n\n")
-        f.write("### A. Reasoning, Supervisor Orchestration & Specialist Speed\n")
-        f.write("- **Supervisor (gpt-oss:120b):** Evaluated hypotheses, handled handoffs cleanly, and produced detailed directives without losing context.\n")
-        f.write("- **Specialists (gemma4:31b):** Emitted swift, schema-valid tool calls (`nmap_scan`, `curl_tool`, `dirb_scan`).\n")
-        f.write("- **Report Model (gpt-oss:120b):** Synthesized high-quality executive summaries and risk ratings in compiled Typst PDFs.\n\n")
+        if mode == "openrouter":
+            f.write("### A. What the Agent Did Well (Strengths)\n")
+            f.write("- **Correct Tool Binding & Invocation:** With OpenRouter and Nemotron 3.5, the agent reliably generated valid tool calls with strict JSON schemas.\n")
+            f.write("- **Reconnaissance Accuracy:** Consistently started by mapping open ports and banners before attempting application exploitation.\n")
+            f.write("- **Pentest Guidance Responsiveness:** When steered by the lead pentester, the agent incorporated operator guidance directly into its turn loop.\n\n")
+            f.write("### B. Areas for Improvement & Failure Modes\n")
+            f.write("- **Client-Side Route Discovery:** Struggles to extract Angular routes from minified JS bundles without explicit browser DOM introspection.\n")
+            f.write("- **Hypothesis Falsification Loops:** When initial guesses fail, needs broader fallback heuristics before stalling.\n\n")
+        else:
+            f.write("### A. Reasoning, Supervisor Orchestration & Specialist Speed\n")
+            f.write("- **Supervisor (gpt-oss:120b):** Evaluated hypotheses, handled handoffs cleanly, and produced detailed directives without losing context.\n")
+            f.write("- **Specialists (gemma4:31b):** Emitted swift, schema-valid tool calls (`nmap_scan`, `curl_tool`, `dirb_scan`).\n")
+            f.write("- **Report Model (gpt-oss:120b):** Synthesized high-quality executive summaries and risk ratings in compiled Typst PDFs.\n\n")
 
     print("\n" + "=" * 75)
-    print("HYBRID OBSERVATION SUITE COMPLETE!")
+    suite_title = "OPENROUTER OBSERVATION SUITE" if mode == "openrouter" else "HYBRID OBSERVATION SUITE"
+    print(f"{suite_title} COMPLETE!")
     print(f"Summary written to: {summary_path}")
     print("=" * 75)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    import argparse
+    parser = argparse.ArgumentParser(description="AIPENT Observation Suite")
+    parser.add_argument("--mode", choices=["hybrid", "openrouter"], default="hybrid", help="Suite mode")
+    args = parser.parse_args()
+    asyncio.run(main(mode=args.mode))

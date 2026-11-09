@@ -78,12 +78,12 @@ def sample_context() -> dict:
                 "evidence": [
                     {
                         "id": 1,
-                        "tool": "curl_tool",
+                        "tool": "curl_request",
                         "excerpt": "HTTP 500 syntax error in SQL statement",
                         "locator": {"url": "http://127.0.0.1/api/login"},
                     }
                 ],
-                "corroborating_tools": ["curl_tool"],
+                "corroborating_tools": ["curl_request"],
                 "narrative": None,
             },
             {
@@ -363,7 +363,7 @@ async def test_build_narrative_context(test_db):
         evidence = Evidence(
             finding_id=finding.id,
             excerpt="Syntax error in query",
-            locator={"tool": "curl_tool", "url": "http://127.0.0.1/login"},
+            locator={"tool": "curl_request", "url": "http://127.0.0.1/login"},
         )
         test_session.add(evidence)
 
@@ -391,7 +391,7 @@ async def test_build_narrative_context(test_db):
         assert context["assessment"]["id"] == assessment.id
         assert len(context["findings"]) == 1
         assert context["findings"][0]["cve"] == ["CVE-2022-0001"]
-        assert context["findings"][0]["corroborating_tools"] == ["curl_tool"]
+        assert context["findings"][0]["corroborating_tools"] == ["curl_request"]
         assert len(context["steps"]) == 1
         assert len(context["approvals"]) == 1
         assert context["approvals"][0]["decision"] == "rejected"

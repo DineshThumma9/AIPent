@@ -7,7 +7,7 @@ overridden without touching code:
     AIPENT_ACTION_POLICIES='{"sqlmap_scan":{"risk":"high","approve":true},"nmap_scan":{"risk":"low","approve":false}}'
 
 Keys are action names (recon_services, nmap_scan, nikto_scan, dirb_scan,
-zap_baseline, sqlmap_scan, curl_tool). Values:
+zap_baseline, sqlmap_scan, curl_request). Values:
 
 - risk: "low" | "medium" | "high"  (display only, for the UI)
 - approve: true  -> human must approve at the gate
@@ -44,7 +44,7 @@ DEFAULT_ACTION_POLICIES: dict[str, ActionPolicy] = {
     "nikto_scan": ActionPolicy(risk="low", approve=False),
     "dirb_scan": ActionPolicy(risk="low", approve=False),
     "zap_baseline": ActionPolicy(risk="medium", approve=True),
-    "curl_tool": ActionPolicy(risk="medium", approve=True),
+    "curl_request": ActionPolicy(risk="medium", approve=True),
     "sqlmap_scan": ActionPolicy(risk="high", approve=True),
     "hashcat_crack": ActionPolicy(risk="high", approve=True),
     "hash_identify": ActionPolicy(risk="low", approve=False),

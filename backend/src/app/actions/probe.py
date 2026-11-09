@@ -1,4 +1,4 @@
-"""curl_tool action: safe non-destructive HTTP request verification.
+"""curl_request action: HTTP request verification and inspection.
 
 Added to the closed ACTIONS catalogue so a human action gate binds to the exact
 argv (method + url + headers) before the network call happens. This action is
@@ -8,6 +8,7 @@ executed locally by httpx in the backend process (no container).
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -17,9 +18,9 @@ from pydantic import BaseModel, Field
 from app.adapters.base import EvidenceDraft, FindingDraft
 from app.domain.models import Severity, FindingStatus
 
-SAFE_METHODS = ("GET", "HEAD", "POST")
+SAFE_METHODS = ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
 MAX_TIMEOUT_S = 30
-PROBE_MARKER = "curl_tool"
+PROBE_MARKER = "curl_request"
 
 
 class ProbeResult(BaseModel):
@@ -46,12 +47,16 @@ def build_argv(
 ) -> list[str]:
     """Descriptor stored in step.argv so approval binds to these exact args.
 
-    Format: ["curl_tool", METHOD, URL, headers_json, expected_status, body]
+    Format: ["curl_request", METHOD, URL, headers_json, expected_status, body]
     """
     headers = headers or {}
+    import re
     if not url.startswith(("http://", "https://")):
         ports = getattr(assessment, "ports", None) or [3000]
-        url = f"http://{target}:{ports[0]}{url}"
+        clean_target = re.sub(r"^https?://", "", target).split("/")[0].split(":")[0]
+        url = f"http://{clean_target}:{ports[0]}{url}"
+    else:
+        url = re.sub(r"^(https?://)+", r"http://", url)
     return [
         PROBE_MARKER,
         method.upper(),
@@ -69,20 +74,22 @@ async def run_curl(
     body: str = "",
     expected_status: int = 200,
     timeout: int = 15,
+    follow_redirects: bool = True,
 ) -> ProbeResult:
-    """Execute the actual HTTP request (curl) and return the response snapshot.
-
-    The agent cannot mutate the target: DELETE/PUT/PATCH is placed behind the
-    executor and stripped before this function is called from a planned step.
-    """
+    """Execute the actual HTTP request (curl) and return the response snapshot."""
     import httpx
 
     method = method.upper()
     if method not in SAFE_METHODS:
         raise ValueError(f"Unsafe probe method not permitted: {method}")
 
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
-        request = client.build_request(method, url, headers=headers, content=body or None)
+    req_headers = dict(headers or {})
+    if body and body.strip().startswith("{") and body.strip().endswith("}"):
+        if not any(k.lower() == "content-type" for k in req_headers):
+            req_headers["Content-Type"] = "application/json"
+
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=follow_redirects) as client:
+        request = client.build_request(method, url, headers=req_headers, content=body or None)
         try:
             response = await client.send(request)
         except Exception as exc:  # noqa: BLE001 - the artifact records the failure
@@ -92,9 +99,8 @@ async def run_curl(
             )
         try:
             raw = response.text
-            import re
             # Strip verbose inline styles so HTML directory listings and payloads aren't masked
-            cleaned = re.sub(r"<style[^>]*>[\s\S]*?</style>", "", raw, flags=re.IGNORECASE)
+            cleaned = re.sub(r"<style[^>]*>[\s\S]*?</style>", "", raw[:32000], flags=re.IGNORECASE)
             body_digest = cleaned[:8000]
         except AttributeError:
             body_digest = ""
@@ -115,7 +121,7 @@ def parse(
 ) -> list[FindingDraft]:
     """Read the stored probe artifact and decide if a new finding is necessary.
 
-    curl_tool does not create findings automatically; instead the calling
+    curl_request does not create findings automatically; instead the calling
     skill's evaluate() consumes the stored descriptor. We emit a draft only for
     an explicitly recorded success/failure interesting enough to keep.
     """
@@ -151,7 +157,7 @@ def parse(
             status=FindingStatus.SUSPECTED,
             evidence=[
                 EvidenceDraft(
-                    locator={"tool": "curl_tool", "url": probe.get("url"), "http_status": code},
+                    locator={"tool": "curl_request", "url": probe.get("url"), "http_status": code},
                     excerpt=(probe.get("body_preview") or "")[:600],
                 )
             ],

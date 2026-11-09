@@ -24,11 +24,12 @@ registry:
     
   vulnify:
     name: vulnify
-    title: vulnify-mcp 
-    description: MCP for CVE findings
-    type: server 
-    image: Dockerfile.vulnify
-    longLived: true 
+    title: Vulnify CVE MCP
+    description: Grounded CVE intelligence catalog from mez-0/vulnify.
+    type: remote
+    remote:
+      url: "http://127.0.0.1:7457/"
+      transport_type: streamable-http 
   
   zap:
     name: zap
@@ -43,4 +44,17 @@ registry:
     secrets:
       - name: MCP_API_KEY
         env: MCP_API_KEY
-
+    
+  curl:
+    name: curl
+    title: Curl MCP Server
+    description: Full HTTP client for web penetration testing via calibress/curl-mcp.
+    type: remote
+    remote:
+      url: "http://127.0.0.1:7458/mcp"
+      transport_type: streamable-http
+    tools:
+      - name: curl_request
+        description: Make HTTP requests with custom methods, headers, and body inspection
+ 
+        

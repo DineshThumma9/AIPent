@@ -131,8 +131,12 @@ class RouteDecision(BaseModel):
     overrides_specialist: bool = False
     override_reason: str | None = Field(default=None, max_length=1000)
 
-    # Optional instruction for the next brief. Nudges role without a new graph node.
-    directive: str | None = Field(default=None, max_length=1500)
+    # Tactical instruction for the next specialist brief.
+    directive: str | None = Field(
+        default=None,
+        max_length=1500,
+        description="Tactical directive for the specialist: specify target endpoint, tool, payload/method, and expected observation.",
+    )
 
     # True when the supervisor believes the mission is ready for final review.
     report_ready: bool = False

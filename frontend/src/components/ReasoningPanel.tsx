@@ -1,4 +1,5 @@
 import type { EvidenceBoard } from '../lib/schemas'
+import { MarkdownText } from './MarkdownText'
 
 export function ReasoningPanel({
   board,
@@ -27,9 +28,9 @@ export function ReasoningPanel({
                 <span className="hypothesis-status">{h.status}</span>
                 <span className="mono">{Math.round(h.confidence * 100)}%</span>
               </div>
-              <p>{h.statement}</p>
+              <p><MarkdownText text={h.statement} inline /></p>
               <p className="hypothesis-falsifier">
-                <span className="mono">falsifier</span> {h.falsifier}
+                <span className="mono">falsifier</span> <MarkdownText text={h.falsifier} inline />
               </p>
               {h.evidence_ids.length > 0 && (
                 <p className="hypothesis-evidence mono">
@@ -50,7 +51,7 @@ export function ReasoningPanel({
             {board.decisions.slice(-8).reverse().map((d) => (
               <li key={d.id}>
                 <div className="mono">{d.id} · {d.action} · {d.target}</div>
-                <p>{d.observation || d.expected_observation || d.outcome}</p>
+                <p><MarkdownText text={d.observation || d.expected_observation || d.outcome || ''} inline /></p>
                 {d.would_falsify && (
                   <p className="mono">would falsify: {d.would_falsify}</p>
                 )}

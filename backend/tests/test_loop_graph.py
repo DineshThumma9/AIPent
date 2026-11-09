@@ -152,7 +152,7 @@ async def test_recon_discovery_validation_end_to_end_with_approval(engine, monke
             ev = Evidence(assessment_id=a_id, step_id=step.id, finding_id=f.id, category="vulnerability")
             session.add(ev)
 
-        elif action == "curl_tool":
+        elif action == "curl_request":
             # Probe evidence linking to the ZAP finding
             target_finding_id = created_finding_ids[-1]
             ev = Evidence(
@@ -160,7 +160,7 @@ async def test_recon_discovery_validation_end_to_end_with_approval(engine, monke
                 step_id=step.id,
                 finding_id=target_finding_id,
                 category="probe",
-                locator={"tool": "curl_tool", "http_status": 200, "finding_id": target_finding_id},
+                locator={"tool": "curl_request", "http_status": 200, "finding_id": target_finding_id},
             )
             session.add(ev)
 
@@ -229,12 +229,12 @@ async def test_recon_discovery_validation_end_to_end_with_approval(engine, monke
                 }],
             ),
             # --- VALIDATION ---
-            # Turn 5: call curl_tool to probe candidate finding #2
+            # Turn 5: call curl_request to probe candidate finding #2
             AIMessage(
                 content="Validating candidate finding #2 with safe probe.",
                 tool_calls=[{
                     "id": "curl_call_1",
-                    "name": "curl_tool",
+                    "name": "curl_request",
                     "args": {
                         "target": "127.0.0.1",
                         "rationale": "Verify login endpoint response.",
@@ -314,13 +314,13 @@ async def test_recon_discovery_validation_end_to_end_with_approval(engine, monke
         config=config,
     )
 
-    # Next pause: Discovery completed, handed off to Validation, Validation requested curl_tool -> PAUSES at approve gate
+    # Next pause: Discovery completed, handed off to Validation, Validation requested curl_request -> PAUSES at approve gate
     state = await graph.aget_state(config)
     assert state.next == ("approve",)
     pending_curl = state.tasks[0].interrupts[0].value
-    assert pending_curl["action"] == "curl_tool"
+    assert pending_curl["action"] == "curl_request"
 
-    # Resume with approval for curl_tool
+    # Resume with approval for curl_request
     await graph.ainvoke(
         Command(resume={"decision": "approved", "actor": "analyst", "reason": "Approved curl probe"}),
         config=config,
@@ -531,7 +531,7 @@ async def test_update_finding_status_evidence_guard(engine):
             assessment_id=aid,
             finding_id=fid,
             category="probe",
-            locator={"tool": "curl_tool", "http_status": 200},
+            locator={"tool": "curl_request", "http_status": 200},
         )
         session.add(ev)
         await session.commit()

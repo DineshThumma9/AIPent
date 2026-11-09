@@ -539,7 +539,7 @@ async def prepare_node(state: AssessmentState) -> Command:
                 params["ports"] = str(ports_val)
 
         action_name = spec.action or spec.name
-        if action_name == "curl_tool":
+        if action_name == "curl_request":
             probe_res = await session.execute(
                 select(Audit).where(
                     Audit.assessment_id == state["assessment_id"],
@@ -549,7 +549,7 @@ async def prepare_node(state: AssessmentState) -> Command:
             probe_events = [
                 e for e in probe_res.scalars().all()
                 if (e.payload or {}).get("run_id") == state["run_id"]
-                and (e.payload or {}).get("action") == "curl_tool"
+                and (e.payload or {}).get("action") == "curl_request"
             ]
             if len(probe_events) >= settings.max_validation_probes:
                 obs = error_observation(
@@ -1323,11 +1323,14 @@ async def report_node(state: AssessmentState) -> Command:
     assessment_id = state["assessment_id"]
     narrative = state.get("report_narrative")
     async with get_async_session_ctx() as session:
-        report_path = await generate_report(session, assessment_id, narrative=narrative)
         assessment = await session.get(Assessment, assessment_id)
         if assessment:
             assessment.status = AssessmentStatus.COMPLETED.value
             assessment.finished_at = utcnow()
+            await session.commit()
+        report_path = await generate_report(session, assessment_id, narrative=narrative)
+        assessment = await session.get(Assessment, assessment_id)
+        if assessment:
             assessment.report_path = str(report_path)
             await session.commit()
 

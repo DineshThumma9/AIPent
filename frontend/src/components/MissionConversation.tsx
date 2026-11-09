@@ -30,6 +30,7 @@ import {
   type ThreadEntry,
 } from '../lib/mission'
 import { SeverityMark, StatusMark } from './StatusMark'
+import { MarkdownText } from './MarkdownText'
 
 function RoleTag({ role }: { role: RoleName }) {
   return (
@@ -54,7 +55,9 @@ function OperatorTurn({
           {formatClock(entry.at)}
         </time>
       </header>
-      <p className="turn-text">{entry.text}</p>
+      <div className="turn-text">
+        <MarkdownText text={entry.text} />
+      </div>
     </article>
   )
 }
@@ -73,7 +76,9 @@ function AssistantTurn({
           {formatClock(entry.at)}
         </time>
       </header>
-      <p className="turn-text">{entry.text}</p>
+      <div className="turn-text">
+        <MarkdownText text={entry.text} />
+      </div>
     </article>
   )
 }
@@ -134,7 +139,9 @@ function HandoffTurn({ handoff }: { handoff: HandoffView }) {
         </time>
       </header>
 
-      <p className="turn-text">{handoff.summary}</p>
+      <div className="turn-text">
+        <MarkdownText text={handoff.summary} />
+      </div>
 
       {handoff.decisions.length > 0 && (
         <details className="turn-details">
@@ -169,7 +176,9 @@ function HandoffTurn({ handoff }: { handoff: HandoffView }) {
       </p>
 
       {handoff.needsInput && handoff.question && (
-        <p className="handoff-question">{handoff.question}</p>
+        <div className="handoff-question">
+          <MarkdownText text={handoff.question} />
+        </div>
       )}
     </article>
   )
@@ -270,7 +279,11 @@ function ApprovalCard({
             : 'The final digest is recorded on the approval.'}
         </p>
       ) : (
-        rationale && <p className="gate-why">{rationale}</p>
+        rationale && (
+          <div className="gate-why">
+            <MarkdownText text={rationale} />
+          </div>
+        )
       )}
 
       {hypothesisId && (

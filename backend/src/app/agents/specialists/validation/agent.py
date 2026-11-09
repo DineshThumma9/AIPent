@@ -1,6 +1,6 @@
-"""Validation specialist agent — LLM agent with validation tools (curl_tool, sqlmap).
+"""Validation specialist agent — LLM agent with validation tools (curl_request, sqlmap).
 
-The agent decides which candidate findings to validate with curl_tool,
+The agent decides which candidate findings to validate with curl_request,
 and whether sqlmap_scan is warranted. It returns verdicts and a handoff.
 """
 
@@ -77,7 +77,7 @@ async def agent_node(state: dict) -> Command[Literal["__end__"]]:
         f"Candidate findings from discovery:\n{candidates_summary}\n"
         f"Run ID: {run_id}\n"
         f"Mission: Test candidate findings with safe, controlled probes.\n"
-        f"Use curl_tool for candidates. Pass the candidate endpoint as "
+        f"Use curl_request for candidates. Pass the candidate endpoint as "
         f"params.path and the candidate id as params.finding_id. "
         f"Only use sqlmap_scan if you have strong evidence of SQL injection — "
         f"it requires human approval.\n"
@@ -114,7 +114,7 @@ async def agent_node(state: dict) -> Command[Literal["__end__"]]:
         steps = await step_repo.get_all(assessment_id)
         validation_steps = [
             s for s in steps
-            if s.action in ("curl_tool", "sqlmap_scan", "hashcat_crack")
+            if s.action in ("curl_request", "sqlmap_scan", "hashcat_crack")
         ]
 
     # Emit handoff.created audit event

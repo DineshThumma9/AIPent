@@ -23,6 +23,13 @@ from app.core.config import settings
 from app.core.log import get_logger
 from app.domain import risk
 from app.domain.models import Approval, Assessment, Audit, Evidence, Finding, FindingCve, Step
+from app.reporting.common import (
+    clean_endpoint as _clean_endpoint,
+    clean_finding_title as _clean_finding_title,
+    clean_text as _clean_text,
+    count_severities as _counts,
+    iso_timestamp as _iso,
+)
 
 log = get_logger("reporting.narrative")
 
@@ -150,10 +157,17 @@ Write for two audiences at once:
 - an executive who needs business impact, risk, and what to fix first;
 - an engineer who needs the observation, the inference, and the remediation.
 
+For methodology:
+- Describe the testing phases clearly with a concise introductory sentence followed by clean bullet points (- Phase/Tool: Action and target) for each major step.
+- Avoid cramped inline numbering like (1) or (2) or monolithic run-on text.
+
 For findings:
 - Provide detailed findings narrative objects in `findings` for priority findings (focus on confirmed, high, medium, or the top 8 findings).
 - For routine informational scanner notices (such as exposed static paths or header hints), omit them from the `findings` array and summarize their aggregate impact in `risk_overview`.
-- In each finding narrative, separate OBSERVED vs INFERRED.
+- In each finding narrative, separate OBSERVED vs INFERRED: cite the exact HTTP status, banner, response excerpt, or tool output that proved or supported the hypothesis.
+- In remediation, recommend specific defensive controls, secure headers, parameterization, or configuration directives rather than vague guidance.
+
+In recommendations, prioritize actionable engineering fixes by greatest risk reduction (addressing confirmed High/Critical vulnerabilities first).
 
 Mention rejected approvals, failed steps, timeouts, and open questions in the
 limitations section. A rejected action is not a finding; it is a coverage gap.
@@ -203,35 +217,6 @@ KNOWN_PLAINTEXT_PASSWORDS = {
 CREDENTIAL_CTX_PATTERN = re.compile(
     r"(?i)\b(password|passwd|pwd|credential|secret)s?(\s*[:=]\s*|\s+(?:was found to be|found to be|is|was)\s+)([\"']?)([\w!@#$%^&*()_+=-]+)\3",
 )
-
-
-def _iso(value: Any) -> str:
-    return value.isoformat() if value else ""
-
-
-def _clean_text(text: str | None) -> str:
-    if not text:
-        return ""
-    text = strip_html(text)
-    text = re.sub(r"^\[\d+\]\s*", "", text.strip())
-    text = re.sub(r"^/:\s*", "", text)
-    return text.strip()
-
-
-def _clean_endpoint(endpoint: str | None) -> str:
-    if not endpoint:
-        return ""
-    ep = endpoint.strip()
-    ep = re.sub(r"^(https?://)+", r"http://", ep)
-    ep = re.sub(r":(\d+):\1", r":\1", ep)
-    return ep
-
-
-def _counts(findings: list[Finding]) -> dict[str, int]:
-    counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
-    for finding in findings:
-        counts[finding.severity] = counts.get(finding.severity, 0) + 1
-    return counts
 
 
 def redact_credentials(text: str) -> str:
@@ -492,7 +477,7 @@ async def build_narrative_context(session: AsyncSession, assessment_id: int) -> 
         max_excerpt = 800 if idx < 10 else 200
         finding_items.append({
             "id": f_id,
-            "title": _clean_text(f.title),
+            "title": _clean_finding_title(f.title),
             "severity": f.severity,
             "cvss": f.cvss,
             "cve": f.cve or [],

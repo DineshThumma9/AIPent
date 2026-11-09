@@ -18,6 +18,7 @@ from app.adapters import hashcat, nikto, nmap, whatweb, zap
 from app.adapters.base import FindingDraft
 from app.core.config import settings
 from app.domain.models import Assessment
+import re 
 
 ARTIFACT_DIR = settings.artifacts_path
 
@@ -142,33 +143,15 @@ def _sqlmap_argv(
     ]
 
 
-def _curl_argv(
+def _curl_request_argv(
     assessment: Assessment,
     target: str,
-    _output: Path,
+    output: Path,
     params: dict[str, Any] | None = None,
 ) -> list[str]:
-    """Resolve the approved method/URL/headers for one safe HTTP probe (curl).
+    tool, arguments = mcp_tool_call("curl_request", assessment, target, params=params)
+    return ["mcp", tool, json.dumps(arguments, sort_keys=True)]
 
-    ``params.path`` is restricted to a path on the scoped target so the probe
-    cannot be pointed at a different host. ``params.finding_id`` is stored on
-    the approval detail, not in argv, so evidence can be linked after the run.
-    """
-    p = params or {}
-    method = str(p.get("method", "GET")).upper()
-    if method not in ("GET", "HEAD", "POST"):
-        method = "GET"
-    path = str(p.get("path") or "/")
-    if not path.startswith("/"):
-        path = "/" + path
-    url = f"http://{target}:{_web_port(assessment)}{path}"
-    headers = json.dumps(p.get("headers") or {}, sort_keys=True)
-    try:
-        expected = int(p.get("expected_status", 200))
-    except (TypeError, ValueError):
-        expected = 200
-    body = str(p.get("body") or "")
-    return ["curl_tool", method, url, headers, str(expected), body]
 
 
 def _whatweb_argv(
@@ -324,15 +307,22 @@ ACTIONS: dict[str, ActionSpec] = {
         build_argv=_dirb_argv,
         parse=lambda _text, _host, _port: [],
     ),
-    "curl_tool": ActionSpec(
-        name="curl_tool",
-        tool="curl",
+    "curl_request": ActionSpec(
+        name="curl_request",
+        tool="curl_request",
         suffix=".curl.json",
         output="file",
-        transport="http",
+        transport="mcp",
         ok_codes=(0,),
-        build_argv=_curl_argv,
+        build_argv=_curl_request_argv,
         parse=lambda _text, _host, _port: [],
+        param_hints={
+            "method": "HTTP method (GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD)",
+            "url": "Target URL or path (e.g. /rest/user/login)",
+            "headers": "Request headers dictionary",
+            "body": "Request body string or JSON",
+            "follow_redirects": "Whether to follow HTTP redirects (default true)",
+        },
     ),
     "hashcat_crack": ActionSpec(
         name="hashcat_crack",
@@ -440,6 +430,45 @@ def mcp_tool_call(
             "hash_type": hash_type,
             "wordlist": "/usr/share/wordlists/rockyou.txt",
         }
+    if action == "curl_request":
+        p = params or {}
+        method = str(p.get("method") or "GET").upper()
+        if method not in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}:
+            method = "GET"
+        raw_url = str(p.get("url") or p.get("path") or "/")
+        clean_target_host, port = _clean_host_and_port(target, _web_port(assessment))
+        if not raw_url.startswith(("http://", "https://")):
+            if not raw_url.startswith("/"):
+                raw_url = "/" + raw_url
+            url = f"http://{clean_target_host}:{port}{raw_url}"
+        else:
+            url = re.sub(r"^(https?://)+", r"http://", raw_url)
+        headers = dict(p.get("headers") or {})
+        raw_body = p.get("body")
+        if isinstance(raw_body, dict):
+            body = json.dumps(raw_body)
+            headers.setdefault("Content-Type", "application/json")
+        elif raw_body:
+            body = str(raw_body)
+            if body.strip().startswith("{") and body.strip().endswith("}") and not any(k.lower() == "content-type" for k in headers):
+                headers["Content-Type"] = "application/json"
+        else:
+            body = None
+
+        tool_args: dict[str, Any] = {
+            "url": url,
+            "method": method,
+            "follow_redirects": bool(p.get("follow_redirects", True)),
+        }
+        if headers:
+            tool_args["headers"] = headers
+        if body is not None:
+            tool_args["body"] = body
+        if "timeout_seconds" in p:
+            tool_args["timeout_seconds"] = int(p["timeout_seconds"])
+
+        return "curl_request", tool_args
+
     raise UnknownAction(action)
 
 
@@ -550,7 +579,7 @@ def inject_output_path(argv: list[str], output_path: str, spec: ActionSpec) -> l
                 result[idx + 1] = output_path
         except ValueError:
             result.extend(["-o", output_path])
-    elif spec.tool == "curl":
+    elif spec.tool in ("curl", "curl_request"):
         return result
     elif spec.tool == "whatweb":
         try:

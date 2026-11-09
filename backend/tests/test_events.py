@@ -88,3 +88,78 @@ def test_detail_includes_evidence_key(client):
     assessment = _create(client)
     detail = client.get(f"/api/assessments/{assessment['id']}").json()
     assert isinstance(detail["evidence"], list)
+
+
+def test_notifications_subscribe_notify_unsubscribe():
+    from app.core import notifications
+
+    wake = notifications.subscribe(42)
+    assert not wake.is_set()
+
+    notifications.notify(42)
+    assert wake.is_set()
+
+    wake.clear()
+    notifications.unsubscribe(42, wake)
+    notifications.notify(42)
+    assert not wake.is_set()
+
+
+def test_notifications_assessment_commit_wakes_listener(engine):
+    from app.core import notifications
+
+    async def run():
+        async with get_async_session_ctx() as session:
+            assessment = Assessment(title="Notify Test", targets=["127.0.0.1"], ports=[3000])
+            session.add(assessment)
+            await session.commit()
+            await session.refresh(assessment)
+            aid = assessment.id
+
+        wake = notifications.subscribe(aid)
+        try:
+            assert not wake.is_set()
+            async with get_async_session_ctx() as session:
+                loaded = await session.get(Assessment, aid)
+                assert loaded is not None
+                loaded.status = "awaiting_approval"
+                await session.commit()
+
+            assert wake.is_set()
+        finally:
+            notifications.unsubscribe(aid, wake)
+
+    asyncio.run(run())
+
+
+def test_notifications_child_commit_wakes_listener(engine):
+    from app.core import notifications
+    from app.domain.models import Step
+
+    async def run():
+        async with get_async_session_ctx() as session:
+            assessment = Assessment(title="Child Notify Test", targets=["127.0.0.1"], ports=[3000])
+            session.add(assessment)
+            await session.commit()
+            await session.refresh(assessment)
+            aid = assessment.id
+
+        wake = notifications.subscribe(aid)
+        try:
+            assert not wake.is_set()
+            async with get_async_session_ctx() as session:
+                step = Step(
+                    assessment_id=aid,
+                    seq=1,
+                    action="nmap_scan",
+                    rationale="Initial recon",
+                    status="running",
+                )
+                session.add(step)
+                await session.commit()
+
+            assert wake.is_set()
+        finally:
+            notifications.unsubscribe(aid, wake)
+
+    asyncio.run(run())

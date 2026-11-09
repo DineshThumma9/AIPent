@@ -120,7 +120,7 @@ async def observation_from_step(session: AsyncSession, step: Step) -> Observatio
             evidence_ids=evidence_ids,
             artifact=artifact_info,
             errors=[],
-            next_hint="Evaluate candidate findings for validation or probe them directly with curl_tool.",
+            next_hint="Evaluate candidate findings for validation or probe them directly with curl_request.",
         )
 
     if step.action == "zap_baseline":
@@ -143,7 +143,7 @@ async def observation_from_step(session: AsyncSession, step: Step) -> Observatio
             evidence_ids=evidence_ids,
             artifact=artifact_info,
             errors=[],
-            next_hint="ZAP alerts are candidates, not confirmed vulnerabilities. Form a hypothesis and probe with curl_tool.",
+            next_hint="ZAP alerts are candidates, not confirmed vulnerabilities. Form a hypothesis and probe with curl_request.",
         )
 
     if step.action == "dirb_scan":
@@ -169,21 +169,42 @@ async def observation_from_step(session: AsyncSession, step: Step) -> Observatio
             next_hint="Discovered paths may expose sensitive resources or APIs. Test endpoints for access control.",
         )
 
-    if step.action == "curl_tool":
+    if step.action == "curl_request":
         http_status = None
         body_excerpt = ""
         body_full = ""
+        headers: dict[str, Any] = {}
         from pathlib import Path
         if step.output_path and Path(step.output_path).exists():
             try:
-                import json
+                import json, re
                 p_data = json.loads(Path(step.output_path).read_text(encoding="utf-8", errors="replace"))
-                res = p_data.get("curl_result") or p_data.get("probe_result") or {}
-                http_status = res.get("status_code")
-                body_full = res.get("body_preview") or res.get("body") or ""
-                body_excerpt = body_full[:1000]
+
+                # 1. curl-mcp format: { ok, code, status, response: { status_code, headers, body } }
+                if "response" in p_data and isinstance(p_data["response"], dict):
+                    resp = p_data["response"]
+                    http_status = resp.get("status_code") or p_data.get("code")
+                    headers = resp.get("headers") or {}
+                    body_full = resp.get("body") or ""
+                # 2. probe fallback format
+                elif "curl_result" in p_data or "probe_result" in p_data:
+                    res = p_data.get("curl_result") or p_data.get("probe_result") or {}
+                    http_status = res.get("status_code")
+                    headers = res.get("headers") or {}
+                    body_full = res.get("body_preview") or res.get("body") or ""
+                else:
+                    http_status = p_data.get("code") or p_data.get("status_code")
+                    body_full = p_data.get("body") or ""
+
+                if isinstance(body_full, str):
+                    # Strip heavy inline styles so directory listings and API responses aren't masked
+                    cleaned = re.sub(r"<style[^>]*>[\s\S]*?</style>", "", body_full, flags=re.IGNORECASE)
+                    body_excerpt = cleaned[:1000]
+                else:
+                    body_excerpt = str(body_full)[:1000]
             except Exception:
                 pass
+
         status_part = f"HTTP {http_status}" if http_status is not None else "HTTP request succeeded"
         body_part = f" - excerpt: {body_excerpt!r}" if body_excerpt else ""
         summary_str = f"{status_part}{body_part}"
@@ -200,7 +221,8 @@ async def observation_from_step(session: AsyncSession, step: Step) -> Observatio
             artifact=artifact_info,
             facts={
                 "status_code": http_status,
-                "body_preview": body_full[:1000] if body_full else "",
+                "headers": headers,
+                "body_preview": body_excerpt,
             },
             errors=[],
             next_hint="Compare observed HTTP status and response against expected_observation and would_falsify.",

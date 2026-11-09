@@ -311,7 +311,12 @@ _catalog_instance: CveCatalog | None = None
 def get_cve_catalog(db_path: Path | str | None = None) -> CveCatalog:
     """Return singleton CveCatalog instance."""
     global _catalog_instance
-    if _catalog_instance is None or db_path is not None:
+    target_path = Path(db_path) if db_path else Path(settings.vulnify_db_path)
+    if (
+        _catalog_instance is None
+        or db_path is not None
+        or (_catalog_instance.db_path != target_path and target_path.exists())
+    ):
         _catalog_instance = CveCatalog(db_path)
     return _catalog_instance
 

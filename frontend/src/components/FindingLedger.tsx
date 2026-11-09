@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { formatClock, pad, shortHash } from '../lib/format'
 import type { Evidence, Finding } from '../lib/schemas'
 import { SeverityMark } from './StatusMark'
+import { MarkdownText } from './MarkdownText'
 
 const SEVERITY_ORDER: Record<string, number> = {
   critical: 0,
@@ -58,7 +59,11 @@ function FindingRow({
 
       {open && (
         <div className="finding-detail" id={`finding-${finding.id}`}>
-          {finding.description && <p>{finding.description}</p>}
+          {finding.description && (
+            <div className="finding-description">
+              <MarkdownText text={finding.description} />
+            </div>
+          )}
 
           <dl className="finding-facts">
             <div>
@@ -94,14 +99,14 @@ function FindingRow({
           </dl>
 
           {finding.impact && (
-            <p className="finding-note">
-              <span>Impact.</span> {finding.impact}
-            </p>
+            <div className="finding-note">
+              <span>Impact.</span> <MarkdownText text={finding.impact} inline />
+            </div>
           )}
           {finding.remediation && (
-            <p className="finding-note">
-              <span>Remediation.</span> {finding.remediation}
-            </p>
+            <div className="finding-note">
+              <span>Remediation.</span> <MarkdownText text={finding.remediation} inline />
+            </div>
           )}
 
           {evidence.length === 0 ? (

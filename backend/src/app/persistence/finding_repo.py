@@ -209,7 +209,7 @@ class FindingRepo(BaseRepo):
         """Update finding status with audit trail.
 
         CONFIRMED and FALSE_POSITIVE require at least one executed
-        curl_tool evidence row with a non-null http_status.
+        curl_request evidence row with a non-null http_status.
         """
         from app.agents.control import audit
 
@@ -226,16 +226,16 @@ class FindingRepo(BaseRepo):
             )
             evidence = list(evidence_result.scalars().all())
             executed = any(
-                (item.locator or {}).get("tool") == "curl_tool"
+                (item.locator or {}).get("tool") == "curl_request"
                 and (item.locator or {}).get("http_status") is not None
                 for item in evidence
             )
             if not executed:
                 return {
                     "error": (
-                        "verdict blocked: no executed curl_tool evidence is "
+                        "verdict blocked: no executed curl_request evidence is "
                         "linked to this finding. Queue requests with "
-                        "curl_tool(..., finding_id=...) and wait for the action "
+                        "curl_request(..., finding_id=...) and wait for the action "
                         "gate to execute them."
                     )
                 }

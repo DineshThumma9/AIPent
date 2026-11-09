@@ -122,12 +122,29 @@ class ZapArgs(ActionReasoning):
 
 
 class CurlArgs(ActionReasoning):
-    path: str = Field(default="/", description="Path on the scoped target, starting with /.")
-    method: Literal["GET", "HEAD", "POST"] = Field(default="GET", description="HTTP method.")
-    headers: dict[str, str] = Field(default_factory=dict, description="Request headers.")
-    body: str = Field(default="", description="Request body.")
+    path: str = Field(
+        default="/",
+        description="Path on the scoped target starting with / (e.g. '/api/Users', '/rest/user/login') or full URL.",
+    )
+    method: Literal["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] = Field(
+        default="GET",
+        description="HTTP method (GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS).",
+    )
+    headers: dict[str, str] = Field(
+        default_factory=dict,
+        description="Optional request headers dict (e.g. {'Content-Type': 'application/json', 'Authorization': 'Bearer ...'}).",
+    )
+    body: str | None = Field(
+        default=None,
+        description="Optional request body string (e.g. JSON string '{\"email\":\"admin@juice-sh.op\",\"password\":\"' or 1=1--\"}').",
+    )
+    follow_redirects: bool = Field(
+        default=True,
+        description="Follow HTTP redirects automatically (default true). Set false to capture redirect responses.",
+    )
     expected_status: int = Field(default=200, description="Expected HTTP response status code.")
     finding_id: int | None = Field(default=None, description="Candidate finding ID being probed.")
+
 
 
 class SqlmapArgs(ActionReasoning):
@@ -293,20 +310,19 @@ zap_baseline_tool = ToolSpec(
     param_fields=(),
 )
 
-curl_tool = ToolSpec(
-    name="curl_tool",
+curl_request_tool = ToolSpec(
+    name="curl_request",
     kind="action",
-    action="curl_tool",
+    action="curl_request",
     args_model=CurlArgs,
     description=(
-        "Send one safe HTTP request to a path on an in-scope target. "
-        "Use method, headers, body and expected_status to test one hypothesis. "
-        "The URL is built from the scoped target, so you cannot probe another host. "
-        "Returns status, selected headers and a body excerpt. "
-        "This action requires human approval."
+        "Send one HTTP request via curl-mcp. "
+        "Supports all HTTP methods (GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD), headers, body payloads, and redirect controls. "
+        "Returns status code, response headers, and body excerpt."
     ),
-    param_fields=("path", "method", "headers", "body", "expected_status", "finding_id"),
+    param_fields=("path", "method", "headers", "body", "expected_status", "follow_redirects", "finding_id"),
 )
+
 
 whatweb_tool = ToolSpec(
     name="whatweb",
@@ -363,7 +379,7 @@ update_finding_status_tool = ToolSpec(
     args_model=UpdateFindingStatusArgs,
     description=(
         "Record a validation verdict for one candidate finding. "
-        "confirmed and false_positive require at least one executed curl_tool "
+        "confirmed and false_positive require at least one executed curl_request "
         "evidence row linked to the finding. State the observed evidence and "
         "the inference separately."
     ),
@@ -394,7 +410,7 @@ ROLE_TOOL_SPECS: dict[str, list[ToolSpec]] = {
         handoff_tool,
     ],
     "discovery": [
-        curl_tool,
+        curl_request_tool,
         dirb_scan_tool,
         nikto_scan_tool,
         zap_baseline_tool,
@@ -406,7 +422,7 @@ ROLE_TOOL_SPECS: dict[str, list[ToolSpec]] = {
         handoff_tool,
     ],
     "validation": [
-        curl_tool,
+        curl_request_tool,
         sqlmap_scan_tool,
         hash_identify_tool,
         hashcat_crack_tool,

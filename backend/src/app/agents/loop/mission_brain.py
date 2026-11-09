@@ -94,16 +94,28 @@ async def build_mission_digest(
             .order_by(Step.id.desc())
             .limit(8)
         )
-        recent_steps = [
-            {
+        obs_map = {
+            o.get("step_id"): o
+            for o in state.get("observations", [])
+            if isinstance(o, dict) and o.get("step_id") is not None
+        }
+        recent_steps = []
+        for s in reversed(list(step_res.scalars().all())):
+            entry: dict[str, Any] = {
                 "id": s.id,
                 "action": s.action,
                 "target": s.target,
                 "status": s.status,
                 "error": s.error,
             }
-            for s in reversed(list(step_res.scalars().all()))
-        ]
+            obs = obs_map.get(s.id)
+            if obs:
+                if obs.get("summary"):
+                    entry["summary"] = obs["summary"][:300]
+                facts = obs.get("facts") or {}
+                if "status_code" in facts and facts["status_code"] is not None:
+                    entry["status_code"] = facts["status_code"]
+            recent_steps.append(entry)
 
     handoffs = state.get("handoffs", [])
     if state.get("last_handoff"):
@@ -240,10 +252,27 @@ async def run_supervisor_agent(
             return deterministic_safe_route({"turns": digest.budget.get("turns", {})}, digest)
 
     prompt = (
-        "You are the AIPENT Supervisor Mission Director.\n"
-        "Review the mission digest below and call RouteDecision to determine the next specialist role "
-        "('recon', 'discovery', 'validation', or 'review').\n\n"
-        f"MISSION DIGEST:\n{digest.model_dump_json(indent=2)}\n"
+        "You are the AIPENT Lead Penetration Tester and Mission Supervisor directing a multi-role security assessment.\n"
+        "Your team consists of three specialist roles:\n"
+        "- 'recon': Target discovery, port scanning, and service version identification.\n"
+        "- 'discovery': Web path fuzzing, endpoint enumeration, technology fingerprinting, and identifying candidate vulnerabilities.\n"
+        "- 'validation': Non-destructive verification of candidate findings, auth bypass testing, and discriminating exploit probes (e.g., using curl_request, sqlmap_scan).\n"
+        "- 'review': Final phase to assemble verified findings when testing is complete or budgets are reached.\n\n"
+        "MISSION STRATEGY & DECISION RULES:\n"
+        "1. If no ports/services are mapped, route to 'recon'.\n"
+        "2. If services are known but attack surface/endpoints are unexplored, route to 'discovery'.\n"
+        "3. If candidate vulnerabilities or unauthenticated endpoints exist, route to 'validation' to verify or falsify them.\n"
+        "4. If all discovered candidates have been validated or budgets are spent, route to 'review' with report_ready=True.\n"
+        "5. If a specialist failed, timed out, or repeated an action (see failure and recent_steps), you MUST intervene: "
+        "steer them away from the failing endpoint/tool and direct an alternative path.\n\n"
+        "TACTICAL DIRECTIVE REQUIREMENT:\n"
+        "Whenever next_role is NOT 'review', you MUST provide a concrete, tactical 'directive' field instructing the specialist:\n"
+        "- Specify the exact target endpoint or URL to test.\n"
+        "- Specify the exact tool (curl_request, dirb_scan, sqlmap_scan, etc.), HTTP method, headers, or test payload.\n"
+        "- Specify the hypothesis to test and what response (e.g. HTTP status, response body, reflection) confirms or refutes it.\n"
+        "- Emphasize what dead ends or past mistakes to avoid.\n\n"
+        f"MISSION DIGEST:\n{digest.model_dump_json(indent=2)}\n\n"
+        "Call RouteDecision with your next_role, detailed rationale, confidence score, and tactical directive."
     )
 
     # 1. Try native tool binding for RouteDecision

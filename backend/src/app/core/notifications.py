@@ -39,11 +39,14 @@ def notify(assessment_id: int) -> None:
         wake.set()
 
 
-@event.listens_for(Session, "before_flush")
-def _remember_touched_assessments(session: Session, _flush_context, _instances) -> None:
+@event.listens_for(Session, "after_flush")
+def _remember_touched_assessments(session: Session, _flush_context) -> None:
     touched = session.info.setdefault("aipent_notify_assessments", set())
-    for row in list(session.new) + list(session.dirty):
-        assessment_id = getattr(row, "assessment_id", None)
+    for row in list(session.new) + list(session.dirty) + list(session.deleted):
+        if getattr(row, "__tablename__", None) == "assessment":
+            assessment_id = getattr(row, "id", None)
+        else:
+            assessment_id = getattr(row, "assessment_id", None)
         if isinstance(assessment_id, int):
             touched.add(assessment_id)
 

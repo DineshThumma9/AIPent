@@ -288,7 +288,7 @@ async def execute_action(
     transport = (
         "mcp"
         if (
-            action not in ("curl_tool", "hashcat_crack")
+            action != "hashcat_crack"
             and settings.mcp_enabled
             and settings.mcp_transport == "gateway"
         )
@@ -320,13 +320,26 @@ async def execute_action(
 
     artifact = _artifact_dir(assessment_id) / f"{step.id}{spec.suffix}"
     try:
-        if action == "curl_tool":
-            text = await _run_curl(step, assessment)
+        if action == "curl_request":
+            result = await _run_gateway(action, assessment, target, step)
+            text = result.text
             step.exit_code = 0
             artifact.parent.mkdir(parents=True, exist_ok=True)
             artifact.write_text(text, encoding="utf-8")
             step.output_path = str(artifact)
             step.output_sha256 = hashlib.sha256(artifact.read_bytes()).hexdigest()
+            for call in result.calls:
+                _audit(
+                    session,
+                    assessment_id,
+                    "mcp.call",
+                    {
+                        "step_id": step.id,
+                        "action": action,
+                        "tool": call["tool"],
+                        "arguments": call["arguments"],
+                    },
+                )
         elif settings.mcp_enabled and settings.mcp_transport == "gateway":
             result = await _run_gateway(action, assessment, target, step)
             text = result.text
@@ -426,7 +439,7 @@ async def execute_action(
 
 
 async def _run_curl(step: Step, assessment: Assessment) -> str:
-    """Execute a curl_tool step locally and produce the artifact JSON.
+    """Execute a curl_request step locally and produce the artifact JSON.
 
     The agent-generated argv carries the exact method/url/headers/body the
     human action gate approved.
@@ -434,7 +447,7 @@ async def _run_curl(step: Step, assessment: Assessment) -> str:
     from app.actions.probe import run_curl
 
     if len(step.argv) < 5:
-        raise ValueError(f"curl_tool argv incomplete: {step.argv}")
+        raise ValueError(f"curl_request argv incomplete: {step.argv}")
 
     method = step.argv[1]
     url = step.argv[2]
@@ -476,6 +489,64 @@ async def _run_gateway(
     else:
         tool, arguments = mcp_tool_call(action, assessment, target)
     calls: list[dict] = []
+
+    if tool == "curl_request":
+        # 1. Docker MCP Gateway
+        try:
+            async with GatewayClient() as gateway:
+                text = await gateway.call(tool, arguments)
+                calls.append({"tool": tool, "arguments": arguments})
+                return MCPResult(text=text, calls=calls)
+        except Exception:
+            pass
+
+        # 2. Standalone curl-mcp daemon on port 7458
+        try:
+            from mcp.client.streamable_http import streamable_http_client
+            from mcp import ClientSession
+            import httpx
+            async with httpx.AsyncClient(timeout=15) as http_client:
+                async with streamable_http_client("http://127.0.0.1:7458/mcp", http_client=http_client) as (read, write):
+                    async with ClientSession(read, write) as session:
+                        await session.initialize()
+                        res = await session.call_tool("curl_request", arguments)
+                        text = res.content[0].text if res.content else "{}"
+                        calls.append({"tool": tool, "arguments": arguments})
+                        return MCPResult(text=text, calls=calls)
+        except Exception:
+            pass
+
+        # 3. In-process probe fallback
+        from app.actions.probe import run_curl
+        url = arguments.get("url") or f"http://{target}:{_web_port(assessment)}/"
+        method = arguments.get("method") or "GET"
+        headers = arguments.get("headers") or {}
+        body = arguments.get("body") or ""
+        probe = await run_curl(
+            method=method,
+            url=url,
+            headers=headers,
+            body=body,
+            timeout=arguments.get("timeout_seconds", 15),
+            follow_redirects=arguments.get("follow_redirects", True),
+        )
+        simulated_mcp = {
+            "ok": probe.status_code is not None and probe.status_code < 400,
+            "code": probe.status_code,
+            "status": "OK" if probe.status_code == 200 else str(probe.status_code),
+            "message": probe.error or "Executed via local HTTP probe fallback",
+            "request": {"url": url, "method": method, "body": body},
+            "response": {
+                "status_code": probe.status_code,
+                "headers": probe.headers,
+                "body": probe.body_preview,
+            },
+            "timing_ms": probe.elapsed_ms,
+        }
+        return MCPResult(
+            text=json.dumps(simulated_mcp, indent=2),
+            calls=[{"tool": "curl_local_fallback", "arguments": arguments}],
+        )
 
     async with GatewayClient() as gateway:
         if action == "zap_baseline":

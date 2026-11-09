@@ -1,6 +1,29 @@
 #let data = json("report-data.json")
-#set page(paper: "a4", margin: (x: 2cm, y: 2.2cm), numbering: "1")
-#set text(font: ("DejaVu Sans", "Liberation Sans"), size: 9.5pt)
+#set page(
+  paper: "a4",
+  margin: (x: 2cm, top: 2.4cm, bottom: 2.2cm),
+  header: context {
+    if counter(page).get().first() > 1 [
+      #grid(
+        columns: (1fr, 1fr),
+        align(left)[#text(size: 8pt, fill: luma(110))[AIPENT · Vulnerability Assessment Report]],
+        align(right)[#text(size: 8pt, fill: luma(110))[CONFIDENTIAL · Assessment \##data.assessment.id]]
+      )
+      #v(-2pt)
+      #line(length: 100%, stroke: 0.3pt + luma(200))
+    ]
+  },
+  footer: context [
+    #line(length: 100%, stroke: 0.3pt + luma(200))
+    #v(2pt)
+    #grid(
+      columns: (1fr, 1fr),
+      align(left)[#text(size: 8pt, fill: luma(120))[#data.assessment.title · #data.narrative_source]],
+      align(right)[#text(size: 8pt, fill: luma(120))[Page #counter(page).display() of #counter(page).final().first()]]
+    )
+  ]
+)
+#set text(font: ("IBM Plex Sans", "DejaVu Sans", "Liberation Sans"), size: 9.5pt)
 #set par(justify: true, leading: 0.65em)
 
 #show heading.where(level: 1): it => {
@@ -11,29 +34,71 @@
   v(4pt)
 }
 
+#let severity-badge(s) = {
+  let bg = luma(235)
+  let fg = luma(30)
+  let val = lower(str(s))
+  if val == "critical" { bg = rgb("#fde8e8"); fg = rgb("#9c1c1c") }
+  else if val == "high" { bg = rgb("#feecdc"); fg = rgb("#b43403") }
+  else if val == "medium" { bg = rgb("#fdf6b2"); fg = rgb("#723b13") }
+  else if val == "low" { bg = rgb("#e1effe"); fg = rgb("#1e429f") }
+  else if val == "info" { bg = rgb("#edf2f7"); fg = rgb("#4a5568") }
+  box(fill: bg, inset: (x: 5pt, y: 2.5pt), radius: 3pt)[#text(size: 7.5pt, weight: "bold", fill: fg)[#upper(val)]]
+}
+
+#let status-badge(st) = {
+  let bg = luma(235)
+  let fg = luma(40)
+  let val = lower(str(st))
+  if val == "confirmed" or val == "succeeded" or val == "approved" or val == "completed" { bg = rgb("#def7ec"); fg = rgb("#03543f") }
+  else if val == "suspected" or val == "running" or val == "pending" or val == "reporting" { bg = rgb("#fef08a"); fg = rgb("#713f12") }
+  else if val == "failed" or val == "rejected" { bg = rgb("#fee2e2"); fg = rgb("#991b1b") }
+  else if val == "timeout" { bg = rgb("#ffedd5"); fg = rgb("#9a3412") }
+  box(fill: bg, inset: (x: 4.5pt, y: 2pt), radius: 2.5pt)[#text(size: 7.5pt, weight: "bold", fill: fg)[#val]]
+}
+
 #align(center)[
-  #text(size: 23pt, weight: "bold")[#data.assessment.title]
+  #text(size: 22pt, weight: "bold")[#data.assessment.title]
+  #v(3pt)
+  #text(size: 10pt, fill: luma(80), weight: "medium")[Authorized Vulnerability Assessment Report]
   #v(4pt)
-  #text(size: 10pt, fill: luma(90))[Authorized vulnerability assessment report]
-  #v(2pt)
-  #text(size: 10pt, fill: luma(90))[AIPENT · assessment #data.assessment.id · #data.assessment.status]
+  #box(fill: luma(248), radius: 4pt, inset: (x: 8pt, y: 3.5pt), stroke: 0.5pt + luma(220))[
+    #text(size: 8.5pt, fill: luma(70))[
+      *AIPENT* #h(5pt)·#h(5pt) Assessment \##data.assessment.id #h(5pt)·#h(5pt) #status-badge(data.assessment.status)
+    ]
+  ]
 ]
 
-#v(10pt)
+#v(8pt)
 
 = Scope and rules of engagement
 
 #table(
-  columns: (1fr, 2fr),
-  inset: 5pt,
+  columns: (1fr, 2.5fr),
+  inset: 5.5pt,
   stroke: 0.4pt + luma(200),
   [*Targets*], [#data.assessment.targets.join(", ")],
   [*Ports*], [#data.assessment.ports.map(str).join(", ")],
   [*Exclusions*], [#if data.assessment.exclusions.len() == 0 [none] else [#data.assessment.exclusions.join(", ")]],
-  [*Requested by*], [#data.assessment.request],
-  [*Opened*], [#data.assessment.created_at],
-  [*Finished*], [#data.assessment.finished_at],
+  [*Execution Mode*], [#if data.mcp_only [Docker MCP Gateway (Strict)] else if data.mcp [Mixed Local / Docker MCP] else [Standard Direct CLI]],
+  [*Started*], [#if "created_at_human" in data.assessment and data.assessment.created_at_human != "" [#data.assessment.created_at_human] else [#data.assessment.created_at]],
+  [*Finished*], [#if "finished_at_human" in data.assessment and data.assessment.finished_at_human != "" [#data.assessment.finished_at_human] else if data.assessment.finished_at != "" [#data.assessment.finished_at] else [In Progress]],
 )
+
+#if data.assessment.request != "" and data.assessment.request != "(no additional request text)" [
+  #v(5pt)
+  #rect(
+    width: 100%,
+    fill: rgb("#f8fafc"),
+    stroke: (left: 3pt + rgb("#0284c7"), rest: 0.4pt + rgb("#e2e8f0")),
+    radius: (right: 3pt),
+    inset: (x: 9pt, y: 7pt),
+  )[
+    #text(size: 7.5pt, weight: "bold", fill: rgb("#0369a1"))[ENGAGEMENT OBJECTIVE & SCOPE DIRECTIVE]\
+    #v(2.5pt)
+    #text(size: 8.5pt, fill: rgb("#1e293b"))[#data.assessment.request]
+  ]
+]
 
 #v(6pt)
 #text(size: 8.5pt, fill: luma(90))[
@@ -56,7 +121,19 @@
 #if data.narrative.methodology != "" [
   = Methodology
 
-  #data.narrative.methodology
+  #if "methodology_blocks" in data.narrative and data.narrative.methodology_blocks.len() > 0 [
+    #for b in data.narrative.methodology_blocks [
+      #if b.kind == "item" [
+        - #b.text
+      ] else [
+        #v(1.5pt)
+        #b.text
+        #v(1.5pt)
+      ]
+    ]
+  ] else [
+    #data.narrative.methodology
+  ]
 ]
 
 #if data.narrative.risk_overview != "" [
@@ -84,15 +161,34 @@
   ]
 ]
 
-#v(6pt)
-#table(
+#v(8pt)
+#grid(
   columns: (1fr, 1fr, 1fr, 1fr),
-  inset: 5pt,
-  stroke: 0.4pt + luma(200),
-  [*Critical*], [#data.risk.counts.critical],
-  [*High*], [#data.risk.counts.high],
-  [*Medium*], [#data.risk.counts.medium],
-  [*Low / info*], [#(data.risk.counts.low + data.risk.counts.info)],
+  gutter: 6pt,
+  rect(fill: rgb("#fde8e8"), inset: 6pt, radius: 3pt, width: 100%)[
+    #align(center)[
+      #text(size: 8pt, weight: "bold", fill: rgb("#9c1c1c"))[CRITICAL]\
+      #text(size: 14pt, weight: "bold", fill: rgb("#9c1c1c"))[#data.risk.counts.critical]
+    ]
+  ],
+  rect(fill: rgb("#feecdc"), inset: 6pt, radius: 3pt, width: 100%)[
+    #align(center)[
+      #text(size: 8pt, weight: "bold", fill: rgb("#b43403"))[HIGH]\
+      #text(size: 14pt, weight: "bold", fill: rgb("#b43403"))[#data.risk.counts.high]
+    ]
+  ],
+  rect(fill: rgb("#fdf6b2"), inset: 6pt, radius: 3pt, width: 100%)[
+    #align(center)[
+      #text(size: 8pt, weight: "bold", fill: rgb("#723b13"))[MEDIUM]\
+      #text(size: 14pt, weight: "bold", fill: rgb("#723b13"))[#data.risk.counts.medium]
+    ]
+  ],
+  rect(fill: rgb("#e1effe"), inset: 6pt, radius: 3pt, width: 100%)[
+    #align(center)[
+      #text(size: 8pt, weight: "bold", fill: rgb("#1e429f"))[LOW / INFO]\
+      #text(size: 14pt, weight: "bold", fill: rgb("#1e429f"))[#(data.risk.counts.low + data.risk.counts.info)]
+    ]
+  ],
 )
 
 = Tool execution
@@ -103,7 +199,7 @@
   stroke: 0.4pt + luma(200),
   [*No.*], [*Action*], [*Target*], [*Status*], [*Exit*],
   ..data.steps.map(s => (
-    [#s.seq], [#s.action], [#s.target], [#s.status], [#s.exit_code],
+    [#s.seq], [#s.action], [#s.target], [#status-badge(s.status)], [#s.exit_code],
   )).flatten(),
 )
 
@@ -125,8 +221,8 @@
       columns: (1fr, 1fr, 1fr, 1fr),
       inset: 5pt,
       stroke: 0.4pt + luma(200),
-      [*Severity*], [#f.severity], [*Risk*], [#f.score / 10],
-      [*Confidence*], [#f.confidence], [*Status*], [#f.status],
+      [*Severity*], [#severity-badge(f.severity)], [*Risk*], [#f.score / 10],
+      [*Confidence*], [#f.confidence], [*Status*], [#status-badge(f.status)],
       [*Asset*], [#f.asset], [*Endpoint*], [#f.endpoint],
       [*CVE*], [#if f.cve.len() == 0 [-] else [#f.cve.join(", ")]], [*CWE*], [#if f.cwe.len() == 0 [-] else [#f.cwe.join(", ")]],
     )
@@ -186,7 +282,7 @@
   [*Gate / action*], [*Decision*], [*Actor*], [*Reason*],
   ..data.approvals.map(a => (
     [#a.action],
-    [#a.decision],
+    [#status-badge(a.decision)],
     [#a.actor],
     [#a.reason],
   )).flatten(),

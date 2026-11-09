@@ -1,9 +1,9 @@
 {
   "probes": [
-    {"action": "curl_tool", "target": "127.0.0.1", "method": "GET", "path": "/search?q=hello", "headers": {}, "expected_status": 200, "rationale": "Baseline unmodified request for q"},
-    {"action": "curl_tool", "target": "127.0.0.1", "method": "GET", "path": "/search?q=hello' AND 1=1--", "headers": {}, "expected_status": 200, "rationale": "true-probe boolean differential on q (non-destructive)"},
-    {"action": "curl_tool", "target": "127.0.0.1", "method": "GET", "path": "/search?q=hello' AND 1=2--", "headers": {}, "expected_status": 200, "rationale": "false-probe boolean differential on q (non-destructive)"},
-    {"action": "curl_tool", "target": "127.0.0.1", "method": "GET", "path": "/search?q=hello'", "headers": {}, "expected_status": 200, "rationale": "Illicit DB syntax error reflection on q"}
+    {"action": "curl_request", "target": "127.0.0.1", "method": "GET", "path": "/search?q=hello", "headers": {}, "expected_status": 200, "rationale": "Baseline unmodified request for q"},
+    {"action": "curl_request", "target": "127.0.0.1", "method": "GET", "path": "/search?q=hello' AND 1=1--", "headers": {}, "expected_status": 200, "rationale": "true-probe boolean differential on q (non-destructive)"},
+    {"action": "curl_request", "target": "127.0.0.1", "method": "GET", "path": "/search?q=hello' AND 1=2--", "headers": {}, "expected_status": 200, "rationale": "false-probe boolean differential on q (non-destructive)"},
+    {"action": "curl_request", "target": "127.0.0.1", "method": "GET", "path": "/search?q=hello'", "headers": {}, "expected_status": 200, "rationale": "Illicit DB syntax error reflection on q"}
   ],
   "reasoning": "Candidate 0: GET /search param=q — 4 probes generated (safe, non-destructive)"
 }

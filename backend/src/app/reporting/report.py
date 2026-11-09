@@ -18,59 +18,22 @@ from sqlmodel import col, select
 import typst
 from app.domain import risk
 from app.actions import ACTIONS, ARTIFACT_DIR
-from app.adapters.base import strip_html
 from app.core.log import get_logger
 from app.domain.models import Approval, Assessment, Audit, Evidence, Finding, FindingCve, Step
+from app.reporting.common import (
+    clean_endpoint as _clean_endpoint,
+    clean_finding_title as _clean_finding_title,
+    clean_text as _clean_text,
+    count_severities as _counts,
+    format_human_timestamp,
+    iso_timestamp as _iso,
+    parse_methodology_blocks,
+)
 from app.reporting.narrative import ReportNarrative
 
 log = get_logger("report")
 
 TEMPLATE = Path(__file__).resolve().parent / "templates" / "report.typ"
-
-
-def _iso(value) -> str:
-    return value.isoformat() if value else ""
-
-
-def _counts(findings: list[Finding]) -> dict[str, int]:
-    counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
-    for finding in findings:
-        counts[finding.severity] = counts.get(finding.severity, 0) + 1
-    return counts
-
-
-def _clean_text(text: str | None) -> str:
-    if not text:
-        return ""
-    text = strip_html(text)
-    # Strip bracketed test IDs like [007303]
-    text = re.sub(r"^\[\d+\]\s*", "", text.strip())
-    # Strip leading /: or /path: prefixes if bare
-    text = re.sub(r"^/:\s*", "", text)
-    return text.strip()
-
-
-def _clean_endpoint(endpoint: str | None) -> str:
-    if not endpoint:
-        return ""
-    ep = endpoint.strip()
-    # Normalize double scheme like http://http://
-    ep = re.sub(r"^(https?://)+", r"http://", ep)
-    # Normalize double ports like :3000:3000
-    ep = re.sub(r":(\d+):\1", r":\1", ep)
-    return ep
-
-
-def _clean_finding_title(title: str | None) -> str:
-    cleaned = _clean_text(title)
-    if not cleaned:
-        return ""
-    m_interesting = re.match(r"^([^:]+):\s*This might be interesting\.?$", cleaned, re.IGNORECASE)
-    if m_interesting:
-        return f"Potentially Sensitive File / Path: {m_interesting.group(1).strip()}"
-    if "robots.txt" in cleaned.lower() and ("manual" in cleaned.lower() or "entry" in cleaned.lower()):
-        return "Robots.txt Discloses Potentially Sensitive Entries"
-    return cleaned
 
 
 ACTION_TITLES = {
@@ -79,7 +42,8 @@ ACTION_TITLES = {
     "dirb_scan": "Directory Enumeration (Dirb)",
     "nikto_scan": "Web Server Scan (Nikto)",
     "zap_baseline": "Baseline Web Audit (ZAP)",
-    "curl_tool": "HTTP Verification Probe",
+    "curl_tool": "HTTP Verification Probe (curl)",
+    "curl_request": "HTTP Verification Probe (curl-mcp)",
     "sqlmap_scan": "SQL Injection Test (Sqlmap)",
     "hashcat_crack": "Offline Hash Analysis (Hashcat)",
     "sslscan": "TLS/SSL Configuration Scan",
@@ -210,6 +174,21 @@ async def build_report_data(
     from app.intel.cve import cve_snapshot_label
     cve_snapshot = cve_snapshot_label()
 
+    narrative_dict = (
+        narrative.model_dump()
+        if narrative
+        else {
+            "executive_summary": "",
+            "methodology": "",
+            "risk_overview": "",
+            "findings": [],
+            "limitations": "",
+            "recommendations": [],
+            "conclusion": "",
+        }
+    )
+    narrative_dict["methodology_blocks"] = parse_methodology_blocks(narrative_dict.get("methodology"))
+
     return {
         "assessment": {
             "id": assessment_id,
@@ -221,6 +200,8 @@ async def build_report_data(
             "status": assessment.status,
             "created_at": _iso(assessment.created_at),
             "finished_at": _iso(assessment.finished_at),
+            "created_at_human": format_human_timestamp(assessment.created_at),
+            "finished_at_human": format_human_timestamp(assessment.finished_at),
         },
         "risk": {
             "score": risk_summary["score"],
@@ -265,19 +246,7 @@ async def build_report_data(
             }
             for approval in approvals
         ],
-        "narrative": (
-            narrative.model_dump()
-            if narrative
-            else {
-                "executive_summary": "",
-                "methodology": "",
-                "risk_overview": "",
-                "findings": [],
-                "limitations": "",
-                "recommendations": [],
-                "conclusion": "",
-            }
-        ),
+        "narrative": narrative_dict,
         "narrative_source": "llm" if narrative else "evidence-only",
     }
 
@@ -290,6 +259,21 @@ async def generate_report(
     assessment = await session.get(Assessment, assessment_id)
     if assessment is None:
         raise LookupError(f"assessment {assessment_id} not found")
+
+    from app.domain.models import AssessmentStatus, utcnow
+
+    # When generating final report, ensure finished_at is stamped and in-progress statuses finalized
+    if assessment.finished_at is None:
+        assessment.finished_at = utcnow()
+    if assessment.status in (
+        AssessmentStatus.RUNNING.value,
+        AssessmentStatus.REPORTING.value,
+        AssessmentStatus.PLANNING.value,
+        AssessmentStatus.AWAITING_APPROVAL.value,
+    ):
+        assessment.status = AssessmentStatus.COMPLETED.value
+    await session.commit()
+    await session.refresh(assessment)
 
     if isinstance(narrative, dict):
         try:
