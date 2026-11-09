@@ -52,3 +52,5 @@ pro.txt
 vulnify.db*
 observations/
 data/
+backend/src/app/skills 
+backend/src/app/agents/specialists
