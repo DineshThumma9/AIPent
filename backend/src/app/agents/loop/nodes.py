@@ -48,6 +48,7 @@ from app.core.config import settings
 from app.core.db import get_async_session_ctx
 from app.core.log import get_logger
 from app.core.policy import policy_for
+from app.domain.risk import summarize
 
 logger = get_logger("agent.nodes")
 from app.domain.models import (
@@ -1185,6 +1186,35 @@ async def review_node(state: AssessmentState) -> Command:
     async with get_async_session_ctx() as session:
         assessment = await session.get(Assessment, assessment_id)
         board = await build_evidence_board(session, assessment_id)
+        findings = await FindingRepo(session).get_all(assessment_id, limit=10000)
+        summary = summarize(findings)
+        # The desk renders approval cards from this table. Without a row the
+        # final review gate has no UI, the run waits forever, and no report is
+        # written. Reuse an existing pending row so a replay cannot stack gates.
+        result = await session.execute(
+            select(Approval)
+            .where(
+                Approval.assessment_id == assessment_id,
+                Approval.action == "final_review",
+                Approval.decision == Decision.PENDING.value,
+            )
+            .order_by(Approval.id)
+        )
+        approval = result.scalars().first()
+        if approval is None:
+            approval = await StepRepo(session).create_approval(
+                assessment_id=assessment_id,
+                action="final_review",
+                argv=[],
+                detail={
+                    "risk_score": summary["score"],
+                    "counts": summary["counts"],
+                    "findings": len(findings),
+                    "role": "review",
+                    "source": "three_role_loop",
+                },
+            )
+        approval_id = approval.id
         if assessment:
             assessment.status = AssessmentStatus.AWAITING_APPROVAL.value
             await session.commit()
@@ -1192,6 +1222,7 @@ async def review_node(state: AssessmentState) -> Command:
     decision = interrupt({
         "gate": "review",
         "role": "review",
+        "approval_id": approval_id,
         "evidence_board": board.model_dump(),
         "message": "Approve the report, or reject to stop without a report.",
     })
@@ -1201,6 +1232,27 @@ async def review_node(state: AssessmentState) -> Command:
 
     async with get_async_session_ctx() as session:
         assessment = await session.get(Assessment, assessment_id)
+        # Close the card so the thread shows the verdict and cannot be clicked
+        # again. Resume validation only binds action gates, so the row is
+        # display state here rather than the approval mechanism.
+        result = await session.execute(
+            select(Approval)
+            .where(
+                Approval.assessment_id == assessment_id,
+                Approval.action == "final_review",
+                Approval.decision == Decision.PENDING.value,
+            )
+            .order_by(Approval.id)
+        )
+        pending = result.scalars().first()
+        if pending is not None:
+            pending.decision = (
+                Decision.APPROVED.value if approved else Decision.REJECTED.value
+            )
+            pending.actor = str(decision_dict.get("actor") or "operator")
+            pending.reason = str(decision_dict.get("reason") or "") or None
+            pending.decided_at = utcnow()
+            pending.outcome = "review " + ("accepted" if approved else "rejected")
         if assessment:
             assessment.status = AssessmentStatus.RUNNING.value if approved else AssessmentStatus.CANCELLED.value
             await session.commit()

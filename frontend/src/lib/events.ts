@@ -118,7 +118,15 @@ export function applyEvent(
 
     case 'status':
       return detail
-        ? { ...detail, status: event.data.status, finished_at: event.data.finished_at }
+        ? {
+            ...detail,
+            status: event.data.status,
+            finished_at: event.data.finished_at,
+            // gate_open is derived by the backend from this status. Keep the
+            // local copy in step so a reconnect-less status change does not
+            // leave an approval gate closed forever.
+            gate_open: event.data.status === 'awaiting_approval',
+          }
         : detail
 
     case 'step':
@@ -140,22 +148,27 @@ export function applyEvent(
       }
     }
 
-    case 'approval':
-      return detail
-        ? {
-            ...detail,
-            approvals: upsert(detail.approvals, event.data.approval).sort(
-              (a, b) => b.id - a.id,
-            ),
-          }
-        : detail
+    case 'approval': {
+      if (!detail) return detail
+      const approval = event.data.approval
+      return {
+        ...detail,
+        approvals: upsert(detail.approvals, approval).sort((a, b) => b.id - a.id),
+        // A decided approval closes the gate immediately; a pending one only
+        // opens it once the status event confirms the run is waiting.
+        gate_open:
+          approval.decision === 'pending'
+            ? detail.gate_open || detail.status === 'awaiting_approval'
+            : false,
+      }
+    }
 
     case 'audit': {
       if (!detail) return detail
       if (detail.audit.some((row) => row.id === event.data.event.id)) return detail
       return {
         ...detail,
-        audit: [event.data.event, ...detail.audit].slice(0, 100),
+        audit: [event.data.event, ...detail.audit].slice(0, 1000),
       }
     }
 

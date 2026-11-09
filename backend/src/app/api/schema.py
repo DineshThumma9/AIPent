@@ -114,4 +114,5 @@ class AssessmentDetail(BaseModel):
     messages: list[MessageOut] = Field(default_factory=list)
     gate_open: bool = False
     active_role: str | None = None
+    run_id: str | None = None
     reasoning: EvidenceBoard = Field(default_factory=EvidenceBoard)

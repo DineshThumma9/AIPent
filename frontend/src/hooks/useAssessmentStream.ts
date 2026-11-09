@@ -59,6 +59,7 @@ function reducer(state: State, action: Action): State {
           ...state,
           connection: 'live',
           lastEventAt: Date.now(),
+          error: null,
         }
       }
 
@@ -68,6 +69,7 @@ function reducer(state: State, action: Action): State {
         detail,
         connection: 'live',
         lastEventAt: Date.now(),
+        error: null,
         recent: [
           event,
           ...state.recent.filter((item) => item.type !== 'heartbeat'),
@@ -113,8 +115,9 @@ export function useAssessmentStream(assessmentId: number | null) {
       .catch((cause: unknown) => {
         if (disposed) return
         const message = cause instanceof Error ? cause.message : String(cause)
+        // A failed REST prefetch must not tear down a live SSE stream. The
+        // first snapshot replays the same detail and clears this error.
         dispatch({ kind: 'error', message })
-        source.close()
       })
 
     const handleNamed = (name: string, raw: MessageEvent) => {

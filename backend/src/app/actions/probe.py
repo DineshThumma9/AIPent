@@ -91,7 +91,11 @@ async def run_curl(
                 status_code=None, error=str(exc)[:300],
             )
         try:
-            body_digest = response.text[:4000]
+            raw = response.text
+            import re
+            # Strip verbose inline styles so HTML directory listings and payloads aren't masked
+            cleaned = re.sub(r"<style[^>]*>[\s\S]*?</style>", "", raw, flags=re.IGNORECASE)
+            body_digest = cleaned[:8000]
         except AttributeError:
             body_digest = ""
         return ProbeResult(

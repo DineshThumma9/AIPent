@@ -89,6 +89,7 @@ describe('Phase 8 Theme and UI Tests', () => {
       },
       gate_open: false,
       active_role: null,
+      run_id: null,
     }
 
     const text = briefText(dummyDetail)

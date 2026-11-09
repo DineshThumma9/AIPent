@@ -492,6 +492,34 @@ function NoteTurn({
   )
 }
 
+function StepTurn({
+  entry,
+}: {
+  entry: Extract<ThreadEntry, { kind: 'step' }>
+}) {
+  const step = entry.step
+  const failed =
+    step.status === 'failed' ||
+    step.status === 'timeout' ||
+    step.status === 'blocked'
+  const status = step.status === 'running' ? 'running' : step.status
+  const exit = step.exit_code !== null ? ` · exit ${step.exit_code}` : ''
+
+  return (
+    <p className="turn-note turn-step" data-error={failed}>
+      <time className="mono" dateTime={entry.at}>
+        {formatClock(entry.at)}
+      </time>
+      <span>
+        <span className="mono">{actionLabel(step.action)}</span>
+        {step.target ? ` on ${step.target}` : ''} · {status}
+        {exit}
+        {step.error ? ` — ${step.error}` : ''}
+      </span>
+    </p>
+  )
+}
+
 function suggestionsFor(mission: MissionView): string[] {
   if (mission.pendingApproval) {
     return ['Explain this action', 'What is left?', 'What happens if I reject?']
@@ -705,6 +733,25 @@ export function MissionConversation({
                   : 'Recon starts with nmap, then hands the surface to discovery.'}
           </p>
         </div>
+
+        {mission.running && !mission.gateOpen && (
+          <div className="mission-progress" role="status" aria-live="polite">
+            <div className="mission-progress-head">
+              <span className="mission-progress-label">
+                <span className="mission-progress-dot" aria-hidden="true" />
+                {mission.activeRole
+                  ? `${ROLE_INFO[mission.activeRole].label} is working`
+                  : 'Agent is working'}
+              </span>
+              <span className="mission-progress-phase mono">
+                {detail.status.replaceAll('_', ' ')}
+              </span>
+            </div>
+            <div className="mission-progress-track" aria-hidden="true">
+              <span className="mission-progress-fill" />
+            </div>
+          </div>
+        )}
       </header>
 
       <div
@@ -749,6 +796,8 @@ export function MissionConversation({
                   />
                 </div>
               )
+            case 'step':
+              return <StepTurn key={entry.id} entry={entry} />
             case 'report':
               return <ReportTurn key={entry.id} detail={entry.detail} />
             case 'note':
@@ -760,6 +809,20 @@ export function MissionConversation({
           <p className="desk-working" role="status">
             <span className="desk-working-mark" aria-hidden="true" />
             Submitting to the desk…
+          </p>
+        )}
+
+        {!busy && mission.running && !mission.gateOpen && (
+          <p className="desk-working desk-working-live" role="status">
+            <span className="desk-working-mark" aria-hidden="true" />
+            {mission.activeRole
+              ? `${ROLE_INFO[mission.activeRole].label} is working…`
+              : 'Agent is working…'}
+            <span className="desk-working-meta mono">
+              {detail.steps.length} action{detail.steps.length === 1 ? '' : 's'} ·{' '}
+              {detail.findings.length} finding
+              {detail.findings.length === 1 ? '' : 's'}
+            </span>
           </p>
         )}
       </div>

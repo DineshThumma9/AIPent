@@ -6,6 +6,7 @@ would return.
 """
 
 import asyncio
+import json
 import time
 from datetime import datetime
 from enum import StrEnum
@@ -14,6 +15,7 @@ from typing import Any
 from fastapi import Request
 from pydantic import BaseModel, Field
 
+from app.core import notifications
 from app.core.db import get_async_session_ctx
 from app.core.log import get_logger
 from app.domain.models import Approval, Finding, Message, Step, utcnow
@@ -22,7 +24,9 @@ from app.api.schema import AssessmentDetail
 
 log = get_logger("events")
 
-POLL_SECONDS = 1.0
+# Writes from this process wake the stream immediately; the timeout only
+# covers writes made by another process or transaction path.
+POLL_SECONDS = 0.25
 HEARTBEAT_SECONDS = 15.0
 
 
@@ -74,6 +78,8 @@ def _finding_key(finding: Finding, evidence_ids: tuple[int, ...]) -> tuple:
         finding.severity,
         finding.title,
         finding.confidence,
+        tuple(finding.cve or ()),
+        tuple(finding.cwe or ()),
         evidence_ids,
     )
 
@@ -86,6 +92,7 @@ def _approval_key(approval: Approval) -> tuple:
         approval.decided_at,
         approval.executed_at,
         approval.outcome,
+        json.dumps(approval.detail or {}, sort_keys=True, default=str),
     )
 
 
@@ -266,13 +273,19 @@ async def stream_assessment_events(
     if once:
         return
 
+    wake = notifications.subscribe(assessment_id)
     last_heartbeat = time.monotonic()
     log.info("event stream opened assessment=%s", assessment_id)
     try:
         while True:
             if await request.is_disconnected():
                 return
-            await asyncio.sleep(POLL_SECONDS)
+
+            try:
+                await asyncio.wait_for(wake.wait(), timeout=POLL_SECONDS)
+            except TimeoutError:
+                pass
+            wake.clear()
 
             detail = await _read_detail(assessment_id)
             if detail is None:
@@ -295,4 +308,5 @@ async def stream_assessment_events(
     except Exception:  # noqa: BLE001 - a broken stream must not take the API down
         log.exception("event stream failed assessment=%s", assessment_id)
     finally:
+        notifications.unsubscribe(assessment_id, wake)
         log.info("event stream closed assessment=%s", assessment_id)

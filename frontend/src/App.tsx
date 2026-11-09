@@ -65,6 +65,38 @@ function toLocalMessage(message: Message): LocalMessage {
   }
 }
 
+/**
+ * Reconcile optimistic turns with server rows by client_message_id, then add
+ * any server rows this tab has not seen. Used both by the SSE message effect
+ * and the REST fallback so both paths are idempotent.
+ */
+function mergeMessages(
+  local: LocalMessage[],
+  server: Message[],
+): LocalMessage[] {
+  const byClient = new Map(
+    server
+      .filter((m) => m.client_message_id)
+      .map((m) => [m.client_message_id as string, m]),
+  )
+  const next = local
+    .filter(
+      (m) =>
+        !m.id.startsWith('local-') ||
+        !byClient.has(m.id.replace('local-', '')),
+    )
+    .map((m) => {
+      if (!m.id.startsWith('local-')) return m
+      const match = byClient.get(m.id.replace('local-', ''))
+      return match ? toLocalMessage(match) : m
+    })
+  for (const message of server) {
+    if (!next.some((m) => m.id === String(message.id)))
+      next.push(toLocalMessage(message))
+  }
+  return next.sort((a, b) => Date.parse(a.at) - Date.parse(b.at)).slice(-120)
+}
+
 export default function App() {
   const selectedId = useSelected((state) => state.selectedId)
   const select = useSelected((state) => state.select)
@@ -112,40 +144,12 @@ export default function App() {
     [detail],
   )
 
-  async function loadChatMessages(assessmentId: number): Promise<LocalMessage[]> {
+  async function loadChatMessages(assessmentId: number): Promise<Message[]> {
     try {
-      const messages = await listMessages(assessmentId)
-      return messages.map(toLocalMessage)
+      return await listMessages(assessmentId)
     } catch {
       return []
     }
-  }
-
-  function mergeMessages(
-    local: LocalMessage[],
-    server: Message[],
-  ): LocalMessage[] {
-    const byClient = new Map(
-      server
-        .filter((m) => m.client_message_id)
-        .map((m) => [m.client_message_id as string, m]),
-    )
-    const next = local
-      .filter(
-        (m) =>
-          !m.id.startsWith('local-') ||
-          !byClient.has(m.id.replace('local-', '')),
-      )
-      .map((m) => {
-        if (!m.id.startsWith('local-')) return m
-        const match = byClient.get(m.id.replace('local-', ''))
-        return match ? toLocalMessage(match) : m
-      })
-    for (const message of server) {
-      if (!next.some((m) => m.id === String(message.id)))
-        next.push(toLocalMessage(message))
-    }
-    return next.sort((a, b) => Date.parse(a.at) - Date.parse(b.at)).slice(-120)
   }
 
   async function pushMessage(
@@ -180,11 +184,28 @@ export default function App() {
     }
   }, [items, selectedId, select])
 
+  // Approval ids are global rows, so a settled id from the previous
+  // assessment must not lock a coincidentally matching gate card here.
+  useEffect(() => {
+    setSettledApprovalId(null)
+    setActionError(null)
+  }, [selectedId])
+
   useEffect(() => {
     if (selectedId === null) return
+    let cancelled = false
     loadChatMessages(selectedId).then((messages) => {
-      setChats((prev) => ({ ...prev, [selectedId]: messages }))
+      if (cancelled) return
+      // The SSE stream may already have delivered rows while this request was
+      // in flight. Merge instead of replacing so those turns are not lost.
+      setChats((prev) => ({
+        ...prev,
+        [selectedId]: mergeMessages(prev[selectedId] ?? [], messages),
+      }))
     })
+    return () => {
+      cancelled = true
+    }
   }, [selectedId])
 
   useEffect(() => {
@@ -198,22 +219,15 @@ export default function App() {
     )
   }, [detail?.id, detail?.status, detail?.finished_at])
 
-  // The stream carries messages from every client. Merge anything this tab
-  // has not seen yet so cross-client replies show up without a refetch.
+  // The stream carries messages from every client. Reconcile optimistic turns
+  // and add anything this tab has not seen yet, without waiting for the REST
+  // fallback, so a message never appears twice with different ids.
   useEffect(() => {
     if (!detail) return
-    setChats((prev) => {
-      const current = prev[detail.id] ?? []
-      const known = new Set(current.map((message) => message.id))
-      const incoming = detail.messages
-        .map(toLocalMessage)
-        .filter((message) => !known.has(message.id))
-      if (incoming.length === 0) return prev
-      const next = [...current, ...incoming]
-        .sort((a, b) => a.at.localeCompare(b.at))
-        .slice(-120)
-      return { ...prev, [detail.id]: next }
-    })
+    setChats((prev) => ({
+      ...prev,
+      [detail.id]: mergeMessages(prev[detail.id] ?? [], detail.messages),
+    }))
   }, [detail?.id, detail?.messages])
 
   async function handleCreate(input: AssessmentInput) {
@@ -317,7 +331,9 @@ export default function App() {
         // gate executes, so the human approves exactly what runs. The IDs are
         // echoed for audit traceability; the gate resolves the pending step
         // itself (oldest planned step wins).
-        approval_id: pending?.id ?? undefined,
+        // A synthesized review card has no database row (id 0); the backend
+        // resolves the review interrupt without an approval id.
+        approval_id: pending && pending.id > 0 ? pending.id : undefined,
         step_id: pending?.step_id ?? undefined,
       })
       if (pending) {

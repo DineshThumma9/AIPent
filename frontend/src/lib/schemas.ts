@@ -3,15 +3,44 @@ import { z } from 'zod'
 /**
  * Domain schemas. The REST API and the SSE stream both parse through these, so
  * the dashboard never trusts an unvalidated payload.
+ *
+ * JSON columns can be NULL in SQLite even when the Python default is `[]` or
+ * `{}`. Zod's `.default()` only covers `undefined`, so every list/record is
+ * normalised explicitly to keep one bad row from dropping an entire event.
  */
+
+const stringList = () =>
+  z
+    .array(z.string())
+    .nullish()
+    .transform((value) => value ?? [])
+
+const intList = () =>
+  z
+    .array(z.number().int())
+    .nullish()
+    .transform((value) => value ?? [])
+
+const dataRecord = () =>
+  z
+    .record(z.string(), z.unknown())
+    .nullish()
+    .transform((value) => value ?? {})
+
+const emptyBoard = () => ({
+  hypotheses: [],
+  decisions: [],
+  open_questions: [],
+  coverage: {},
+})
 
 export const AssessmentSchema = z.object({
   id: z.number().int(),
   title: z.string(),
   request: z.string(),
-  targets: z.array(z.string()),
-  ports: z.array(z.number().int()),
-  exclusions: z.array(z.string()),
+  targets: stringList(),
+  ports: intList(),
+  exclusions: stringList(),
   status: z.string(),
   risk_score: z.number().nullable().default(null),
   created_at: z.string(),
@@ -26,7 +55,7 @@ export const StepSchema = z.object({
   seq: z.number().int(),
   action: z.string(),
   target: z.string().nullable().default(null),
-  argv: z.array(z.string()),
+  argv: stringList(),
   rationale: z.string(),
   status: z.string(),
   output_path: z.string().nullable(),
@@ -46,9 +75,9 @@ export const FindingSchema = z.object({
   title: z.string(),
   description: z.string(),
   severity: z.string(),
-  cvss: z.number().nullable(),
-  cve: z.array(z.string()),
-  cwe: z.array(z.string()),
+  cvss: z.number().nullable().default(null),
+  cve: stringList(),
+  cwe: stringList(),
   confidence: z.number(),
   status: z.string(),
   origin: z.string(),
@@ -62,7 +91,7 @@ export const EvidenceSchema = z.object({
   id: z.number().int(),
   finding_id: z.number().int(),
   step_id: z.number().int().nullable(),
-  locator: z.record(z.string(), z.unknown()),
+  locator: dataRecord(),
   excerpt: z.string(),
   created_at: z.string(),
 })
@@ -72,8 +101,8 @@ export const ApprovalSchema = z.object({
   assessment_id: z.number().int(),
   step_id: z.number().int().nullable(),
   action: z.string(),
-  argv: z.array(z.string()),
-  detail: z.record(z.string(), z.unknown()).default({}),
+  argv: stringList(),
+  detail: dataRecord(),
   decision: z.string(),
   actor: z.string().nullable(),
   reason: z.string().nullable(),
@@ -89,7 +118,7 @@ export const AuditEventSchema = z.object({
   ts: z.string(),
   actor: z.string(),
   event_type: z.string(),
-  payload: z.record(z.string(), z.unknown()),
+  payload: dataRecord(),
 })
 
 export const MessageSchema = z.object({
@@ -108,7 +137,7 @@ export const HypothesisSchema = z.object({
   endpoint: z.string().nullable().default(null),
   status: z.enum(['open', 'supported', 'refuted', 'inconclusive']),
   confidence: z.number(),
-  evidence_ids: z.array(z.number().int()),
+  evidence_ids: intList(),
   falsifier: z.string(),
   created_by: z.string(),
   updated_at: z.string(),
@@ -120,7 +149,7 @@ export const DecisionRecordSchema = z.object({
   action: z.string(),
   target: z.string(),
   hypothesis_id: z.string().nullable().default(null),
-  evidence_ids: z.array(z.number().int()),
+  evidence_ids: intList(),
   observation: z.string(),
   expected_observation: z.string().nullable().default(null),
   would_falsify: z.string().nullable().default(null),
@@ -130,10 +159,16 @@ export const DecisionRecordSchema = z.object({
 })
 
 export const EvidenceBoardSchema = z.object({
-  hypotheses: z.array(HypothesisSchema).default([]),
-  decisions: z.array(DecisionRecordSchema).default([]),
-  open_questions: z.array(z.string()).default([]),
-  coverage: z.record(z.string(), z.unknown()).default({}),
+  hypotheses: z
+    .array(HypothesisSchema)
+    .nullish()
+    .transform((value) => value ?? []),
+  decisions: z
+    .array(DecisionRecordSchema)
+    .nullish()
+    .transform((value) => value ?? []),
+  open_questions: stringList(),
+  coverage: dataRecord(),
 })
 
 export const ChatAcceptedSchema = z.object({
@@ -144,21 +179,28 @@ export const ChatAcceptedSchema = z.object({
   message: z.string(),
 })
 
+const listOf = <T extends z.ZodType>(schema: T) =>
+  z
+    .array(schema)
+    .nullish()
+    .transform((value) => value ?? [])
+
 export const AssessmentDetailSchema = AssessmentSchema.extend({
-  steps: z.array(StepSchema),
-  findings: z.array(FindingSchema),
-  evidence: z.array(EvidenceSchema),
-  approvals: z.array(ApprovalSchema),
-  audit: z.array(AuditEventSchema),
-  messages: z.array(MessageSchema).default([]),
-  reasoning: EvidenceBoardSchema.default({
-    hypotheses: [],
-    decisions: [],
-    open_questions: [],
-    coverage: {},
-  }),
-  gate_open: z.boolean().default(false),
+  steps: listOf(StepSchema),
+  findings: listOf(FindingSchema),
+  evidence: listOf(EvidenceSchema),
+  approvals: listOf(ApprovalSchema),
+  audit: listOf(AuditEventSchema),
+  messages: listOf(MessageSchema),
+  reasoning: EvidenceBoardSchema.nullish().transform(
+    (value) => value ?? emptyBoard(),
+  ),
+  gate_open: z
+    .boolean()
+    .nullish()
+    .transform((value) => value ?? false),
   active_role: z.string().nullable().default(null),
+  run_id: z.string().nullable().default(null),
 })
 
 export const PlanStepSchema = z.object({
@@ -169,11 +211,12 @@ export const PlanStepSchema = z.object({
 
 export const AgentViewSchema = z.object({
   assessment_id: z.number().int(),
+  run_id: z.string().nullable().default(null),
   status: z.string(),
   running: z.boolean(),
   paused: z.boolean(),
-  next: z.array(z.string()),
-  plan: z.array(PlanStepSchema),
+  next: stringList(),
+  plan: listOf(PlanStepSchema),
   plan_source: z.string(),
   pending: z.record(z.string(), z.unknown()).nullable(),
   steps: z.number().int(),

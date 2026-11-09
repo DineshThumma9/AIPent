@@ -19,6 +19,13 @@ import typer
 from rich import box
 from rich.console import Console
 from rich.panel import Panel
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
 from rich.prompt import Prompt
 from rich.rule import Rule
 from rich.table import Table
@@ -189,9 +196,32 @@ def scan_cmd(
         seen_findings: set[str] = set()
         start_time = time.time()
 
+        progress = Progress(
+            SpinnerColumn(style="cyan"),
+            TextColumn("[bold cyan]{task.description}"),
+            BarColumn(bar_width=None),
+            TimeElapsedColumn(),
+            console=console,
+            transient=True,
+        )
+        progress_task = progress.add_task("Agent starting…", total=None)
+        progress.start()
+        timed_out = False
         while time.time() - start_time < timeout:
             await asyncio.sleep(0.6)
             view = await runner.get_view(aid)
+
+            role = (view.active_role or "agent").upper()
+            if view.paused:
+                description = "Waiting for your approval"
+            elif view.running:
+                description = (
+                    f"{role} working · {view.steps} action"
+                    f"{'' if view.steps == 1 else 's'} · {last_audit_id} events"
+                )
+            else:
+                description = f"Wrapping up · {last_audit_id} events"
+            progress.update(progress_task, description=description)
 
             # Check new audit events
             async with get_async_session_ctx() as session:
@@ -258,6 +288,7 @@ def scan_cmd(
 
             # Check if paused at an approval gate
             if view.paused and view.pending:
+                progress.stop()
                 pending = view.pending
                 gate = pending.get("gate") or pending.get("role") or "action"
                 action_name = pending.get("action") or pending.get("role") or "Review Delivery"
@@ -315,7 +346,13 @@ def scan_cmd(
                         note = Prompt.ask("[bold blue]Enter steering guidance for the agent[/]")
                         async with get_async_session_ctx() as s_ctx:
                             s_repo = SteeringRepo(s_ctx)
-                            await s_repo.add(assessment_id=aid, run_id=getattr(view, "run_id", None) or "run", text=note)
+                            # Preserve None: take_pending() matches the real
+                            # run id plus NULL, but never a made-up sentinel.
+                            await s_repo.add(
+                                assessment_id=aid,
+                                run_id=view.run_id,
+                                text=note,
+                            )
                         console.print(f"[blue]Steering note recorded:[/] [italic]{note}[/italic]")
                         # Prompt for approval after steering
                         sub_dec = Prompt.ask("Proceed with this action now? ([green]y[/]/[red]n[/])", choices=["y", "n"], default="y")
@@ -325,10 +362,33 @@ def scan_cmd(
                             {"decision": dec_str, "actor": "operator", "reason": f"Steered: {note}"},
                         )
 
+                # Resume the live indicator after the blocking prompt.
+                progress.start()
+                progress.update(progress_task, description="Resuming the run…")
+
             # Check if run reached terminal state
             if not view.running and not view.paused:
+                progress.update(
+                    progress_task,
+                    description=f"Run {view.status} · {last_audit_id} events",
+                )
                 console.print(f"\n[bold green]Assessment completed with status:[/] [bold]{view.status.upper()}[/bold]\n")
                 break
+            else:
+                timed_out = False
+
+            if time.time() - start_time >= timeout:
+                timed_out = True
+                break
+
+        progress.stop()
+
+        if timed_out:
+            console.print(
+                f"[bold yellow]Monitor timed out after {timeout}s.[/] "
+                "The agent may still be running in the background; "
+                "check `aipent status` or the web desk."
+            )
 
         # 4. Display Final Summary Tables
         await _print_assessment_summary(aid)
@@ -423,9 +483,12 @@ def report_cmd(
                 console.print(f"[bold red]Error:[/] Assessment #{assessment_id} not found.")
                 raise typer.Exit(1)
 
-            console.print(f"[dim]Compiling PDF report for Assessment #{assessment_id}...[/dim]")
             try:
-                pdf_path = await generate_report(session, assessment_id)
+                with console.status(
+                    f"[bold cyan]Compiling PDF report for Assessment #{assessment_id}…",
+                    spinner="dots",
+                ):
+                    pdf_path = await generate_report(session, assessment_id)
                 console.print(
                     Panel(
                         Text.assemble(
@@ -466,7 +529,13 @@ def steer_cmd(
                 raise typer.Exit(1)
 
             repo = SteeringRepo(session)
-            note = await repo.add(assessment_id=assessment_id, run_id="cli-manual", text=instruction)
+            # An idle note must stay NULL so the next run consumes it. A
+            # sentinel like "cli-manual" never matches the agent's run id.
+            note = await repo.add(
+                assessment_id=assessment_id,
+                run_id=None,
+                text=instruction,
+            )
             console.print(
                 Panel(
                     f"Instruction recorded for Assessment #{assessment_id}:\n[italic cyan]{instruction}[/italic cyan]",

@@ -48,7 +48,10 @@ async def load_assessment_detail(
     )
     approvals = list(approvals.scalars().all())
 
-    audit = await audit_repo.get_all_for_assessment(assessment_id, limit=100)
+    # The conversation thread reconstructs role cards and handoffs from the
+    # audit trail. A run easily produces more than 100 rows, so the window has
+    # to be large enough to keep the start of the latest run in view.
+    audit = await audit_repo.get_all_for_assessment(assessment_id, limit=1000)
 
     messages = await audit_repo.session.execute(
         select(Message)
@@ -76,14 +79,26 @@ async def load_assessment_detail(
     board = await build_evidence_board(session, assessment_id)
 
     active_role: str | None = None
+    run_id: str | None = None
     try:
         from app.runtime.runner import _values, is_running
 
         if is_running(assessment_id):
             _, values = await _values(assessment_id)
             active_role = values.get("role")
+            run_id = values.get("run_id")
     except Exception:
         pass
+
+    # A paused run is not "running", so fall back to the newest audit row that
+    # carries a run_id. The stream keeps this stable even when the oldest audit
+    # rows have already fallen out of the capped window.
+    if not run_id:
+        for row in audit:
+            candidate = (row.payload or {}).get("run_id")
+            if candidate:
+                run_id = candidate
+                break
 
     if not active_role:
         for row in reversed(audit):
@@ -102,5 +117,6 @@ async def load_assessment_detail(
         messages=messages,
         gate_open=gate_open,
         active_role=active_role,
+        run_id=run_id,
         reasoning=board,
     )

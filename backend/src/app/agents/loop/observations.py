@@ -181,7 +181,7 @@ async def observation_from_step(session: AsyncSession, step: Step) -> Observatio
                 res = p_data.get("curl_result") or p_data.get("probe_result") or {}
                 http_status = res.get("status_code")
                 body_full = res.get("body_preview") or res.get("body") or ""
-                body_excerpt = body_full[:500]
+                body_excerpt = body_full[:1000]
             except Exception:
                 pass
         status_part = f"HTTP {http_status}" if http_status is not None else "HTTP request succeeded"

@@ -5,6 +5,7 @@ import type {
   EvidenceBoard,
   Finding,
   PlanStep,
+  Step,
 } from './schemas'
 
 export const ROLE_ORDER = ['recon', 'discovery', 'validation'] as const
@@ -86,6 +87,7 @@ export type ThreadEntry =
       finding: Finding
       evidence: Evidence[]
     }
+  | { kind: 'step'; id: string; at: string; step: Step }
   | { kind: 'report'; id: string; at: string; detail: AssessmentDetail }
   | { kind: 'note'; id: string; at: string; text: string; error: boolean }
 
@@ -223,14 +225,19 @@ function runAudit(detail: AssessmentDetail) {
       .find((event) => asText(event.payload.run_id) !== null)
   }
 
-  const runId = start ? asText(start.payload.run_id) : null
+  // The server exposes the current/latest run id even when the start event has
+  // already fallen out of the audit window. Prefer it over re-discovering the
+  // run from the (capped) audit rows.
+  const runId = asText(detail.run_id) ?? (start ? asText(start.payload.run_id) : null)
   const events = runId
     ? audit.filter((event) => asText(event.payload.run_id) === runId)
     : []
+  const matchingStart =
+    start && asText(start.payload.run_id) === runId ? start : null
 
   return {
     runId,
-    startedAt: events[0]?.ts ?? start?.ts ?? null,
+    startedAt: events[0]?.ts ?? matchingStart?.ts ?? null,
     events,
   }
 }
@@ -276,10 +283,36 @@ export function deriveMission(detail: AssessmentDetail): MissionView {
   // approvals are created in that same order. Show that approval, not the
   // newest one, so the card never describes a different command than the one
   // the next resume will run.
-  const pendingApproval =
+  const storedApproval =
     [...detail.approvals]
       .sort((a, b) => a.id - b.id)
       .find((approval) => approval.decision === 'pending') ?? null
+  // Older loop runs paused at final review without writing an Approval row,
+  // so the desk had no card to approve. The runtime still holds the review
+  // interrupt; synthesize the card until the run resumes.
+  const pendingApproval: Approval | null =
+    storedApproval ??
+    (detail.status === 'awaiting_approval'
+      ? {
+          id: 0,
+          assessment_id: detail.id,
+          step_id: null,
+          action: 'final_review',
+          argv: [],
+          detail: {
+            role: 'review',
+            risk_score: detail.risk_score,
+            findings: detail.findings.length,
+          },
+          decision: 'pending',
+          actor: null,
+          reason: null,
+          requested_at: detail.audit[0]?.ts ?? detail.created_at,
+          decided_at: null,
+          executed_at: null,
+          outcome: null,
+        }
+      : null)
   const finalReview =
     pendingApproval?.action === 'final_review' ? pendingApproval : null
   const handoffs = handoffsFrom(events)
@@ -354,13 +387,23 @@ export function deriveMission(detail: AssessmentDetail): MissionView {
     severity[finding.severity] = (severity[finding.severity] ?? 0) + 1
   }
 
+  // gate_open is a backend-derived convenience flag that only arrives in a
+  // snapshot. Derive it from the live status and the pending approval so the
+  // Approve/Reject buttons open as soon as the status stream says the run is
+  // waiting, without requiring a REST reload.
+  const awaitingApproval =
+    detail.status === 'awaiting_approval' || detail.gate_open
+  const requiresApproval =
+    (pendingApproval?.detail.requires_approval ?? true) !== false
+  const gateOpen = Boolean(
+    pendingApproval && requiresApproval && awaitingApproval,
+  )
+
   return {
     runId,
     startedAt,
     running,
-    gateOpen:
-      detail.gate_open &&
-      (pendingApproval?.detail.requires_approval ?? true) !== false,
+    gateOpen,
     activeRole,
     reasoning: detail.reasoning ?? {
       hypotheses: [],
@@ -418,7 +461,10 @@ export function buildThread(
 
   const startMs = mission.startedAt ? Date.parse(mission.startedAt) : null
   const inRun = (at: string | null) => {
-    if (!at || startMs === null) return false
+    if (!at) return false
+    // If the start row was trimmed from the audit window we still know the run
+    // id; include its remaining rows instead of emptying the whole thread.
+    if (startMs === null) return true
     const value = Date.parse(at)
     return Number.isFinite(value) && value >= startMs - 1000
   }
@@ -485,10 +531,47 @@ export function buildThread(
     }
   }
 
+  // A synthesized final-review card is not in detail.approvals; surface it at
+  // the end of the thread so the gate is clickable.
+  if (
+    mission.pendingApproval !== null &&
+    !detail.approvals.some(
+      (approval) => approval.id === mission.pendingApproval?.id,
+    )
+  ) {
+    entries.push({
+      kind: 'approval',
+      id: `approval-${mission.pendingApproval.id}`,
+      at: mission.pendingApproval.requested_at,
+      approval: mission.pendingApproval,
+    })
+  }
+
+  // Steps are the visible work between approvals. Without them the thread
+  // goes silent while an approved scanner runs, which reads like a broken UI.
+  for (const step of detail.steps) {
+    if (step.status === 'planned') continue
+    if (!inRun(step.created_at)) continue
+    entries.push({
+      kind: 'step',
+      id: `step-${step.id}`,
+      at: step.ended_at ?? step.created_at,
+      step,
+    })
+  }
+
+  // Confirmed findings are the verdicts, but scanners first land findings as
+  // suspected. Show both so discovery output is visible in the main thread.
   const confirmed = mission.confirmed
     .filter((finding) => inRun(finding.updated_at))
     .slice(0, 8)
-  for (const finding of confirmed) {
+  const suspected = mission.findings
+    .filter(
+      (finding) =>
+        finding.status === 'suspected' && inRun(finding.updated_at),
+    )
+    .slice(0, 8)
+  for (const finding of [...confirmed, ...suspected]) {
     entries.push({
       kind: 'finding',
       id: `finding-${finding.id}-${finding.updated_at}`,
