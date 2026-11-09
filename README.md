@@ -5,7 +5,7 @@
 > *Fully compliant with Hackathon Rules, NIST SP 800-115, OWASP Top 10, and Human-in-the-Loop Governance.*
 
 [![Tests](https://img.shields.io/badge/backend%20tests-128%20passed-brightgreen)](#verification)
-[![Frontend](https://img.shields.io/badge/frontend%20tests-8%20passed-brightgreen)](#verification)
+[![Frontend](https://img.shields.io/badge/frontend%20tests-16%20passed-brightgreen)](#verification)
 [![Python](https://img.shields.io/badge/python-3.12-blue)](#prerequisites)
 [![React](https://img.shields.io/badge/react-19%20%7C%20vite-61dafb)](#prerequisites)
 [![LangGraph](https://img.shields.io/badge/orchestration-LangGraph%20v2-orange)](#architecture)
@@ -68,6 +68,98 @@ AIPENT provides additional specialized verification tools integrated into its cl
 - **`sslscan` (Live):** TLS/SSL cipher suite, certificate expiry, and protocol security auditing ([`adapters/sslscan.py`](backend/src/app/adapters/sslscan.py)).
 - **`sqlmap` (Live - Human Gated):** Non-destructive SQL injection verification under operator approval.
 - **`hashcat` (Live - Human Gated):** Controlled credential strength validation.
+
+---
+
+## Docker MCP Gateway & Sandboxed Tool Supply (§4, §6)
+
+AIPENT introduces an enterprise-grade **Docker MCP Gateway** architecture that cleanly decouples agent reasoning from tool execution. Instead of running scanner binaries natively on the host as unconfined root processes, AIPENT connects to a **single unified endpoint** (`http://127.0.0.1:8812/sse`) managed by the Docker MCP Gateway.
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                              AIPENT MCP Gateway Topology                               │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+
+    AIPENT Backend (FastAPI / LangGraph)
+                  │
+                  ▼  (Single SSE Connection: http://127.0.0.1:8812/sse)
+    ┌─────────────────────────────┐
+    │      Docker MCP Gateway     │  catalog: aipent.yaml (Port :8812)
+    └──────────────┬──────────────┘
+                   │
+  ┌────────────────┼────────────────────────┬────────────────────────┐
+  │ (stdio)        │ (Streamable HTTP)      │ (Streamable HTTP)      │ (Streamable HTTP)
+  ▼                ▼                        ▼                        ▼
+┌──────────────┐ ┌────────────────────────┐ ┌──────────────────────┐ ┌──────────────────────┐
+│  Kali Linux  │ │    OWASP ZAP Stack     │ │    Curl MCP Server   │ │   Vulnify CVE MCP    │
+│  MCP Server  │ │    (dtkmn/mcp-zap)     │ │ (@calibress/curl-mcp)│ │    (FastMCP Bridge)  │
+├──────────────┤ ├────────────────────────┤ ├──────────────────────┤ ├──────────────────────┤
+│ • nmap_scan  │ │ • zap_crawl_start      │ │ • curl_request       │ │ • search_cve         │
+│ • nikto_scan │ │ • zap_crawl_status     │ │   (Safe, isolated    │ │ • get_cve_details    │
+│ • dirb_scan  │ │ • zap_passive_scan_wait│ │    HTTP requests)    │ │ • lookup_kev         │
+│ • whatweb    │ │ • zap_report_generate  │ └──────────────────────┘ └──────────────────────┘
+│ • sqlmap     │ └───────────┬────────────┘
+│ • hashcat    │             │
+└──────────────┘             ▼
+                     ┌───────────────┐
+                     │  zaproxy:8090 │
+                     │  (Daemon Core)│
+                     └───────────────┘
+```
+
+### 1. Single-Point Tool Supply
+The backend communicates exclusively with the Gateway via standard Model Context Protocol (MCP) Server-Sent Events (SSE). The LLM never manages scanner processes, container lifecycles, or network ports directly; it interacts with normalized, schema-validated tools.
+
+- **Kali Linux MCP Server (`cyberillo/kali-mcp-server:latest`):** A long-lived stdio container exposing `nmap`, `nikto`, `dirb`, `whatweb`, `sqlmap`, and `hashcat`.
+- **OWASP ZAP MCP Server (`dtkmn/mcp-zap-server:v0.17.1`):** A remote streamable HTTP service on port `7456` driving ZAP's automated spidering, AJAX crawling, and passive analysis.
+- **Curl MCP Server (`@calibress/curl-mcp`):** A lightweight HTTP microservice on port `7458` enabling granular request dispatching, header inspection, and response verification.
+- **Vulnify MCP Server (`vulnify-mcp`):** A FastMCP container exposing local SQLite CVE intelligence.
+
+### 2. Sandboxing & Safety Architecture ("Safeways")
+AIPENT enforces multi-layered defense-in-depth to guarantee safety during automated assessments:
+
+1. **Zero Shell Access:** The agent possesses **no** `sh`, `bash`, or arbitrary command execution tool. The LLM can only invoke strictly defined schemas with validated arguments.
+2. **Containerized Process Isolation:** All scanner processes execute inside disposable, non-root Docker containers. A scanner fault or exploit payload cannot compromise the host filesystem.
+3. **Loopback & Network Segregation:** The Gateway is bound strictly to loopback `127.0.0.1`. Containers communicate with lab targets through the controlled `host.docker.internal:host-gateway` bridge.
+4. **Human Action Gatekeeper:** Dangerous or active actions (`sqlmap`, `curl_request`, `zap`) halt execution and require explicit analyst approval. The gate displays the verbatim `argv`, destination, and rationale.
+5. **Execution Ceilings:** Strict duration limits (`ZAP_MAX_SPIDER_SCAN_DURATION=2m`, scan timeout `600s`, maximum 40 turns) prevent runaway loops or unintentional denial of service.
+
+---
+
+### 3. Starting the MCP Server Stack & Gateway
+
+#### Step 1: Configure Environment
+```bash
+cp deploy/mcp-zap/.env.example deploy/mcp-zap/.env
+# Verify or edit MCP_API_KEY and ZAP_API_KEY
+```
+
+#### Step 2: Start ZAP & Vulnify Compose Services
+```bash
+docker compose -f deploy/mcp-zap/compose.yaml up -d
+```
+
+#### Step 3: Launch the Docker MCP Gateway
+```bash
+./deploy/mcp-gateway/start.sh
+```
+*`start.sh` automatically installs `aipent.yaml` into `~/.docker/mcp/catalogs/`, writes isolated secrets to `~/.docker/mcp/aipent-secrets.env` (mode 0600), starts the curl daemon, and launches the gateway on `127.0.0.1:8812`.*
+
+---
+
+### 4. Containerized Backend (`backend/Dockerfile` & Compose)
+
+AIPENT provides a production-grade multi-stage `backend/Dockerfile` based on `python:3.12-slim-bookworm` with `uv` package caching, system fonts for Typst PDF compilation, and container healthchecks.
+
+To run the backend as a container:
+```bash
+# Start backend via root Compose
+docker compose up -d backend
+```
+Or build the backend image standalone:
+```bash
+docker build -t aipent-backend:latest ./backend
+```
 
 ---
 
@@ -271,22 +363,24 @@ An optional Dockerized FastMCP bridge is also maintained in [`vulnify-mcp/`](vul
 - Docker (for lab target container)
 - `uv` (recommended) or `pip`
 
-### 1. Setup Backend
+### 1. Setup Backend (Local or Docker)
+
+**Option A: Local Virtual Environment**
 ```bash
 cd backend
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
+cp .env.example .env
+# Edit backend/.env to set your API keys (OpenRouter, Groq, Ollama, etc.)
 ```
 
-Configure `backend/.env`:
-```ini
-AIPENT_LLM_PROVIDER=groq
-AIPENT_LLM_MODEL=openai/gpt-oss-120b
-AIPENT_GROQ_API_KEY=your_groq_api_key_here
-AIPENT_JUICESHOP_URL=http://127.0.0.1:3000
+**Option B: Docker Container**
+```bash
+cp backend/.env.example backend/.env
+# Edit backend/.env, then launch backend container
+docker compose up -d backend
 ```
-*(Also supports `ollama`, `openrouter`, `mistral`, and `gemini` providers).*
 
 ### 2. Setup Frontend
 ```bash
@@ -310,7 +404,7 @@ AIPENT includes full automated test suites across both backend and frontend:
 # Backend unit & integration test suite (128 passed)
 cd backend && .venv/bin/pytest backend/tests
 
-# Frontend unit tests & production build verification (8 passed)
+# Frontend unit tests & production build verification (16 passed)
 cd frontend && npm test && npm run build
 ```
 

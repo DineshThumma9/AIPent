@@ -424,10 +424,11 @@ async def nudge_node(state: AssessmentState) -> Command:
                 *state["messages"],
                 HumanMessage(
                     content=(
-                        "You have not handed off. Either call one more action that "
-                        "reduces uncertainty, or call handoff(...) with your current "
-                        "summary, next_role, why, confidence, stop_reason and open_questions. "
-                        "Do not repeat an action that already ran."
+                        "You produced no tool call. You must either invoke an action tool or call handoff(...).\n"
+                        "- Do not repeat an identical request that already ran with the same parameters.\n"
+                        "- If your previous request returned an error (HTTP 4xx/5xx or invalid header/body), "
+                        "you MUST fix the headers, payload, or URL and retry with the corrected parameters.\n"
+                        "- If your investigation is complete or blocked, call handoff(...) with your summary, next_role, and why."
                     )
                 ),
             ],

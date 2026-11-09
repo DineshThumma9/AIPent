@@ -16,9 +16,7 @@ from sqlmodel import select
 from app.actions import catalogue, check_scope, get_action, resolve_argv
 from app.actions import probe
 from app.actions.catalogue import ScopeError
-from app.agents.specialists.discovery.state import DiscoveryState
-from app.agents.specialists.recon.state import ReconState
-from app.agents.specialists.validation.state import ValidationState
+from app.agents.graph.state import AssessmentState
 from app.agents.tools import ROLE_TOOLS, set_context
 from app.api.queries import load_assessment_detail
 from app.api.schema import DecisionIn
@@ -171,10 +169,8 @@ def test_sqlmap_output_is_stdout():
     assert get_action("sqlmap_scan").output == "stdout"
 
 
-def test_specialist_states_declare_steps():
-    assert "steps" in ReconState.__annotations__
-    assert "steps" in DiscoveryState.__annotations__
-    assert "steps" in ValidationState.__annotations__
+def test_assessment_state_declares_steps():
+    assert "steps" in AssessmentState.__annotations__
 
 
 def test_decision_binds_to_a_specific_gate():

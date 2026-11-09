@@ -18,6 +18,7 @@ from app.agents.loop.contracts import (
 )
 from app.agents.loop.mission_brain import (
     MissionDigest,
+    ROLE_TURN_CAPS,
     deterministic_safe_route,
     validate_route,
 )
@@ -260,7 +261,7 @@ def test_validate_route_guards():
 
 def test_deterministic_safe_route_budget_exhausted():
     state: AssessmentState = {
-        "turns": {"recon": 8, "discovery": 12, "validation": 16},
+        "turns": {k: v for k, v in ROLE_TURN_CAPS.items() if k != "review"},
     }
     digest = MissionDigest(
         assessment_id=1,

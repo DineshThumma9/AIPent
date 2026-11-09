@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from dotenv import load_dotenv
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # src/app/core/config.py -> backend/
@@ -14,12 +15,26 @@ BACKEND_DIR = Path(__file__).resolve().parents[3]
 load_dotenv(BACKEND_DIR / ".env")
 
 
+def _clean_env(val: str | None) -> str | None:
+    if not val:
+        return None
+    val = val.strip("\"'")
+    return val or None
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="AIPENT_",
         env_file=BACKEND_DIR / ".env",
         extra="ignore",
     )
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def strip_quotes_from_strings(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            v = v.strip("\"'")
+        return v
 
     data_dir: Path = BACKEND_DIR / "data"
     db: str | None = None
@@ -29,15 +44,15 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_file: Path | None = None
 
-    max_steps: int = 40
-    max_agent_turns: int = 40
-    agent_recursion_limit: int = 120
+    max_steps: int = 60
+    max_agent_turns: int = 60
+    agent_recursion_limit: int = 160
     scan_timeout: int = 600
     run_timeout: int = 1800
 
     agent_loop: Literal["legacy", "v2"] = "v2"
     supervisor_tool_calls: int = 10
-    supervisor_calls_per_run: int = 20
+    supervisor_calls_per_run: int = 30
     max_no_progress: int = 5
     max_role_retries: int = 5
 
@@ -76,7 +91,11 @@ class Settings(BaseSettings):
     vulnify_release: str = "vulnify v2026.11.02"
 
     # Ollama Cloud base URL (e.g. https://ollama.com). If unset, uses local Ollama.
-    ollama_base_url: str | None = os.getenv("OLLAMA_BASE_URL")
+    @property
+    def ollama_base_url(self) -> str | None:
+        return _clean_env(
+            os.getenv("AIPENT_OLLAMA_BASE_URL") or os.getenv("OLLAMA_BASE_URL")
+        )
 
     # Action policy: per-action gate requirements. JSON string or dict.
     # Example: AIPENT_ACTION_POLICIES='{"sqlmap_scan":{"approve":true},"nmap_scan":{"approve":false}}'
@@ -91,7 +110,7 @@ class Settings(BaseSettings):
     juiceshop_url: str = "http://127.0.0.1:3000"
 
     # Per-run agent budgets. The LLM chooses actions; these bounds stop a loop.
-    max_validation_probes: int = 10
+    max_validation_probes: int = 25
 
     @property
     def database_url(self) -> str:
@@ -111,27 +130,27 @@ class Settings(BaseSettings):
 
     @property
     def groq_api_key(self) -> str | None:
-        return os.getenv("AIPENT_GROQ_API_KEY") or os.getenv("GROQ_API_KEY")
+        return _clean_env(os.getenv("AIPENT_GROQ_API_KEY") or os.getenv("GROQ_API_KEY"))
 
     @property
     def mistral_api_key(self) -> str | None:
-        return os.getenv("AIPENT_MISTRAL_API_KEY") or os.getenv("MISTRALAI_API_KEY")
+        return _clean_env(os.getenv("AIPENT_MISTRAL_API_KEY") or os.getenv("MISTRALAI_API_KEY"))
 
     @property
     def ollama_api_key(self) -> str | None:
-        return os.getenv("AIPENT_OLLAMA_API_KEY") or os.getenv("OLLAMA_API_KEY")
+        return _clean_env(os.getenv("AIPENT_OLLAMA_API_KEY") or os.getenv("OLLAMA_API_KEY"))
 
     @property
     def gemini_api_key(self) -> str | None:
-        return os.getenv("AIPENT_GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
+        return _clean_env(os.getenv("AIPENT_GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY"))
 
     @property
     def openrouter_api_key(self) -> str | None:
-        return os.getenv("AIPENT_OPENROUTER_API_KEY") or os.getenv("OPENROUTER_API_KEY")
+        return _clean_env(os.getenv("AIPENT_OPENROUTER_API_KEY") or os.getenv("OPENROUTER_API_KEY"))
 
     @property
     def huggingface_api_key(self) -> str | None:
-        return os.getenv("AIPENT_HUGGINGFACE_API_KEY") or os.getenv("HUGGINGFACE_API_KEY")
+        return _clean_env(os.getenv("AIPENT_HUGGINGFACE_API_KEY") or os.getenv("HUGGINGFACE_API_KEY"))
 
 
 settings = Settings()

@@ -46,8 +46,8 @@ MISSION & SCOPE
 
 TACTICAL PRINCIPLES
 -------------------
-- If a scanner fails, returns an error, or produces no useful results, DO NOT retry it.
-  Pivot immediately to an alternative scanner or vector.
+- If a scanner fails or produces no useful results, pivot to an alternative tool or vector.
+- If an HTTP request returns a client error (HTTP 4xx), analyze the response body, fix headers or JSON payload structure, and retry with the corrected request. Do not stall or repeat identical mistakes.
 - Prefer quick, surgical HTTP checks (curl_request) to inspect discovered paths or suspected endpoints before launching heavy crawlers.
 - Select the scanner that matches the service architecture rather than running every tool blindly.
 

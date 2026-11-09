@@ -1,0 +1,36 @@
+# ==============================================================================
+# AIPENT — Full System Docker Compose
+# Orchestrates the AIPENT Backend container and links to the MCP Gateway
+# ==============================================================================
+name: aipent
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: aipent-backend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8010:8010"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - AIPENT_MCP_ENABLED=true
+      - AIPENT_MCP_TRANSPORT=gateway
+      - AIPENT_MCP_GATEWAY_URL=http://host.docker.internal:8812/sse
+      - AIPENT_LAB_TARGET_ALIAS=host.docker.internal
+      - VULNIFY_SQLITE_PATH=/app/vulnify.db
+      - AIPENT_LLM_PROVIDER=${AIPENT_LLM_PROVIDER:-openrouter}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    volumes:
+      - ./data:/app/data
+      - ./vulnify.db:/app/vulnify.db:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8010/health > /dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

@@ -83,7 +83,9 @@ async def run_curl(
     if method not in SAFE_METHODS:
         raise ValueError(f"Unsafe probe method not permitted: {method}")
 
-    req_headers = dict(headers or {})
+    req_headers = {str(k).rstrip(": \t"): str(v) for k, v in (headers or {}).items()}
+    if method in ("POST", "PUT", "PATCH") and not body and any("application/json" in str(v).lower() for v in req_headers.values()):
+        body = "{}"
     if body and body.strip().startswith("{") and body.strip().endswith("}"):
         if not any(k.lower() == "content-type" for k in req_headers):
             req_headers["Content-Type"] = "application/json"

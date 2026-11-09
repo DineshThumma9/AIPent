@@ -225,7 +225,19 @@ async def observation_from_step(session: AsyncSession, step: Step) -> Observatio
                 "body_preview": body_excerpt,
             },
             errors=[],
-            next_hint="Compare observed HTTP status and response against expected_observation and would_falsify.",
+            next_hint=(
+                "HTTP 4xx: Server rejected request syntax or payload structure. Inspect response body for validation errors, adjust JSON fields/headers, and retry."
+                if http_status in (400, 422)
+                else (
+                    f"HTTP {http_status}: Authentication or authorization required. Analyze headers, test for bypass, or inspect public paths."
+                    if http_status in (401, 403)
+                    else (
+                        "HTTP 500: Server exception occurred. Check if payload triggered an unhandled database error or query crash."
+                        if http_status == 500
+                        else "Compare observed HTTP status and response against expected_observation and would_falsify."
+                    )
+                )
+            ),
         )
 
     if step.action == "whatweb":

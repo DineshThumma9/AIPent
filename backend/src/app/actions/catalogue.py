@@ -443,17 +443,22 @@ def mcp_tool_call(
             url = f"http://{clean_target_host}:{port}{raw_url}"
         else:
             url = re.sub(r"^(https?://)+", r"http://", raw_url)
-        headers = dict(p.get("headers") or {})
+        raw_headers = dict(p.get("headers") or {})
+        headers = {str(k).rstrip(": \t"): str(v) for k, v in raw_headers.items()}
         raw_body = p.get("body")
         if isinstance(raw_body, dict):
             body = json.dumps(raw_body)
-            headers.setdefault("Content-Type", "application/json")
+            if not any(k.lower() == "content-type" for k in headers):
+                headers["Content-Type"] = "application/json"
         elif raw_body:
             body = str(raw_body)
             if body.strip().startswith("{") and body.strip().endswith("}") and not any(k.lower() == "content-type" for k in headers):
                 headers["Content-Type"] = "application/json"
         else:
-            body = None
+            if method in ("POST", "PUT", "PATCH") and any("application/json" in str(v).lower() for v in headers.values()):
+                body = "{}"
+            else:
+                body = None
 
         tool_args: dict[str, Any] = {
             "url": url,

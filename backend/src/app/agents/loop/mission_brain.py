@@ -24,10 +24,10 @@ from app.domain.models import Assessment, Audit, Finding, Step
 from app.persistence.finding_repo import FindingRepo
 
 ROLE_TURN_CAPS = {
-    "recon": 8,
-    "discovery": 12,
-    "validation": 16,
-    "review": 1,
+    "recon": 10,
+    "discovery": 20,
+    "validation": 25,
+    "review": 2,
 }
 
 

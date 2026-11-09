@@ -12,7 +12,6 @@ from app.agents.graph.builder import (
     graph_config,
     prepare_run,
 )
-from app.agents.graph.context import challenge_delta as _challenge_delta
 from app.agents.graph.state import AssessmentState, initial_state
 from app.reporting.report import generate_report
 
@@ -23,6 +22,5 @@ __all__ = [
     "get_assessment_graph",
     "graph_config",
     "prepare_run",
-    "_challenge_delta",
     "generate_report",
 ]
