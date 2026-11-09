@@ -128,16 +128,26 @@ AIPENT enforces multi-layered defense-in-depth to guarantee safety during automa
 
 ### 3. Starting the MCP Server Stack & Gateway
 
-#### Step 1: Configure Environment
+#### Step 0 : Configure Environment
 ```bash
 cp deploy/mcp-zap/.env.example deploy/mcp-zap/.env
 # Verify or edit MCP_API_KEY and ZAP_API_KEY
 ```
 
+#### Step 1 : Install the Curl MCP package:
+
+```
+npm install -g @calibress/curl-mcp
+
+```
+
+
+
 #### Step 2: Start ZAP & Vulnify Compose Services
 ```bash
 docker compose -f deploy/mcp-zap/compose.yaml up -d
 ```
+
 
 #### Step 3: Launch the Docker MCP Gateway
 ```bash
@@ -145,21 +155,6 @@ docker compose -f deploy/mcp-zap/compose.yaml up -d
 ```
 *`start.sh` automatically installs `aipent.yaml` into `~/.docker/mcp/catalogs/`, writes isolated secrets to `~/.docker/mcp/aipent-secrets.env` (mode 0600), starts the curl daemon, and launches the gateway on `127.0.0.1:8812`.*
 
----
-
-### 4. Containerized Backend (`backend/Dockerfile` & Compose)
-
-AIPENT provides a production-grade multi-stage `backend/Dockerfile` based on `python:3.12-slim-bookworm` with `uv` package caching, system fonts for Typst PDF compilation, and container healthchecks.
-
-To run the backend as a container:
-```bash
-# Start backend via root Compose
-docker compose up -d backend
-```
-Or build the backend image standalone:
-```bash
-docker build -t aipent-backend:latest ./backend
-```
 
 ---
 
@@ -343,6 +338,9 @@ To make getting the database seamless without complex manual steps, run the incl
 
 # 2. (Optional) If you do not have vulnify.db yet and have internet connectivity:
 ./setup_vulnify.sh --download
+
+
+
 ```
 
 The script automatically:
@@ -356,6 +354,8 @@ An optional Dockerized FastMCP bridge is also maintained in [`vulnify-mcp/`](vul
 
 ## Quickstart & Installation
 
+
+
 ### Prerequisites
 - Linux / macOS / WSL2
 - Python 3.12+
@@ -363,24 +363,72 @@ An optional Dockerized FastMCP bridge is also maintained in [`vulnify-mcp/`](vul
 - Docker (for lab target container)
 - `uv` (recommended) or `pip`
 
+
+
+### Typst Compiler (Required for PDF Reports)
+
+AIPENT uses the official Typst compiler to generate professional VAPT PDF reports. Install Typst according to your operating system.
+
+**macOS (Homebrew):**
+```bash
+brew install typst
+```
+
+**Windows (PowerShell):**
+```powershell
+winget install --id Typst.Typst
+```
+
+**Linux:**
+
+Arch Linux:
+```bash
+sudo pacman -S typst
+```
+
+Ubuntu (Snap):
+```bash
+sudo snap install typst
+```
+
+Fedora:
+```bash
+sudo dnf install typst
+```
+
+**Verify installation:**
+
+```bash
+typst --version
+```
+
+**Verify PDF compilation:**
+
+```bash
+typst compile report.typ report.pdf
+```
+
+Ensure the Typst executable is available in your system PATH so that the AIPENT backend can invoke it during report generation.
+
+Official installation instructions: https://typst.app/open-source/
+
+
+
+
 ### 1. Setup Backend (Local or Docker)
 
-**Option A: Local Virtual Environment**
+#### After compeletion of gateway 
+
+**Local Virtual Environment**
 ```bash
 cd backend
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
+uv sync 
 cp .env.example .env
+uv run uvicorn app.main:app --reload  --port 8010
+
 # Edit backend/.env to set your API keys (OpenRouter, Groq, Ollama, etc.)
 ```
 
-**Option B: Docker Container**
-```bash
-cp backend/.env.example backend/.env
-# Edit backend/.env, then launch backend container
-docker compose up -d backend
-```
 
 ### 2. Setup Frontend
 ```bash
@@ -402,7 +450,7 @@ AIPENT includes full automated test suites across both backend and frontend:
 
 ```bash
 # Backend unit & integration test suite (128 passed)
-cd backend && .venv/bin/pytest backend/tests
+cd backend && uv run pytest tests
 
 # Frontend unit tests & production build verification (16 passed)
 cd frontend && npm test && npm run build
@@ -418,7 +466,7 @@ aipent/
 │   ├── src/app/
 │   │   ├── actions/            # Closed action catalogue & subprocess executor
 │   │   ├── adapters/           # Tool parsers: nmap, nikto, zap, whatweb, sslscan, hashcat
-│   │   ├── agents/             # LangGraph V2 StateGraph, specialist roles & human gate
+│   │   ├── agents/             # LangGraph  StateGraph, specialist roles & human gate
 │   │   ├── api/                # FastAPI REST endpoints & SSE event streaming
 │   │   ├── core/               # DB, policy, config, and in-process notifications
 │   │   ├── domain/             # SQLModel models: Assessment, Step, Finding, Evidence, Approval
