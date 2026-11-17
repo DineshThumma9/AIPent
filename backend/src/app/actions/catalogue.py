@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 from app.adapters import hashcat, nikto, nmap, whatweb, zap
 from app.adapters.base import FindingDraft
@@ -129,18 +130,129 @@ def _zap_argv(
     )
 
 
+_SQLMAP_PARAM_RE = re.compile(r"^[A-Za-z0-9_.\[\]-]{1,64}$")
+
+
+def _sqlmap_parameter(value: Any) -> str:
+    """Return a safe sqlmap parameter name or raise."""
+    text = str(value or "").strip()
+    if text and not _SQLMAP_PARAM_RE.match(text):
+        raise ValueError(
+            "sqlmap parameter must be a simple name "
+            "(letters, digits, '_', '.', '[', ']', '-')"
+        )
+    return text
+
+
+def _sqlmap_endpoint(
+    assessment: Assessment,
+    target: str,
+    params: dict[str, Any] | None,
+    *,
+    alias: str | None = None,
+) -> str:
+    """Resolve the exact endpoint sqlmap should test.
+
+    Relative paths are joined to the scoped target. Absolute URLs are only
+    accepted when their host is in scope, and are then rebuilt on the scoped
+    host so the probe cannot leave scope.
+    """
+    p = params or {}
+    raw = str(p.get("url") or p.get("path") or "").strip()
+    if not raw:
+        raise ValueError(
+            "sqlmap_scan requires a url path, for example /search?q=1"
+        )
+
+    host, port = _clean_host_and_port(target, _web_port(assessment))
+    scheme = "https" if port in (443, 8443) else "http"
+    if target.strip().lower().startswith("https://"):
+        scheme = "https"
+    if raw.startswith(("http://", "https://")):
+        parsed = urlsplit(raw)
+        if not parsed.hostname:
+            raise ValueError("sqlmap_scan url has no host")
+        check_scope(assessment, parsed.hostname)
+        if parsed.port and (not assessment.ports or parsed.port in assessment.ports):
+            port = parsed.port
+        scheme = parsed.scheme or scheme
+        raw = parsed.path or "/"
+        if parsed.query:
+            raw += "?" + parsed.query
+
+    if not raw.startswith("/"):
+        raw = "/" + raw
+
+    parameter = _sqlmap_parameter(p.get("parameter"))
+    if str(p.get("method") or "GET").upper() == "GET" and parameter:
+        parsed_raw = urlsplit(raw)
+        query_keys = {
+            key for key, _ in parse_qsl(parsed_raw.query, keep_blank_values=True)
+        }
+        if parameter not in query_keys:
+            query = (
+                f"{parsed_raw.query}&{parameter}=1"
+                if parsed_raw.query
+                else f"{parameter}=1"
+            )
+            raw = f"{parsed_raw.path or '/'}?{query}"
+
+    return f"{scheme}://{alias or host}:{port}{raw}"
+
+
+def _sqlmap_bounds(params: dict[str, Any] | None) -> tuple[int, int]:
+    p = params or {}
+    level = min(max(int(p.get("level") or 2), 1), 3)
+    risk = min(max(int(p.get("risk") or 1), 1), 2)
+    return level, risk
+
+
 def _sqlmap_argv(
     assessment: Assessment, target: str, _output: Path, params: dict[str, Any] | None = None
 ) -> list[str]:
-    # sqlmap writes its report to stdout by default. The action spec is
-    # output="stdout", so the executor captures it into the artifact file.
-    return [
+    """Build a bounded, targeted sqlmap invocation.
+
+    The model supplies the endpoint and parameter; Python owns every flag, so
+    the approved argv is exactly the probe that runs. sqlmap writes its report
+    to stdout (the action spec is ``output="stdout"``).
+    """
+    p = params or {}
+    url = _sqlmap_endpoint(assessment, target, p)
+    level, risk = _sqlmap_bounds(p)
+    argv = [
         "sqlmap",
         "-u",
-        f"http://{target}:{_web_port(assessment)}/",
+        url,
         "--batch",
-        "--dbs",
+        "--level",
+        str(level),
+        "--risk",
+        str(risk),
+        "--timeout",
+        "10",
+        "--retries",
+        "1",
+        "--threads",
+        "2",
     ]
+
+    parameter = _sqlmap_parameter(p.get("parameter"))
+    if parameter:
+        argv += ["-p", parameter]
+
+    if str(p.get("method") or "GET").upper() == "POST":
+        data = p.get("data")
+        if not data:
+            raise ValueError("sqlmap_scan POST requires data")
+        argv += ["--data", str(data)]
+        if str(data).lstrip().startswith("{"):
+            argv += ["--headers", "Content-Type: application/json"]
+
+    cookie = p.get("cookie")
+    if cookie:
+        argv += ["--cookie", str(cookie)]
+
+    return argv
 
 
 def _curl_request_argv(
@@ -412,10 +524,35 @@ def mcp_tool_call(
     if action == "zap_baseline":
         return "zap_baseline", {"target_url": target_url}
     if action == "sqlmap_scan":
-        return "sqlmap_scan", {
-            "target_url": target_url,
-            "params": "--batch --dbs",
-        }
+        p = params or {}
+        url = _sqlmap_endpoint(assessment, target, p, alias=alias)
+        level, risk = _sqlmap_bounds(p)
+        flags = [
+            "--batch",
+            f"--level={level}",
+            f"--risk={risk}",
+            "--timeout=10",
+            "--retries=1",
+            "--threads=2",
+        ]
+
+        parameter = _sqlmap_parameter(p.get("parameter"))
+        if parameter:
+            flags += ["-p", parameter]
+
+        if str(p.get("method") or "GET").upper() == "POST":
+            data = p.get("data")
+            if not data:
+                raise ValueError("sqlmap_scan POST requires data")
+            flags += ["--data", shlex.quote(str(data))]
+            if str(data).lstrip().startswith("{"):
+                flags += ["--headers", shlex.quote("Content-Type: application/json")]
+
+        cookie = p.get("cookie")
+        if cookie:
+            flags += ["--cookie", shlex.quote(str(cookie))]
+
+        return "sqlmap_scan", {"target_url": url, "params": " ".join(flags)}
     if action == "dirb_scan":
         return "dirb_scan", {
             "target_url": target_url,

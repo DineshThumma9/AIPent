@@ -47,6 +47,7 @@ from app.actions.catalogue import (
     resolve_argv,
     transport_target,
 )
+from app.actions.evidence import link_step_evidence
 from app.adapters.base import FindingDraft
 from app.core.config import settings
 from app.domain.correlate import canonical_key
@@ -268,18 +269,18 @@ async def execute_action(
     # If the tool supplied argv (agent-owned command), use it exactly as
     # approved. Only resolve from the closed catalogue when no argv was
     # stored (e.g. legacy recon_services without custom flags).
+    params: dict[str, Any] | None = None
+    result = await session.execute(
+        select(Approval).where(
+            Approval.assessment_id == assessment_id,
+            Approval.step_id == step.id,
+        ).order_by(Approval.id.desc())
+    )
+    approval = result.scalars().first()
+    if approval and approval.detail:
+        params = approval.detail.get("params")
+
     if not step.argv:
-        # Recover params from the approval detail if available.
-        params: dict[str, Any] | None = None
-        result = await session.execute(
-            select(Approval).where(
-                Approval.assessment_id == assessment_id,
-                Approval.step_id == step.id,
-            ).order_by(Approval.id.desc())
-        )
-        approval = result.scalars().first()
-        if approval and approval.detail:
-            params = approval.detail.get("params")
         step.argv = resolve_argv(action, assessment, target, step.id or 0, params=params)
     step.status = StepStatus.RUNNING.value
     await session.commit()
@@ -390,6 +391,19 @@ async def execute_action(
 
         drafts = spec.parse(text, target, _web_port(assessment))
         added, merged = await _save_findings(session, assessment_id, step, drafts)
+
+        if action == "curl_request" and params:
+            try:
+                linked_finding_id = int(params.get("finding_id") or 0)
+            except (TypeError, ValueError):
+                linked_finding_id = 0
+            if linked_finding_id:
+                finding = await session.get(Finding, linked_finding_id)
+                if finding is not None and finding.assessment_id == assessment_id:
+                    await link_step_evidence(
+                        session, step, linked_finding_id, text=text
+                    )
+
         step.status = StepStatus.SUCCEEDED.value
         _audit(
             session,

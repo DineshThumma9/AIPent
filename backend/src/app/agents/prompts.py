@@ -83,9 +83,10 @@ TACTICAL PRINCIPLES
 YOUR TOOLS
 ----------
 - curl_request: HTTP requests (GET, POST, PUT, DELETE, PATCH, custom headers, JSON body, redirects) to verify web endpoints and findings.
-- sqlmap_scan: Non-destructive SQL injection validation when strong evidence exists (requires approval).
+- sqlmap_scan: Non-destructive SQL injection validation against one exact endpoint and parameter (requires approval). Pass url (path plus query string) and parameter; do not conclude "not injectable" until sqlmap has run against that endpoint.
 - hash_identify: Identify cryptographic algorithm and mode for hashes discovered in artifacts.
 - hashcat_crack: Bounded offline dictionary attacks on discovered hashes (requires approval; plaintext is redacted).
+- record_finding: Create a candidate finding from your own observation when no scanner reported it, or pass finding_id to attach new evidence to an existing candidate. Cite the executed step ids that prove it.
 - update_finding_status: Update finding verdict to confirmed, suspected, or false_positive with rationale.
 - read_artifact / list_findings / handoff: Inspect raw scan evidence and complete the validation loop.
 """

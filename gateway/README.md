@@ -11,19 +11,24 @@ backend -> http://127.0.0.1:8812/sse -> kali (stdio container)
 
 ## Start order
 
+### Recommended: One-command launcher
 ```bash
-# 1. Lab target
-docker compose -f lab.lvl1.yml up -d
+./start.sh --with-lab
+```
 
-# 2. ZAP + its MCP server
-docker compose -f deploy/mcp-zap/compose.yaml up -d
+### Manual start sequence:
+```bash
+# 1. Lab target (optional)
+docker compose -f labs/lab.lvl1.yml up -d
+
+# 2. Start MCP backing services (ZAP, Vulnify, Curl, Typst)
+docker compose -f mcp/compose.yaml up -d
 
 # 3. Gateway (foreground; Ctrl-C stops it)
-./deploy/mcp-gateway/start.sh
+./gateway/start.sh
 
-# 4. Backend, with gateway transport in backend/.env
-cd backend
-uv run uvicorn app.main:app --host 127.0.0.1 --port 8010
+# 4. Backend
+cd backend && uv run uvicorn app.main:app --host 127.0.0.1 --port 8010
 ```
 
 `start.sh` copies `aipent.yaml` into `~/.docker/mcp/catalogs/` and writes the

@@ -5,10 +5,14 @@ Transforms executed Steps, Evidence, and Findings into compact Observations.
 
 from __future__ import annotations
 
+import json
+import re
+from pathlib import Path
 from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
+from app.actions.evidence import SQLMAP_PROOF
 from app.agents.loop.contracts import ActionRequest, Observation
 from app.domain.models import Evidence, Finding, Step, StepStatus
 
@@ -174,10 +178,8 @@ async def observation_from_step(session: AsyncSession, step: Step) -> Observatio
         body_excerpt = ""
         body_full = ""
         headers: dict[str, Any] = {}
-        from pathlib import Path
         if step.output_path and Path(step.output_path).exists():
             try:
-                import json, re
                 p_data = json.loads(Path(step.output_path).read_text(encoding="utf-8", errors="replace"))
 
                 # 1. curl-mcp format: { ok, code, status, response: { status_code, headers, body } }
@@ -296,19 +298,37 @@ async def observation_from_step(session: AsyncSession, step: Step) -> Observatio
         )
 
     if step.action == "sqlmap_scan":
-        sql_vuln = False
-        from pathlib import Path
-        if step.output_path and Path(step.output_path).exists():
-            try:
-                txt = Path(step.output_path).read_text(encoding="utf-8", errors="replace").lower()
-                sql_vuln = any(w in txt for w in ("injectable", "is vulnerable", "sql injection found"))
-            except Exception:
-                pass
-        summary_str = (
-            "SQL injection suspected from sqlmap scan output."
-            if sql_vuln
-            else "sqlmap scan completed; no SQL injection confirmed."
+        text = ""
+        if step.output_path:
+            path = Path(step.output_path)
+            if path.exists():
+                try:
+                    text = path.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    text = ""
+
+        sql_vuln = SQLMAP_PROOF in text.lower()
+        server_errors = bool(
+            re.search(r"HTTP error codes detected[\s\S]*?\b5\d\d\b", text, re.IGNORECASE)
         )
+        if sql_vuln:
+            summary_str = "SQL injection confirmed by sqlmap."
+            next_hint = (
+                "Attach this sqlmap step to the candidate finding as proof, "
+                "then record the verdict."
+            )
+        elif server_errors:
+            summary_str = (
+                "sqlmap found no injection point at the requested bounds, but "
+                "the target returned 5xx to test payloads."
+            )
+            next_hint = (
+                "This negative is inconclusive: escalate level/risk once or test "
+                "a different parameter before concluding not injectable."
+            )
+        else:
+            summary_str = "sqlmap scan completed; no SQL injection confirmed."
+            next_hint = "Record the negative result or test a different parameter."
         return Observation(
             ok=True,
             status="succeeded",
@@ -321,7 +341,7 @@ async def observation_from_step(session: AsyncSession, step: Step) -> Observatio
             evidence_ids=evidence_ids,
             artifact=artifact_info,
             errors=[],
-            next_hint="Record hypothesis update or update candidate finding status.",
+            next_hint=next_hint,
         )
 
     # Generic fallback for any other tool until Phase 2

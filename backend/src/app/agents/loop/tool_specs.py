@@ -124,7 +124,7 @@ class ZapArgs(ActionReasoning):
 class CurlArgs(ActionReasoning):
     path: str = Field(
         default="/",
-        description="Path on the scoped target starting with / (e.g. '/api/Users', '/rest/user/login') or full URL.",
+        description="Path on the scoped target starting with / (e.g. '/login', '/api/users') or full URL.",
     )
     method: Literal["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] = Field(
         default="GET",
@@ -136,7 +136,7 @@ class CurlArgs(ActionReasoning):
     )
     body: str | None = Field(
         default=None,
-        description="Optional request body string (e.g. JSON string '{\"email\":\"admin@juice-sh.op\",\"password\":\"' or 1=1--\"}').",
+        description="Optional request body string, e.g. JSON '{\"username\":\"test\",\"password\":\"test\"}'.",
     )
     follow_redirects: bool = Field(
         default=True,
@@ -148,13 +148,72 @@ class CurlArgs(ActionReasoning):
 
 
 class SqlmapArgs(ActionReasoning):
-    parameter: str | None = Field(default=None, description="Optional parameter name to test.")
+    url: str = Field(
+        description=(
+            "Exact endpoint on the scoped target, starting with '/'. Include the query "
+            "string when the parameter under test is in the URL, e.g. "
+            "'/search?q=test'. A full URL is accepted only when its host "
+            "is in the assessment scope."
+        )
+    )
+    parameter: str | None = Field(
+        default=None,
+        description="Parameter name to test, e.g. 'q' or 'email'. Passed to sqlmap as -p.",
+    )
+    method: Literal["GET", "POST"] = Field(
+        default="GET", description="HTTP method used by the endpoint (GET or POST)."
+    )
+    data: str | None = Field(
+        default=None,
+        description="Request body for POST endpoints, e.g. a JSON string or form-encoded body.",
+    )
+    cookie: str | None = Field(
+        default=None,
+        description="Cookie header value, e.g. 'token=...'. Passed to sqlmap as --cookie.",
+    )
+    level: int = Field(
+        default=2,
+        ge=1,
+        le=3,
+        description=(
+            "sqlmap test level (1-3). Default 2; level 1 misses SQLite "
+            "boolean/time-based blind injection."
+        ),
+    )
+    risk: int = Field(default=1, ge=1, le=2, description="sqlmap risk level (1-2).")
 
 
 class UpdateFindingStatusArgs(BaseModel):
     finding_id: int = Field(description="ID of the candidate finding to update.")
     status: Literal["confirmed", "suspected", "false_positive"] = Field(description="New status.")
     reasoning: str = Field(description="Detailed justification based on observed probe evidence.")
+
+
+class RecordFindingArgs(BaseModel):
+    finding_id: int | None = Field(
+        default=None,
+        description=(
+            "Existing finding to extend with evidence. Omit to create a new finding; "
+            "when set, title/asset/endpoint are optional."
+        ),
+    )
+    title: str = Field(default="", description="Short, specific finding title, e.g. 'SQL injection in search parameter'.")
+    asset: str = Field(default="", description="Target host or IP exactly as listed in the assessment scope.")
+    endpoint: str = Field(default="", description="Endpoint or path where the issue was observed, e.g. '/search?q='.")
+    severity: Literal["critical", "high", "medium", "low", "info"] | None = Field(
+        default=None,
+        description=(
+            "Severity of a new finding; defaults to medium. Omit when extending "
+            "an existing finding to keep its current severity."
+        ),
+    )
+    description: str = Field(default="", description="What was observed and why it matters.")
+    evidence_step_ids: list[int] = Field(
+        default_factory=list,
+        description="Executed step ids whose artifacts prove the finding.",
+    )
+    reasoning: str = Field(default="", description="How the cited evidence supports the claim.")
+    cwe: list[str] = Field(default_factory=list, description="Optional CWE ids, e.g. ['CWE-89'].")
 
 
 class LookupCveArgs(BaseModel):
@@ -365,13 +424,29 @@ sqlmap_scan_tool = ToolSpec(
     action="sqlmap_scan",
     args_model=SqlmapArgs,
     description=(
-        "Run a bounded sqlmap check against one in-scope HTTP service. "
-        "Use only when evidence specifically points to SQL injection. "
+        "Run a bounded sqlmap check against one exact endpoint on an in-scope target. "
+        "Put the endpoint path (with query string) in url and the parameter name in "
+        "parameter. Use this when a parameter looks injectable; do not conclude "
+        "'not injectable' until sqlmap has run against that exact endpoint. "
         "This is a high-risk action and requires human approval. "
         "Destructive options are not available."
     ),
-    param_fields=("parameter",),
+    param_fields=("url", "parameter", "method", "data", "cookie", "level", "risk"),
 )
+
+record_finding_tool = ToolSpec(
+    name="record_finding",
+    kind="direct",
+    args_model=RecordFindingArgs,
+    description=(
+        "Create a candidate finding from your own observation when no scanner "
+        "produced one, or extend an existing finding with new evidence by passing "
+        "its finding_id. Link the executed step ids whose artifacts prove it. "
+        "The finding stays suspected; confirm it later with "
+        "update_finding_status after a targeted curl_request or sqlmap_scan."
+    ),
+)
+
 
 update_finding_status_tool = ToolSpec(
     name="update_finding_status",
@@ -379,9 +454,9 @@ update_finding_status_tool = ToolSpec(
     args_model=UpdateFindingStatusArgs,
     description=(
         "Record a validation verdict for one candidate finding. "
-        "confirmed and false_positive require at least one executed curl_request "
-        "evidence row linked to the finding. State the observed evidence and "
-        "the inference separately."
+        "confirmed and false_positive require linked evidence from an executed "
+        "curl_request (with an HTTP status) or a positive sqlmap_scan. State the "
+        "observed evidence and the inference separately."
     ),
 )
 
@@ -429,6 +504,7 @@ ROLE_TOOL_SPECS: dict[str, list[ToolSpec]] = {
         lookup_cve_tool,
         read_artifact_tool,
         list_findings_tool,
+        record_finding_tool,
         update_finding_status_tool,
         record_hypothesis_tool,
         update_hypothesis_tool,

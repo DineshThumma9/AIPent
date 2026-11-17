@@ -18,6 +18,18 @@ SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 STATUS_RANK = {"suspected": 0, "confirmed": 1, "false_positive": 2}
 
 
+def _proving_locator(locator: dict[str, Any], status: str = "confirmed") -> bool:
+    """True when a locator carries proof for the requested verdict."""
+    tool = locator.get("tool")
+    if tool == "curl_request":
+        return locator.get("http_status") is not None
+    if tool == "sqlmap_scan":
+        if status == "false_positive":
+            return locator.get("injectable") is False
+        return locator.get("injectable") is True
+    return False
+
+
 class FindingRepo(BaseRepo):
     """All database access for findings and evidence."""
 
@@ -226,17 +238,28 @@ class FindingRepo(BaseRepo):
             )
             evidence = list(evidence_result.scalars().all())
             executed = any(
-                (item.locator or {}).get("tool") == "curl_request"
-                and (item.locator or {}).get("http_status") is not None
-                for item in evidence
+                _proving_locator(item.locator or {}, status) for item in evidence
             )
             if not executed:
+                if status == "false_positive":
+                    reason = (
+                        "Run a clean sqlmap scan against the endpoint (it records "
+                        "injectable=false) or a curl_request that disproves the "
+                        "claim, then attach its step id with "
+                        "record_finding(finding_id=<this finding>, "
+                        "evidence_step_ids=[...])."
+                    )
+                else:
+                    reason = (
+                        "Run a successful curl_request (with an HTTP status) or a "
+                        "positive sqlmap_scan and attach its step id with "
+                        "record_finding(finding_id=<this finding>, "
+                        "evidence_step_ids=[...])."
+                    )
                 return {
                     "error": (
-                        "verdict blocked: no executed curl_request evidence is "
-                        "linked to this finding. Queue requests with "
-                        "curl_request(..., finding_id=...) and wait for the action "
-                        "gate to execute them."
+                        "verdict blocked: no executed proving evidence is linked "
+                        f"to this finding. {reason}"
                     )
                 }
 

@@ -1,4 +1,9 @@
-name: aipent-zap
+# ==============================================================================
+# AIPENT — MCP Tool Infrastructure Docker Compose
+# Orchestrates all MCP backing services: ZAP, ZAP MCP Server, Vulnify MCP,
+# Curl MCP, and Typst report compiler.
+# ==============================================================================
+name: aipent-mcp
 
 services:
   zap:
@@ -26,6 +31,11 @@ services:
     environment:
       ZAP_API_KEY: ${ZAP_API_KEY}
       ZAP_MEMORY: ${ZAP_MEMORY:-2G}
+    env_file:
+      - path: ../gateway/.env
+        required: false
+      - path: ../.env
+        required: false
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:
@@ -39,10 +49,8 @@ services:
       retries: 30
       start_period: 30s
     volumes:
-      # Both containers run as uid 1000; this host directory is owned by the
-      # same uid, so ZAP can write reports and the MCP server can read them.
-      - ./reports:/zap/wrk
-      - ./zap-workplace/zap-home:/home/zap/.ZAP
+      - ./zap/reports:/zap/wrk
+      - ./zap/zap-home:/home/zap/.ZAP
 
   mcp-server:
     image: dtkmn/mcp-zap-server:v0.17.1
@@ -52,8 +60,6 @@ services:
         condition: service_healthy
     ports:
       - "127.0.0.1:7456:7456"
-    # The Java MCP server resolves the target URL before handing it to ZAP,
-    # so it needs the host alias too, not just the ZAP container.
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
@@ -67,29 +73,47 @@ services:
       ZAP_ALLOW_PRIVATE_NETWORKS: "true"
       ZAP_REPORT_DIRECTORY: /zap/wrk
       ZAP_MAX_ACTIVE_SCAN_DURATION: "30"
-      # dtkmn reads this as minutes, not seconds. Two minutes caps the demo
-      # crawl while still covering Juice Shop's main routes.
       ZAP_MAX_SPIDER_SCAN_DURATION: "2"
       ZAP_SPIDER_MAX_DEPTH: "5"
       ZAP_SPIDER_MAX_CHILDREN: "10"
       ZAP_SCAN_JOBS_STORE_BACKEND: in-memory
+    env_file:
+      - path: ../gateway/.env
+        required: false
+      - path: ../.env
+        required: false
     volumes:
-      - ./reports:/zap/wrk
+      - ./zap/reports:/zap/wrk
       - mcp-launch-safety:/var/lib/mcp-zap/scan-launch-safety
-  
 
   vulnify-mcp:
     image: vulnify-mcp:latest
     build:
-      context: ../../vulnify-mcp
+      context: ./vulnify
       dockerfile: Dockerfile.vulnify
     restart: unless-stopped
     volumes:
-      - ../../vulnify.db:/data/vulnify.db:ro
+      - ../vulnify.db:/data/vulnify.db:ro
     environment:
       - VULNIFY_SQLITE_PATH=/data/vulnify.db
     ports:
       - "127.0.0.1:7457:7457"
+
+  curl-mcp:
+    image: curl-mcp:latest
+    build:
+      context: ./curl
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:7458:7458"
+    environment:
+      - PORT=7458
+
+  typst:
+    image: ghcr.io/typst/typst:latest
+    container_name: aipent-typst
+    restart: "no"
 
 volumes:
   mcp-launch-safety:

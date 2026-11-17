@@ -267,7 +267,7 @@ def test_update_finding_status_requires_executed_probe_evidence(engine):
         blocked = await repo.update_status(
             finding.id, assessment.id, "confirmed", "looks real"
         )
-        assert "no executed curl_request evidence" in blocked["error"]
+        assert "no executed proving evidence is linked" in blocked["error"]
 
         session.add(
             Evidence(

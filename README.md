@@ -126,34 +126,38 @@ AIPENT enforces multi-layered defense-in-depth to guarantee safety during automa
 
 ---
 
-### 3. Starting the MCP Server Stack & Gateway
+### 3. Starting the Entire Stack (One Command)
 
-#### Step 0 : Configure Environment
+AIPENT provides a unified launcher that automatically boots the MCP containers, Docker MCP Gateway, backend API, and frontend web desk in the correct dependency sequence with built-in health checks and graceful teardown:
+
 ```bash
-cp deploy/mcp-zap/.env.example deploy/mcp-zap/.env
-# Verify or edit MCP_API_KEY and ZAP_API_KEY
+# Start the full stack (MCP infrastructure + Gateway + Backend + Frontend)
+./start.sh
+
+# Or start the full stack including the OWASP Juice Shop lab target:
+./start.sh --with-lab
 ```
 
-#### Step 1 : Install the Curl MCP package:
+#### Individual Component Control (Under the Hood)
+If you prefer running services individually:
 
-```
-npm install -g @calibress/curl-mcp
-
-```
-
-
-
-#### Step 2: Start ZAP & Vulnify Compose Services
-```bash
-docker compose -f deploy/mcp-zap/compose.yaml up -d
-```
-
-
-#### Step 3: Launch the Docker MCP Gateway
-```bash
-./deploy/mcp-gateway/start.sh
-```
-*`start.sh` automatically installs `aipent.yaml` into `~/.docker/mcp/catalogs/`, writes isolated secrets to `~/.docker/mcp/aipent-secrets.env` (mode 0600), starts the curl daemon, and launches the gateway on `127.0.0.1:8812`.*
+1. **Start MCP Tool Containers (ZAP, Vulnify, Curl, Typst):**
+   ```bash
+   docker compose -f mcp/compose.yaml up -d
+   ```
+2. **Launch Docker MCP Gateway:**
+   ```bash
+   ./gateway/start.sh
+   ```
+3. **Start Backend API:**
+   ```bash
+   cd backend && uv run uvicorn app.main:app --port 8010
+   ```
+4. **Start Frontend Desk:**
+   ```bash
+   cd frontend && npm run dev:web
+   ```
+*(Run `./start.sh --stop` to stop background processes and Docker services, or `./start.sh --status` to inspect health).*
 
 
 ---
@@ -348,7 +352,7 @@ The script automatically:
 2. Decompresses pre-downloaded `vulnify.db.zst` or `vulnify.db.zip` using `zstd`, `unzstd`, or Python.
 3. Provides exact fallback instructions for downloading release assets manually via `gh release download -R mez-0/vulnify --pattern "vulnify.db.zst"`.
 
-An optional Dockerized FastMCP bridge is also maintained in [`vulnify-mcp/`](vulnify-mcp/) and configured in [`deploy/mcp-zap/compose.yaml`](deploy/mcp-zap/compose.yaml).
+An optional Dockerized FastMCP bridge is also maintained in [`vulnify-mcp/`](vulnify-mcp/) and configured in [`mcp/compose.yaml`](mcp/compose.yaml).
 
 ---
 
@@ -365,81 +369,37 @@ An optional Dockerized FastMCP bridge is also maintained in [`vulnify-mcp/`](vul
 
 
 
-### Typst Compiler (Required for PDF Reports)
+### Typst Compiler (For Professional PDF Reports)
 
-AIPENT uses the official Typst compiler to generate professional VAPT PDF reports. Install Typst according to your operating system.
+AIPENT supports two compilation modes:
+1. **Dockerized Compiler (Zero Setup - Recommended):** The official `ghcr.io/typst/typst:latest` container is included in `docker-compose.mcp.yml` and automatically invoked as a seamless fallback if native Typst is not present.
+2. **Native Binary (Optional):** If you prefer compiling natively, install Typst via your package manager:
+   - **macOS:** `brew install typst`
+   - **Linux:** `sudo pacman -S typst` or `sudo snap install typst`
+   - **Windows:** `winget install --id Typst.Typst`
 
-**macOS (Homebrew):**
-```bash
-brew install typst
-```
+---
 
-**Windows (PowerShell):**
-```powershell
-winget install --id Typst.Typst
-```
-
-**Linux:**
-
-Arch Linux:
-```bash
-sudo pacman -S typst
-```
-
-Ubuntu (Snap):
-```bash
-sudo snap install typst
-```
-
-Fedora:
-```bash
-sudo dnf install typst
-```
-
-**Verify installation:**
+### Quickstart (One Command)
 
 ```bash
-typst --version
+# 1. Install dependencies (first time only)
+cd backend && uv sync && cd ../frontend && npm install && cd ..
+
+# 2. Run the entire stack in one command
+./start.sh --with-lab
 ```
 
-**Verify PDF compilation:**
+Your mission desk is instantly available at **`http://localhost:5173`**!
 
+To inspect stack health:
 ```bash
-typst compile report.typ report.pdf
+./start.sh --status
 ```
 
-Ensure the Typst executable is available in your system PATH so that the AIPENT backend can invoke it during report generation.
-
-Official installation instructions: https://typst.app/open-source/
-
-
-
-
-### 1. Setup Backend (Local or Docker)
-
-#### After compeletion of gateway 
-
-**Local Virtual Environment**
+To stop all services and containers:
 ```bash
-cd backend
-uv sync 
-cp .env.example .env
-uv run uvicorn app.main:app --reload  --port 8010
-
-# Edit backend/.env to set your API keys (OpenRouter, Groq, Ollama, etc.)
-```
-
-
-### 2. Setup Frontend
-```bash
-cd frontend
-npm install
-```
-
-### 3. Start Environment
-```bash
-# Start backend and web desk together
-cd frontend && npm run dev
+./start.sh --stop
 ```
 
 ---
@@ -479,9 +439,10 @@ aipent/
 │   │   ├── hooks/              # SSE live event streaming hooks
 │   │   └── lib/                # Schemas, mission state folding & API client
 │   └── scripts/dev.mjs         # Dual-process orchestrator for API + Vite
-├── deploy/                     # Docker MCP Gateway configurations (Kali + ZAP)
-├── lab.lvl1.yml                # Authorized Juice Shop lab compose target
-├── lab.lvl2.yml                # Authorized DVWA lab compose target
+├── start.sh                    # Unified one-command stack launcher
+├── gateway/                    # Docker MCP Gateway runner & catalog (:8812)
+├── mcp/                        # MCP tool containers & compose (ZAP, Vulnify, Curl, Typst)
+├── labs/                       # Authorized lab compose targets (Juice Shop, DVWA)
 └── README.md
 ```
 

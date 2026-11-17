@@ -6,10 +6,11 @@ not a pytest test.
 
 Prerequisites:
 
-    docker compose -f lab.lvl1.yml up -d
-    docker compose -f deploy/mcp-zap/compose.yaml up -d
-    ./deploy/mcp-gateway/start.sh
-    cd backend && uv run uvicorn app.main:app --host 127.0.0.1 --port 8010
+    ./start.sh --with-lab
+    # Or manually:
+    #   docker compose -f docker-compose.mcp.yml up -d
+    #   ./gateway/start.sh
+    #   cd backend && uv run uvicorn app.main:app --host 127.0.0.1 --port 8010
 
 Run:
 

@@ -394,7 +394,12 @@ async def test_action_approval_rejection_resumes_cleanly(engine, monkeypatch):
                 tool_calls=[{
                     "id": "sqlmap_call_1",
                     "name": "sqlmap_scan",
-                    "args": {"target": "127.0.0.1", "rationale": "Probe SQL injection.", "parameter": "id"},
+                    "args": {
+                        "target": "127.0.0.1",
+                        "rationale": "Probe SQL injection.",
+                        "url": "/login?id=1",
+                        "parameter": "id",
+                    },
                 }],
             ),
             # Turn 2: after rejection observation, model acknowledges and hands off to discovery

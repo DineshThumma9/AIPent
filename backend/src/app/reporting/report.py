@@ -299,11 +299,36 @@ async def generate_report(
     data_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
     shutil.copyfile(TEMPLATE, typ_path)
 
+    async def _compile_typst(target_typ: Path, target_pdf: Path, work_dir: Path) -> None:
+        try:
+            await asyncio.to_thread(
+                typst.compile, str(target_typ), output=str(target_pdf), root=str(work_dir)
+            )
+            return
+        except Exception as exc:
+            log.warning("In-process typst.compile failed (%s); attempting Docker fallback...", exc)
+
+        cmd = [
+            "docker", "run", "--rm",
+            "-v", f"{work_dir.resolve()}:/work",
+            "-w", "/work",
+            "ghcr.io/typst/typst:latest",
+            "compile",
+            target_typ.name,
+            target_pdf.name,
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"Typst compilation failed via Docker (exit {proc.returncode}): {stderr.decode().strip()}"
+            )
+
     final = typ_path
     try:
-        await asyncio.to_thread(
-            typst.compile, str(typ_path), output=str(pdf_path), root=str(directory)
-        )
+        await _compile_typst(typ_path, pdf_path, directory)
         final = pdf_path
     except Exception as exc:
         log.warning("Typst compilation failed assessment=%s error=%s", assessment_id, exc)
@@ -313,9 +338,7 @@ async def generate_report(
                 log.info("Attempting fallback Typst compilation with narrative=None")
                 fallback_data = await build_report_data(session, assessment, narrative=None)
                 data_path.write_text(json.dumps(fallback_data, indent=2), encoding="utf-8")
-                await asyncio.to_thread(
-                    typst.compile, str(typ_path), output=str(pdf_path), root=str(directory)
-                )
+                await _compile_typst(typ_path, pdf_path, directory)
                 final = pdf_path
             except Exception:
                 log.exception("Typst fallback compilation also failed assessment=%s", assessment_id)

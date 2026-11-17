@@ -352,7 +352,7 @@ async def test_finding_repo_requires_curl_tool_evidence(engine):
             reasoning="looks open",
         )
         assert "error" in result
-        assert "no executed curl_request evidence is linked" in result["error"]
+        assert "no executed proving evidence is linked" in result["error"]
 
         # Add executed curl_request evidence row
         session.add(

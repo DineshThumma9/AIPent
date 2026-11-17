@@ -39,9 +39,9 @@ plan.md
 *.pdf
 .python-version
 backend/bin
-deploy/mcp-zap/.env
-deploy/mcp-zap/zap-workplace
-deploy/mcp-zap/reports/
+gateway/.env
+mcp/zap/zap-home
+mcp/zap/reports/
 walkthrough.md
 issue.md
 docs/
@@ -56,3 +56,4 @@ backend/src/app/skills
 backend/src/app/agents/specialists
 *.pptx 
 *.pdf 
+strix_runs/

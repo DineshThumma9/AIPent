@@ -20,17 +20,29 @@ services:
       - AIPENT_MCP_TRANSPORT=gateway
       - AIPENT_MCP_GATEWAY_URL=http://host.docker.internal:8812/sse
       - AIPENT_LAB_TARGET_ALIAS=host.docker.internal
-      - VULNIFY_SQLITE_PATH=/app/vulnify.db
+      - VULNIFY_SQLITE_PATH=/backend/vulnify.db
       - AIPENT_LLM_PROVIDER=${AIPENT_LLM_PROVIDER:-openrouter}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
     volumes:
-      - ./data:/app/data
-      - ./vulnify.db:/app/vulnify.db:ro
+      - ./backend/data:/backend/data
+      - ./vulnify.db:/backend/vulnify.db:ro
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8010/health > /dev/null || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: aipent-frontend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5173:5173"
+    depends_on:
+      backend:
+        condition: service_healthy
