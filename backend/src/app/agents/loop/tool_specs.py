@@ -492,6 +492,7 @@ ROLE_TOOL_SPECS: dict[str, list[ToolSpec]] = {
         lookup_cve_tool,
         read_artifact_tool,
         list_findings_tool,
+        record_finding_tool,
         record_hypothesis_tool,
         update_hypothesis_tool,
         handoff_tool,

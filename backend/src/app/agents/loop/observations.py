@@ -234,9 +234,15 @@ async def observation_from_step(session: AsyncSession, step: Step) -> Observatio
                     f"HTTP {http_status}: Authentication or authorization required. Analyze headers, test for bypass, or inspect public paths."
                     if http_status in (401, 403)
                     else (
-                        "HTTP 500: Server exception occurred. Check if payload triggered an unhandled database error or query crash."
-                        if http_status == 500
-                        else "Compare observed HTTP status and response against expected_observation and would_falsify."
+                        "HTTP 404: path does not exist. Do not retry variants; use dirb results or read the API documentation artifact."
+                        if http_status == 404
+                        else (
+                            "HTTP 500 with 'Unexpected path': the route does not exist. Stop guessing endpoints; read the API/swagger artifact or use a path already discovered."
+                            if http_status == 500 and "Unexpected path" in body_excerpt
+                            else "HTTP 500: Server exception occurred. Check if payload triggered an unhandled database error or query crash."
+                            if http_status == 500
+                            else "Compare observed HTTP status and response against expected_observation and would_falsify."
+                        )
                     )
                 )
             ),

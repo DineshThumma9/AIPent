@@ -77,13 +77,19 @@ class Settings(BaseSettings):
     openrouter_model: str | None = None
     huggingface_model: str | None = None
 
-    # Phase 5 reporting settings and per-role model overrides (§11.3)
+    # Phase 5 reporting settings and per-role provider/model overrides (§11.3)
+    report_provider: str | None = None
     report_model: str | None = None
     report_thinking: str = "high"
+    recon_provider: str | None = None
     recon_model: str | None = None
+    discovery_provider: str | None = None
     discovery_model: str | None = None
+    validation_provider: str | None = None
     validation_model: str | None = None
+    supervisor_provider: str | None = None
     supervisor_model: str | None = None
+    coordinator_provider: str | None = None
     coordinator_model: str | None = None
 
     # Phase 5.5 Vulnify CVE catalog settings
@@ -149,8 +155,36 @@ class Settings(BaseSettings):
         return _clean_env(os.getenv("AIPENT_OPENROUTER_API_KEY") or os.getenv("OPENROUTER_API_KEY"))
 
     @property
+    def nvidia_api_key(self) -> str | None:
+        return _clean_env(os.getenv("AIPENT_NVIDIA_API_KEY") or os.getenv("NVIDIA_API_KEY"))
+
+    @property
+    def nvidia_model(self) -> str | None:
+        return _clean_env(os.getenv("AIPENT_NVIDIA_MODEL") or os.getenv("NVIDIA_MODEL"))
+
+    @property
     def huggingface_api_key(self) -> str | None:
         return _clean_env(os.getenv("AIPENT_HUGGINGFACE_API_KEY") or os.getenv("HUGGINGFACE_API_KEY"))
+
+    @property
+    def cerebras_api_key(self) -> str | None:
+        return _clean_env(os.getenv("AIPENT_CEREBRAS_API_KEY") or os.getenv("CEREBRAS_API_KEY"))
+
+    @property
+    def cloudflare_api_key(self) -> str | None:
+        return _clean_env(
+            os.getenv("AIPENT_CLOUDFLARE_API_KEY")
+            or os.getenv("CLOUDFLARE_API_KEY")
+            or os.getenv("CLOUDFARE_API_KEY")
+        )
+
+    @property
+    def cloudflare_account_id(self) -> str | None:
+        return _clean_env(
+            os.getenv("AIPENT_CLOUDFLARE_ACCOUNT_ID")
+            or os.getenv("CLOUDFLARE_ACCOUNT_ID")
+            or os.getenv("CLOUDFARE_WORKER_ID")
+        )
 
 
 settings = Settings()

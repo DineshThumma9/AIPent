@@ -109,6 +109,11 @@ services:
       - "127.0.0.1:7458:7458"
     environment:
       - PORT=7458
+    # curl-mcp makes the request from inside this container, so the
+    # transport alias must resolve here too (Linux Docker has no implicit
+    # host.docker.internal, unlike Docker Desktop).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   typst:
     image: ghcr.io/typst/typst:latest

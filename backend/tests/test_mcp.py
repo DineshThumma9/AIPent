@@ -182,3 +182,20 @@ def test_gateway_mapping_uses_fixed_arguments(monkeypatch):
         )
     ]
     assert result.calls[0]["tool"] == "nmap_scan"
+
+
+def test_curl_tool_error_fails_only_transport_errors():
+    assert (
+        executor._curl_tool_error(
+            json.dumps({"ok": False, "code": None, "message": "fetch failed"})
+        )
+        == "fetch failed"
+    )
+    assert (
+        executor._curl_tool_error(
+            json.dumps({"ok": False, "code": 404, "status": "404"})
+        )
+        is None
+    )
+    assert executor._curl_tool_error(json.dumps({"ok": True, "code": 200})) is None
+    assert executor._curl_tool_error("<nmaprun/>") is None

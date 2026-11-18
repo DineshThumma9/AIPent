@@ -82,6 +82,8 @@ async def intake_node(state: AssessmentState) -> Command:
         ports = list(assessment.ports or [])
         exclusions = list(assessment.exclusions or [])
 
+        from app.agents.model import role_model_config
+
         audit(
             session,
             assessment_id,
@@ -91,6 +93,7 @@ async def intake_node(state: AssessmentState) -> Command:
                 "loop": "v2",
                 "targets": targets,
                 "ports": ports,
+                "models": role_model_config(),
             },
         )
         await session.commit()
@@ -300,6 +303,24 @@ async def model_node(state: AssessmentState) -> Command:
             role=role,  # type: ignore[arg-type]
             kind="budget_exhausted",
             summary=f"{role} reached its model-call budget ({cap} turns) without a handoff.",
+            attempts=turns.get(role, 0),
+        )
+        return Command(
+            update={
+                "last_message": signal.summary,
+                "failure_signal": signal.model_dump(),
+            },
+            goto="supervisor",
+        )
+
+    if state.get("no_progress", 0) >= settings.max_no_progress:
+        signal = FailureSignal(
+            role=role,  # type: ignore[arg-type]
+            kind="no_progress",
+            summary=(
+                f"{role} produced {state['no_progress']} consecutive failed probes "
+                "without a handoff; supervisor intervention required."
+            ),
             attempts=turns.get(role, 0),
         )
         return Command(
@@ -1048,7 +1069,15 @@ def make_execute_node(executor: Callable[..., Any] | None = None):
                     }
                 ],
                 "last_message": obs.summary,
-                "no_progress": 0 if obs.ok else state.get("no_progress", 0) + 1,
+                "no_progress": (
+                    0
+                    if obs.ok
+                    and not (
+                        obs.facts
+                        and int(obs.facts.get("status_code") or 0) >= 400
+                    )
+                    else state.get("no_progress", 0) + 1
+                ),
             },
             goto="model",
         )

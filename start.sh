@@ -26,6 +26,21 @@ NC='\033[0m'
 
 COMPOSE_FILE="$ROOT_DIR/mcp/compose.yaml"
 WITH_LAB=false
+
+# Port probe that does not require netcat: bash opens a TCP socket directly.
+port_open() {
+  local host="$1"
+  local port="$2"
+  if (exec 3<>"/dev/tcp/$host/$port") 2>/dev/null; then
+    return 0
+  fi
+  if command -v nc >/dev/null 2>&1; then
+    nc -z "$host" "$port" 2>/dev/null
+    return $?
+  fi
+  return 1
+}
+
 STOP_SERVICES=false
 DOWN_SERVICES=false
 STATUS_CHECK=false
@@ -49,7 +64,7 @@ usage() {
   echo "Options:"
   echo "  --with-lab    Also start the OWASP Juice Shop lab container (port 3000)"
   echo "  --status      Check the status of all stack components and exit"
-  echo "  --stop        Stop running background processes and Docker MCP services"
+  echo "  --stop        Stop background processes, MCP services, and the lab container"
   echo "  --down        Stop and tear down all Docker containers"
   echo "  -h, --help    Show this help message"
   echo ""
@@ -99,7 +114,7 @@ if [ "$STATUS_CHECK" = true ]; then
   fi
 
   echo -n "  - Docker MCP Gateway (:8812): "
-  if nc -z 127.0.0.1 8812 2>/dev/null; then
+  if port_open 127.0.0.1 8812; then
     echo -e "${GREEN}Listening${NC}"
   else
     echo -e "${YELLOW}Not Listening${NC}"
@@ -113,7 +128,7 @@ if [ "$STATUS_CHECK" = true ]; then
   fi
 
   echo -n "  - Frontend Desk (:5173): "
-  if nc -z 127.0.0.1 5173 2>/dev/null; then
+  if port_open 127.0.0.1 5173; then
     echo -e "${GREEN}Listening${NC}"
   else
     echo -e "${YELLOW}Not Listening${NC}"
@@ -129,6 +144,12 @@ if [ "$STOP_SERVICES" = true ]; then
   pkill -f "uvicorn app.main:app" 2>/dev/null || true
   pkill -f "docker mcp gateway run" 2>/dev/null || true
   docker compose -f "$COMPOSE_FILE" stop
+  docker compose -f "$ROOT_DIR/docker-compose.yml" stop 2>/dev/null || true
+  if [ -f "$ROOT_DIR/labs/lab.lvl1.yml" ]; then
+    docker compose -f "$ROOT_DIR/labs/lab.lvl1.yml" stop 2>/dev/null || true
+  elif [ -f "$ROOT_DIR/lab.lvl1.yml" ]; then
+    docker compose -f "$ROOT_DIR/lab.lvl1.yml" stop 2>/dev/null || true
+  fi
   echo -e "${GREEN}[+] Stopped successfully.${NC}"
   exit 0
 fi
@@ -140,6 +161,7 @@ if [ "$DOWN_SERVICES" = true ]; then
   pkill -f "uvicorn app.main:app" 2>/dev/null || true
   pkill -f "docker mcp gateway run" 2>/dev/null || true
   docker compose -f "$COMPOSE_FILE" down
+  docker compose -f "$ROOT_DIR/docker-compose.yml" down 2>/dev/null || true
   if [ -f "$ROOT_DIR/labs/lab.lvl1.yml" ]; then
     docker compose -f "$ROOT_DIR/labs/lab.lvl1.yml" down 2>/dev/null || true
   elif [ -f "$ROOT_DIR/lab.lvl1.yml" ]; then
@@ -197,7 +219,7 @@ wait_for_port() {
   local timeout="${4:-45}"
   local count=0
   printf "    Waiting for %s on %s:%s..." "$name" "$host" "$port"
-  while ! nc -z "$host" "$port" 2>/dev/null; do
+  while ! port_open "$host" "$port"; do
     sleep 1
     count=$((count + 1))
     if [[ $count -ge $timeout ]]; then
@@ -287,7 +309,7 @@ fi
 # 2. Start Docker MCP Gateway
 # ------------------------------------------------------------------------------
 echo -e "${BLUE}${BOLD}[2/4] Starting Docker MCP Gateway...${NC}"
-if nc -z 127.0.0.1 8812 2>/dev/null; then
+if port_open 127.0.0.1 8812; then
   echo -e "    ${YELLOW}Port 8812 is already active; reusing existing gateway.${NC}"
 else
   "$ROOT_DIR/gateway/start.sh" > "$LOG_DIR/gateway.log" 2>&1 &
@@ -304,7 +326,9 @@ if curl -fsS -m 2 http://127.0.0.1:8010/health >/dev/null 2>&1; then
 else
   (cd "$ROOT_DIR/backend" && "$PYTHON_CMD" -m uvicorn app.main:app \
     --host 127.0.0.1 \
-    --port 8010) \
+    --port 8010 \
+    --reload \
+    --reload-dir src) \
     > "$LOG_DIR/backend.log" 2>&1 &
   BACKEND_PID=$!
   wait_for_http "http://127.0.0.1:8010/health" "Backend API" 35

@@ -7,6 +7,20 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Port probe that does not require netcat: bash opens a TCP socket directly.
+port_open() {
+  local host="$1"
+  local port="$2"
+  if (exec 3<>"/dev/tcp/$host/$port") 2>/dev/null; then
+    return 0
+  fi
+  if command -v nc >/dev/null 2>&1; then
+    nc -z "$host" "$port" 2>/dev/null
+    return $?
+  fi
+  return 1
+}
+
 # Resolve environment file with fallback priority
 if [[ -f "$root/gateway/.env" ]]; then
   env_file="$root/gateway/.env"
@@ -45,10 +59,10 @@ export DOCKER_MCP_IN_CONTAINER=1
 export DOCKER_MCP_ALLOW_INSECURE_REMOTE_URLS=1
 
 # Verify curl-mcp is reachable
-if ! nc -z 127.0.0.1 7458 2>/dev/null; then
+if ! port_open 127.0.0.1 7458; then
   echo "[*] Waiting for curl-mcp on port 7458..."
   for _ in {1..10}; do
-    if nc -z 127.0.0.1 7458 2>/dev/null; then break; fi
+    if port_open 127.0.0.1 7458; then break; fi
     sleep 1
   done
 fi

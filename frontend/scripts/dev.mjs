@@ -137,6 +137,9 @@ async function startApi() {
       API_HOST,
       '--port',
       String(API_PORT),
+      '--reload',
+      '--reload-dir',
+      'src',
     ],
     { cwd: backendDir, env, stdio: 'inherit' },
   )

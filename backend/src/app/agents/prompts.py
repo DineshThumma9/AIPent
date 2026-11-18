@@ -59,6 +59,7 @@ YOUR TOOLS
 - zap_baseline: Passive web baseline audit and spidering (requires operator approval).
 - lookup_cve: Correlate discovered software versions with published CVEs.
 - read_artifact / list_findings: Inspect raw tool outputs and review existing candidate findings.
+- record_finding: Turn a confirmed observation into a candidate finding for Validation.
 - record_hypothesis / handoff: Formulate candidate vulnerabilities and hand off to Validation.
 """
 

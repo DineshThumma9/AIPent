@@ -165,21 +165,29 @@ def scan_cmd(
             )
             aid = assessment.id
 
+        from app.agents.model import role_model_config
+
+        role_models = role_model_config()
+        banner = Text.assemble(
+            ("🎯 Target: ", "bold cyan"),
+            (clean_host, "bold white"),
+            (" | Ports: ", "bold cyan"),
+            (str(final_ports), "bold white"),
+            ("\n📋 Title:  ", "bold cyan"),
+            (final_title, "white"),
+            ("\n🆔 Run ID: ", "bold cyan"),
+            (f"Assessment #{aid}", "bold green"),
+            ("\n⚡ Mode:   ", "bold cyan"),
+            ("Auto-Approve Enabled" if auto_approve else "Interactive Human Gates", "yellow" if auto_approve else "green"),
+            ("\n🤖 Models:", "bold cyan"),
+        )
+        for role, cfg in role_models.items():
+            banner.append(f"\n   {role:<12} {cfg['provider']} / {cfg['model']}", style="dim")
+
         console.print()
         console.print(
             Panel(
-                Text.assemble(
-                    ("🎯 Target: ", "bold cyan"),
-                    (clean_host, "bold white"),
-                    (" | Ports: ", "bold cyan"),
-                    (str(final_ports), "bold white"),
-                    ("\n📋 Title:  ", "bold cyan"),
-                    (final_title, "white"),
-                    ("\n🆔 Run ID: ", "bold cyan"),
-                    (f"Assessment #{aid}", "bold green"),
-                    ("\n⚡ Mode:   ", "bold cyan"),
-                    ("Auto-Approve Enabled" if auto_approve else "Interactive Human Gates", "yellow" if auto_approve else "green"),
-                ),
+                banner,
                 title="[bold green]AIPENT Autonomous VAPT[/]",
                 box=box.ROUNDED,
                 padding=(1, 2),

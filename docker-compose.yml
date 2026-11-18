@@ -15,6 +15,11 @@ services:
       - "127.0.0.1:8010:8010"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    env_file:
+      - path: ./backend/.env
+        required: false
+      - path: ./.env
+        required: false
     environment:
       - AIPENT_MCP_ENABLED=true
       - AIPENT_MCP_TRANSPORT=gateway
@@ -22,12 +27,14 @@ services:
       - AIPENT_LAB_TARGET_ALIAS=host.docker.internal
       - VULNIFY_SQLITE_PATH=/backend/vulnify.db
       - AIPENT_LLM_PROVIDER=${AIPENT_LLM_PROVIDER:-openrouter}
-      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - LANGCHAIN_TRACING_V2=${LANGCHAIN_TRACING_V2:-true}
+      - LANGCHAIN_PROJECT=${LANGCHAIN_PROJECT:-aipent}
+    command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8010", "--reload", "--reload-dir", "src"]
     volumes:
+      - ./backend/src:/backend/src:ro
       - ./backend/data:/backend/data
       - ./vulnify.db:/backend/vulnify.db:ro
+      - ./backend/.env:/backend/.env:ro
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8010/health > /dev/null || exit 1"]
       interval: 15s

@@ -8,7 +8,7 @@ Prerequisites:
 
     ./start.sh --with-lab
     # Or manually:
-    #   docker compose -f docker-compose.mcp.yml up -d
+    #   docker compose -f mcp/compose.yaml up -d
     #   ./gateway/start.sh
     #   cd backend && uv run uvicorn app.main:app --host 127.0.0.1 --port 8010
 

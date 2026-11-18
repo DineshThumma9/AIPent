@@ -20,8 +20,11 @@ from app.agents.loop.reasoning import build_evidence_board
 from app.agents.loop.tool_specs import SUPERVISOR_TOOL_SPECS, ToolSpec
 from app.core.config import settings
 from app.core.db import get_async_session_ctx
+from app.core.log import get_logger
 from app.domain.models import Assessment, Audit, Finding, Step
 from app.persistence.finding_repo import FindingRepo
+
+log = get_logger("agent.mission")
 
 ROLE_TURN_CAPS = {
     "recon": 10,
@@ -187,7 +190,7 @@ def deterministic_safe_route(
             confidence=0.8,
         )
 
-    if _role_has_budget("validation", state) and (digest.has_validation_candidates or turns.get("validation", 0) == 0):
+    if _role_has_budget("validation", state) and digest.has_validation_candidates:
         return RouteDecision(
             next_role="validation",
             why="Candidate findings discovered; validate candidates.",
@@ -246,8 +249,8 @@ async def run_supervisor_agent(
     model = chat_model
     if model is None:
         try:
-            from app.agents.model import _build_model
-            model = _build_model()
+            from app.agents.model import build_role_model
+            model = build_role_model("supervisor")
         except Exception:
             return deterministic_safe_route({"turns": digest.budget.get("turns", {})}, digest)
 
@@ -283,8 +286,8 @@ async def run_supervisor_agent(
         for call in tool_calls:
             if call.get("name") == "RouteDecision":
                 return RouteDecision.model_validate(call.get("args") or {})
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("supervisor tool-call route failed: %s", exc)
 
     # 2. Try structured output
     try:
@@ -294,9 +297,10 @@ async def run_supervisor_agent(
             return result
         if isinstance(result, dict):
             return RouteDecision.model_validate(result)
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("supervisor structured route failed: %s", exc)
 
+    log.warning("supervisor unavailable; using deterministic route")
     return deterministic_safe_route({"turns": digest.budget.get("turns", {})}, digest)
 
 

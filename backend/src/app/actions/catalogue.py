@@ -572,14 +572,23 @@ def mcp_tool_call(
         method = str(p.get("method") or "GET").upper()
         if method not in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}:
             method = "GET"
-        raw_url = str(p.get("url") or p.get("path") or "/")
-        clean_target_host, port = _clean_host_and_port(target, _web_port(assessment))
-        if not raw_url.startswith(("http://", "https://")):
+        raw_url = str(p.get("url") or p.get("path") or "/").strip()
+        _, port = _clean_host_and_port(target, _web_port(assessment))
+        if raw_url.startswith(("http://", "https://")):
+            parsed = urlsplit(raw_url)
+            if not parsed.hostname:
+                raise ValueError("curl_request url has no host")
+            check_scope(assessment, parsed.hostname)
+            if parsed.port and (not assessment.ports or parsed.port in assessment.ports):
+                port = parsed.port
+            path = parsed.path or "/"
+            if parsed.query:
+                path += "?" + parsed.query
+            url = f"{'https' if port in (443, 8443) else 'http'}://{alias}:{port}{path}"
+        else:
             if not raw_url.startswith("/"):
                 raw_url = "/" + raw_url
-            url = f"http://{clean_target_host}:{port}{raw_url}"
-        else:
-            url = re.sub(r"^(https?://)+", r"http://", raw_url)
+            url = f"{'https' if port in (443, 8443) else 'http'}://{alias}:{port}{raw_url}"
         raw_headers = dict(p.get("headers") or {})
         headers = {str(k).rstrip(": \t"): str(v) for k, v in raw_headers.items()}
         raw_body = p.get("body")

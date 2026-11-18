@@ -101,10 +101,23 @@ async def prepare_run(
         get_logger("agent.graph").debug("challenge baseline unavailable: %s", exc)
 
     audit_repo = AuditRepo(session)
+    from app.agents.model import role_model_config
+    from app.core.log import get_logger
+
+    role_models = role_model_config()
+    run_log = get_logger("agent.run")
+    run_log.info("run %s model config (provider/model per role):", assessment_id)
+    for role, cfg in role_models.items():
+        run_log.info("  %-12s %-12s %s", role, cfg["provider"], cfg["model"])
+
     await audit_repo.add(
         assessment_id=assessment_id,
         event_type="run.requested",
-        payload={"actor": actor, "mode": "three_role_loop"},
+        payload={
+            "actor": actor,
+            "mode": "three_role_loop",
+            "models": role_models,
+        },
         actor=actor,
     )
     await repo.session.commit()

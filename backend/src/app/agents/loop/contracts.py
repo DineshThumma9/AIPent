@@ -6,9 +6,10 @@ evidence board items, and steering notes.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any, Literal
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class ActionRequest(BaseModel):
@@ -137,6 +138,15 @@ class RouteDecision(BaseModel):
         max_length=1500,
         description="Tactical directive for the specialist: specify target endpoint, tool, payload/method, and expected observation.",
     )
+
+    @field_validator("directive", mode="before")
+    @classmethod
+    def _flatten_directive(cls, value: Any) -> Any:
+        # Models often emit the directive as a structured object. Flatten it
+        # instead of rejecting the whole route (which silently fell back).
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, ensure_ascii=False)
+        return value
 
     # True when the supervisor believes the mission is ready for final review.
     report_ready: bool = False

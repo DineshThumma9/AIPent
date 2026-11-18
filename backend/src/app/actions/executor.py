@@ -324,7 +324,6 @@ async def execute_action(
         if action == "curl_request":
             result = await _run_gateway(action, assessment, target, step)
             text = result.text
-            step.exit_code = 0
             artifact.parent.mkdir(parents=True, exist_ok=True)
             artifact.write_text(text, encoding="utf-8")
             step.output_path = str(artifact)
@@ -341,6 +340,10 @@ async def execute_action(
                         "arguments": call["arguments"],
                     },
                 )
+            tool_error = _curl_tool_error(text)
+            if tool_error:
+                raise RuntimeError(tool_error)
+            step.exit_code = 0
         elif settings.mcp_enabled and settings.mcp_transport == "gateway":
             result = await _run_gateway(action, assessment, target, step)
             text = result.text
@@ -484,6 +487,28 @@ async def _run_curl(step: Step, assessment: Assessment) -> str:
         "assessment_id": assessment.id,
     }
     return json.dumps(artifact_payload, indent=2)
+
+
+def _curl_tool_error(text: str) -> str | None:
+    """Return a curl transport error, or None when the request produced a response.
+
+    HTTP status codes (including 4xx/5xx) are valid observations for the agent;
+    only failures without a status code (DNS, connection, timeout) fail the step.
+    """
+    try:
+        payload = json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict) or payload.get("ok") is not False:
+        return None
+    if payload.get("code") is not None:
+        return None
+    return str(
+        payload.get("message")
+        or payload.get("error_details")
+        or payload.get("error")
+        or "curl_request failed"
+    )[:500]
 
 
 async def _run_gateway(

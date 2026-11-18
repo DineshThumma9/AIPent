@@ -164,6 +164,8 @@ If you prefer running services individually:
 
 ## Architecture & Reasoning Loop
 
+> **Comprehensive Technical Specification:** For the complete, detailed specification of the multi-agent topology, closed Observe-Reason-Act loop, inter-agent communication channels, and telemetry pipelines, see [`docs/AGENT_ARCHITECTURE_AND_COMMUNICATION.md`](docs/AGENT_ARCHITECTURE_AND_COMMUNICATION.md).
+
 AIPENT uses a multi-agent StateGraph orchestrated with **LangGraph V2** and persistent SQLite checkpointing.
 
 ```
@@ -284,7 +286,7 @@ Follow this 5-minute checklist to evaluate AIPENT during a live demonstration ag
 ### Step 1: Start the Lab & AIPENT Desk
 ```bash
 # 1. Start the authorized Juice Shop lab
-docker compose -f lab.lvl1.yml up -d
+docker compose -f labs/lab.lvl1.yml up -d
 
 # 2. Start the unified backend and frontend web desk
 cd frontend && npm run dev
@@ -372,7 +374,7 @@ An optional Dockerized FastMCP bridge is also maintained in [`vulnify-mcp/`](vul
 ### Typst Compiler (For Professional PDF Reports)
 
 AIPENT supports two compilation modes:
-1. **Dockerized Compiler (Zero Setup - Recommended):** The official `ghcr.io/typst/typst:latest` container is included in `docker-compose.mcp.yml` and automatically invoked as a seamless fallback if native Typst is not present.
+1. **Dockerized Compiler (Zero Setup - Recommended):** The official `ghcr.io/typst/typst:latest` container is included in `mcp/compose.yaml` and automatically invoked as a seamless fallback if native Typst is not present.
 2. **Native Binary (Optional):** If you prefer compiling natively, install Typst via your package manager:
    - **macOS:** `brew install typst`
    - **Linux:** `sudo pacman -S typst` or `sudo snap install typst`
