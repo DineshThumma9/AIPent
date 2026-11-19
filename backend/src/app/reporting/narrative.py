@@ -22,7 +22,7 @@ from app.agents.loop.reasoning import build_evidence_board
 from app.core.config import settings
 from app.core.log import get_logger
 from app.domain import risk
-from app.domain.models import Approval, Assessment, Audit, Evidence, Finding, FindingCve, Step
+from app.domain.models import Approval, Assessment, Audit, Evidence, Finding, FindingCve, Step, utcnow
 from app.reporting.common import (
     clean_endpoint as _clean_endpoint,
     clean_finding_title as _clean_finding_title,
@@ -558,7 +558,7 @@ async def build_narrative_context(session: AsyncSession, assessment_id: int) -> 
             "ports": assessment.ports or [],
             "exclusions": assessment.exclusions or [],
             "started_at": _iso(assessment.created_at),
-            "finished_at": _iso(assessment.finished_at),
+            "finished_at": _iso(assessment.finished_at or utcnow()),
         },
         "risk": {
             "score": risk_summary["score"],

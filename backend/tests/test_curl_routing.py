@@ -51,3 +51,23 @@ def test_absolute_url_keeps_assessed_port():
     )
 
     assert args["url"].endswith(":8080/admin")
+
+
+def test_full_url_in_target_is_used_when_path_is_default():
+    _, arguments = catalogue.mcp_tool_call(
+        "curl_request",
+        _assessment(),
+        "http://localhost:3000/api/Baskets",
+        params={"path": "/"},
+    )
+
+    assert arguments["url"].endswith(":3000/api/Baskets")
+    assert arguments["url"].startswith("http://")
+
+
+def test_url_field_wins_over_default_path():
+    alias = catalogue.transport_target("127.0.0.1")
+
+    args = _args({"url": "/rest/basket/2", "path": "/"})
+
+    assert args["url"] == f"http://{alias}:3000/rest/basket/2"

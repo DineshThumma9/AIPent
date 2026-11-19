@@ -7,6 +7,7 @@ All inter-node transitions use Command(update=..., goto=...).
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any, Callable
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
@@ -68,6 +69,48 @@ from app.reporting.narrative import build_narrative_context, write_narrative_res
 from app.reporting.report import generate_report
 import asyncio
 from pathlib import Path 
+
+
+def curl_response_fingerprint(observation: dict[str, Any]) -> str | None:
+    """Fingerprint an HTTP response independently of the requested path.
+
+    Catches SPA catch-all routing: different paths return byte-identical
+    bodies. Those 200s look like progress to the model, so it keeps guessing.
+    """
+    if observation.get("action") != "curl_request":
+        return None
+    facts = observation.get("facts") or {}
+    status = facts.get("status_code")
+    body = facts.get("body_preview")
+    if status is None or body is None:
+        return None
+    digest = hashlib.sha256(str(body).encode("utf-8", "replace")).hexdigest()[:16]
+    return f"{status}:{digest}"
+
+
+def next_no_progress(
+    current: int,
+    observation: Observation,
+    history: list[dict[str, Any]],
+) -> int:
+    """Count failed probes and duplicate responses as no-progress."""
+    facts = observation.facts or {}
+    try:
+        status_code = int(facts.get("status_code") or 0)
+    except (TypeError, ValueError):
+        status_code = 0
+
+    fingerprint = curl_response_fingerprint(observation.model_dump())
+    seen = {
+        fp
+        for fp in (curl_response_fingerprint(item) for item in history[-15:])
+        if fp
+    }
+    duplicate = fingerprint is not None and fingerprint in seen
+
+    if not observation.ok or status_code >= 400 or duplicate:
+        return current + 1
+    return 0
 
 
 async def intake_node(state: AssessmentState) -> Command:
@@ -318,8 +361,8 @@ async def model_node(state: AssessmentState) -> Command:
             role=role,  # type: ignore[arg-type]
             kind="no_progress",
             summary=(
-                f"{role} produced {state['no_progress']} consecutive failed probes "
-                "without a handoff; supervisor intervention required."
+                f"{role} produced {state['no_progress']} consecutive failed or "
+                "duplicate probes without a handoff; supervisor intervention required."
             ),
             attempts=turns.get(role, 0),
         )
@@ -1069,14 +1112,10 @@ def make_execute_node(executor: Callable[..., Any] | None = None):
                     }
                 ],
                 "last_message": obs.summary,
-                "no_progress": (
-                    0
-                    if obs.ok
-                    and not (
-                        obs.facts
-                        and int(obs.facts.get("status_code") or 0) >= 400
-                    )
-                    else state.get("no_progress", 0) + 1
+                "no_progress": next_no_progress(
+                    state.get("no_progress", 0),
+                    obs,
+                    state.get("observations", []),
                 ),
             },
             goto="model",

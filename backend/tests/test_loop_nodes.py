@@ -25,8 +25,11 @@ from app.agents.loop.mission_brain import (
 from app.agents.loop.nodes import (
     approve_node,
     brief_node,
+    curl_response_fingerprint,
     intake_node,
     make_execute_node,
+    model_node,
+    next_no_progress,
     prepare_node,
     supervisor_node,
 )
@@ -273,3 +276,69 @@ def test_deterministic_safe_route_budget_exhausted():
     safe = deterministic_safe_route(state, digest)
     assert safe.next_role == "review"
     assert safe.report_ready is True
+
+
+def test_deterministic_route_skips_validation_without_candidates():
+    state: AssessmentState = {
+        "turns": {"recon": 1, "discovery": ROLE_TURN_CAPS["discovery"]},
+    }
+    digest = MissionDigest(
+        assessment_id=1,
+        run_id="run_ex",
+        services=[{"id": 1}],
+        candidates=[],
+        budget={"turns": state["turns"]},
+    )
+
+    safe = deterministic_safe_route(state, digest)
+
+    assert safe.next_role == "review"
+
+
+@pytest.mark.asyncio
+async def test_model_node_stops_after_repeated_failed_probes():
+    state: AssessmentState = {
+        "assessment_id": 1,
+        "run_id": "run_ex",
+        "role": "discovery",
+        "turns": {"discovery": 3},
+        "no_progress": settings.max_no_progress,
+        "messages": [],
+    }
+
+    cmd = await model_node(state)
+
+    assert cmd.goto == "supervisor"
+    assert cmd.update["failure_signal"]["kind"] == "no_progress"
+
+
+def _curl_obs(body: str, status: int = 200) -> Observation:
+    return Observation(
+        ok=True,
+        status="succeeded",
+        action="curl_request",
+        target="127.0.0.1",
+        facts={"status_code": status, "body_preview": body},
+    )
+
+
+def test_no_progress_counts_duplicate_spa_responses():
+    first = _curl_obs("<!doctype html><html>Juice Shop</html>")
+    same = _curl_obs("<!doctype html><html>Juice Shop</html>")
+    different = _curl_obs('{"status":"success","data":[]}')
+
+    assert curl_response_fingerprint(first.model_dump()) == curl_response_fingerprint(
+        same.model_dump()
+    )
+    assert curl_response_fingerprint(first.model_dump()) != curl_response_fingerprint(
+        different.model_dump()
+    )
+    assert next_no_progress(2, same, [first.model_dump()]) == 3
+    assert next_no_progress(3, different, [first.model_dump()]) == 0
+
+
+def test_no_progress_counts_http_errors():
+    unauthorized = _curl_obs("Invalid email or password", status=401)
+
+    assert next_no_progress(0, unauthorized, []) == 1
+    assert next_no_progress(4, unauthorized, []) == 5

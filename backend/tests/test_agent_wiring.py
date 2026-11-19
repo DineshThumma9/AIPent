@@ -76,6 +76,9 @@ def test_role_tools_are_unique_and_scoped():
         action_names = {n for n in names if n in expected_actions[role]}
         assert action_names == expected_actions[role]
 
+    # Discovery must be able to leave a candidate for Validation to pick up.
+    assert "record_finding" in {tool.name for tool in ROLE_TOOLS["discovery"]}
+
 
 def test_scope_normalizes_hosts_and_supports_cidr():
     assessment = Assessment(

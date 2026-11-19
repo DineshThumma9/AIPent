@@ -48,6 +48,8 @@ TACTICAL PRINCIPLES
 -------------------
 - If a scanner fails or produces no useful results, pivot to an alternative tool or vector.
 - If an HTTP request returns a client error (HTTP 4xx), analyze the response body, fix headers or JSON payload structure, and retry with the corrected request. Do not stall or repeat identical mistakes.
+- Always put the endpoint in `path` (for example '/rest/user/login'). `target` must be the scoped host or IP only; a URL placed in `target` reaches the site root.
+- If two different paths return the same body and size, you are hitting an SPA catch-all. Stop guessing paths and read the JavaScript bundle or API description instead.
 - Prefer quick, surgical HTTP checks (curl_request) to inspect discovered paths or suspected endpoints before launching heavy crawlers.
 - Select the scanner that matches the service architecture rather than running every tool blindly.
 
@@ -79,6 +81,8 @@ TACTICAL PRINCIPLES
 -------------------
 - If a verification probe fails or produces unexpected results, do not repeat the exact same request.
   Analyze the HTTP status code and response body, then adjust headers, paths, or payload.
+- HTTP 500 with 'Unexpected path' means the route does not exist in this build. Do not try sibling paths; read the frontend JavaScript bundle or API description artifact for the real route.
+- Copy returned tokens verbatim into Authorization headers. Never abbreviate a token with '...'; a truncated JWT is always rejected.
 - Always prefer targeted, surgical requests before requesting approval for heavy scanners.
 
 YOUR TOOLS

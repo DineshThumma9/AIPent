@@ -473,15 +473,15 @@ def _clean_host_and_port(target: str, default_port: int) -> tuple[str, int]:
 
 
 def transport_target(target: str) -> str:
-    """Map a scope target to its container-visible alias.
+    """Map a scope target to its container-visible host.
 
     The assessment, findings and report always use the scope target. Only the
     MCP tool argument gets the alias.
     """
-    if not settings.mcp_enabled or settings.mcp_transport != "gateway":
-        return target
-
     host, _ = _clean_host_and_port(target, 80)
+    if not settings.mcp_enabled or settings.mcp_transport != "gateway":
+        return host
+
     if host in {"127.0.0.1", "localhost"}:
         return settings.lab_target_alias
 
@@ -572,7 +572,17 @@ def mcp_tool_call(
         method = str(p.get("method") or "GET").upper()
         if method not in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}:
             method = "GET"
-        raw_url = str(p.get("url") or p.get("path") or "/").strip()
+        raw_url = str(p.get("url") or p.get("path") or "").strip()
+        if not raw_url or raw_url == "/":
+            # Models sometimes put the full endpoint in `target` and leave
+            # `path` at its default. Honour the target's path instead of
+            # silently probing the site root.
+            parsed_target = urlsplit(target if "://" in target else f"//{target}")
+            if parsed_target.path and parsed_target.path != "/":
+                raw_url = parsed_target.path
+                if parsed_target.query:
+                    raw_url += "?" + parsed_target.query
+        raw_url = raw_url or "/"
         _, port = _clean_host_and_port(target, _web_port(assessment))
         if raw_url.startswith(("http://", "https://")):
             parsed = urlsplit(raw_url)

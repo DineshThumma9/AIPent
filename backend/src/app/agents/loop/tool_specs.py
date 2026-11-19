@@ -126,6 +126,10 @@ class CurlArgs(ActionReasoning):
         default="/",
         description="Path on the scoped target starting with / (e.g. '/login', '/api/users') or full URL.",
     )
+    url: str | None = Field(
+        default=None,
+        description="Full URL or path alternative to path. Prefer path for a plain endpoint.",
+    )
     method: Literal["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] = Field(
         default="GET",
         description="HTTP method (GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS).",
@@ -379,7 +383,7 @@ curl_request_tool = ToolSpec(
         "Supports all HTTP methods (GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD), headers, body payloads, and redirect controls. "
         "Returns status code, response headers, and body excerpt."
     ),
-    param_fields=("path", "method", "headers", "body", "expected_status", "follow_redirects", "finding_id"),
+    param_fields=("url", "path", "method", "headers", "body", "expected_status", "follow_redirects", "finding_id"),
 )
 
 

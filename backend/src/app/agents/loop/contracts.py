@@ -145,7 +145,12 @@ class RouteDecision(BaseModel):
         # Models often emit the directive as a structured object. Flatten it
         # instead of rejecting the whole route (which silently fell back).
         if isinstance(value, (dict, list)):
-            return json.dumps(value, ensure_ascii=False)
+            value = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        if isinstance(value, str) and len(value) > 1500:
+            # The directive is advisory prompt text. A truncated instruction is
+            # strictly better than rejecting the route and losing the LLM's
+            # decision for the whole turn.
+            return value[:1497] + "..."
         return value
 
     # True when the supervisor believes the mission is ready for final review.

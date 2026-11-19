@@ -120,3 +120,35 @@ def test_failure_signal_validates_kind():
             kind="non_existent_kind",  # type: ignore[arg-type]
             summary="test",
         )
+
+
+def test_route_decision_coerces_structured_directive():
+    dec = RouteDecision(
+        next_role="discovery",
+        why="Test the documented login route",
+        directive={
+            "url": "http://127.0.0.1:3000/rest/user/login",
+            "method": "POST",
+            "expect": "HTTP 200 with an authentication token",
+        },
+    )
+
+    assert isinstance(dec.directive, str)
+    assert "rest/user/login" in dec.directive
+    assert "HTTP 200" in dec.directive
+
+
+def test_route_decision_truncates_long_structured_directive():
+    dec = RouteDecision(
+        next_role="validation",
+        why="Long directive test",
+        directive={
+            "description": "Validate the basket endpoint",
+            "steps": [f"step {i}: " + ("x" * 80) for i in range(40)],
+        },
+    )
+
+    assert isinstance(dec.directive, str)
+    assert len(dec.directive) == 1500
+    assert dec.directive.endswith("...")
+    assert "Validate the basket endpoint" in dec.directive

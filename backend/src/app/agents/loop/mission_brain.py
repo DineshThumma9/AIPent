@@ -251,7 +251,8 @@ async def run_supervisor_agent(
         try:
             from app.agents.model import build_role_model
             model = build_role_model("supervisor")
-        except Exception:
+        except Exception as exc:
+            log.warning("supervisor model build failed: %s", exc)
             return deterministic_safe_route({"turns": digest.budget.get("turns", {})}, digest)
 
     prompt = (
@@ -301,7 +302,11 @@ async def run_supervisor_agent(
         log.warning("supervisor structured route failed: %s", exc)
 
     log.warning("supervisor unavailable; using deterministic route")
-    return deterministic_safe_route({"turns": digest.budget.get("turns", {})}, digest)
+    fallback = deterministic_safe_route(
+        {"turns": digest.budget.get("turns", {})}, digest
+    )
+    fallback.why = f"Supervisor model unavailable; deterministic fallback. {fallback.why}"
+    return fallback
 
 
 def supervisor_tools(assessment_id: int, run_id: str) -> list[ToolSpec]:
