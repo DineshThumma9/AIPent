@@ -49,7 +49,9 @@ async def build_evidence_board(session: AsyncSession, assessment_id: int) -> Evi
         .order_by(Audit.id)
     )
     hypotheses: dict[str, Hypothesis] = {}
-    decisions: list[DecisionRecord] = []
+    decision_map: dict[str, DecisionRecord] = {}
+    decision_order: list[str] = []
+    anon_decisions: list[DecisionRecord] = []
     open_questions: list[str] = []
 
     for event in events.scalars():
@@ -86,7 +88,14 @@ async def build_evidence_board(session: AsyncSession, assessment_id: int) -> Evi
                     data["created_at"] = datetime.fromisoformat(data["created_at"])
                 elif not data.get("created_at"):
                     data["created_at"] = event.ts or utcnow()
-                decisions.append(DecisionRecord(**data))
+                d_id = data.get("id")
+                if d_id and d_id in decision_map:
+                    decision_map[d_id] = decision_map[d_id].model_copy(update=data)
+                elif d_id:
+                    decision_map[d_id] = DecisionRecord(**data)
+                    decision_order.append(d_id)
+                else:
+                    anon_decisions.append(DecisionRecord(**data))
             except Exception:
                 pass
         elif event.event_type == "handoff.created":
@@ -99,9 +108,11 @@ async def build_evidence_board(session: AsyncSession, assessment_id: int) -> Evi
             seen.add(q)
             deduped_questions.append(q)
 
+    final_decisions = [decision_map[d_id] for d_id in decision_order] + anon_decisions
+
     return EvidenceBoard(
         hypotheses=list(hypotheses.values()),
-        decisions=decisions,
+        decisions=final_decisions,
         open_questions=deduped_questions,
     )
 

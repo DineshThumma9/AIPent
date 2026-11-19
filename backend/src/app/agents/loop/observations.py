@@ -177,10 +177,18 @@ async def observation_from_step(session: AsyncSession, step: Step) -> Observatio
         http_status = None
         body_excerpt = ""
         body_full = ""
+        json_items: int | None = None
+        request_url = ""
         headers: dict[str, Any] = {}
         if step.output_path and Path(step.output_path).exists():
             try:
                 p_data = json.loads(Path(step.output_path).read_text(encoding="utf-8", errors="replace"))
+                res = p_data.get("curl_result") or p_data.get("probe_result") or {}
+                request = p_data.get("request") or {}
+                if isinstance(request, dict):
+                    request_url = str(request.get("url") or "")
+                if not request_url and isinstance(res, dict):
+                    request_url = str(res.get("url") or "")
 
                 # 1. curl-mcp format: { ok, code, status, response: { status_code, headers, body } }
                 if "response" in p_data and isinstance(p_data["response"], dict):
@@ -190,7 +198,6 @@ async def observation_from_step(session: AsyncSession, step: Step) -> Observatio
                     body_full = resp.get("body") or ""
                 # 2. probe fallback format
                 elif "curl_result" in p_data or "probe_result" in p_data:
-                    res = p_data.get("curl_result") or p_data.get("probe_result") or {}
                     http_status = res.get("status_code")
                     headers = res.get("headers") or {}
                     body_full = res.get("body_preview") or res.get("body") or ""
@@ -204,12 +211,50 @@ async def observation_from_step(session: AsyncSession, step: Step) -> Observatio
                     body_excerpt = cleaned[:1000]
                 else:
                     body_excerpt = str(body_full)[:1000]
+
+                try:
+                    parsed_body = (
+                        json.loads(body_full)
+                        if isinstance(body_full, str)
+                        else body_full
+                    )
+                    rows = (
+                        parsed_body.get("data")
+                        if isinstance(parsed_body, dict)
+                        else None
+                    )
+                    if isinstance(rows, list):
+                        json_items = len(rows)
+                except (TypeError, ValueError):
+                    json_items = None
             except Exception:
                 pass
 
         status_part = f"HTTP {http_status}" if http_status is not None else "HTTP request succeeded"
+        if json_items is not None:
+            status_part += f" ({json_items} items)"
         body_part = f" - excerpt: {body_excerpt!r}" if body_excerpt else ""
         summary_str = f"{status_part}{body_part}"
+
+        if http_status in (400, 422):
+            next_hint = "HTTP 4xx: Server rejected request syntax or payload structure. Inspect response body for validation errors, adjust JSON fields/headers, and retry."
+        elif http_status in (401, 403):
+            next_hint = f"HTTP {http_status}: Authentication or authorization required. Analyze headers, test for bypass, or inspect public paths."
+        elif http_status == 404:
+            next_hint = "HTTP 404: path does not exist. Do not retry variants; use dirb results or read the API documentation artifact."
+        elif http_status == 500 and "Unexpected path" in body_excerpt:
+            next_hint = "HTTP 500 with 'Unexpected path': the route does not exist. Stop guessing endpoints; read the API/swagger artifact or use a path already discovered."
+        elif http_status == 500:
+            next_hint = "HTTP 500: Server exception occurred. Check if payload triggered an unhandled database error or query crash."
+        elif json_items is not None and ("search" in request_url or "q=" in request_url):
+            next_hint = (
+                f"Search endpoint returned {json_items} items. Compare this with a benign "
+                "baseline; a payload that changes the row count is evidence of injection. "
+                "Record it with record_finding, cite both step ids, and hand off."
+            )
+        else:
+            next_hint = "Compare observed HTTP status and response against expected_observation and would_falsify."
+
         return Observation(
             ok=True,
             status="succeeded",
@@ -225,27 +270,11 @@ async def observation_from_step(session: AsyncSession, step: Step) -> Observatio
                 "status_code": http_status,
                 "headers": headers,
                 "body_preview": body_excerpt,
+                "json_items": json_items,
+                "request_url": request_url,
             },
             errors=[],
-            next_hint=(
-                "HTTP 4xx: Server rejected request syntax or payload structure. Inspect response body for validation errors, adjust JSON fields/headers, and retry."
-                if http_status in (400, 422)
-                else (
-                    f"HTTP {http_status}: Authentication or authorization required. Analyze headers, test for bypass, or inspect public paths."
-                    if http_status in (401, 403)
-                    else (
-                        "HTTP 404: path does not exist. Do not retry variants; use dirb results or read the API documentation artifact."
-                        if http_status == 404
-                        else (
-                            "HTTP 500 with 'Unexpected path': the route does not exist. Stop guessing endpoints; read the API/swagger artifact or use a path already discovered."
-                            if http_status == 500 and "Unexpected path" in body_excerpt
-                            else "HTTP 500: Server exception occurred. Check if payload triggered an unhandled database error or query crash."
-                            if http_status == 500
-                            else "Compare observed HTTP status and response against expected_observation and would_falsify."
-                        )
-                    )
-                )
-            ),
+            next_hint=next_hint,
         )
 
     if step.action == "whatweb":

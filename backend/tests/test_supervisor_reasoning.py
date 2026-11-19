@@ -335,7 +335,7 @@ async def test_supervisor_node_recovers_from_failure_signal(engine):
     ).model_dump()
 
     cmd = await supervisor_node(state)
-    assert cmd.goto in ("brief", "review")
+    assert cmd.goto in ("model", "review")
 
     # Verify audit contains supervisor.recovered event
     async with get_async_session_ctx() as session:

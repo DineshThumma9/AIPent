@@ -609,13 +609,19 @@ export function MissionConversation({
       (entry) =>
         entry.kind !== 'operator' || !localOperator.has(entry.text.trim()),
     )
-    return [...server, ...localEntries].sort((a, b) => {
+    const combined = [...server, ...localEntries].sort((a, b) => {
       const left = Date.parse(a.at)
       const right = Date.parse(b.at)
       return (
         (Number.isFinite(left) ? left : 0) -
         (Number.isFinite(right) ? right : 0)
       )
+    })
+    const seen = new Set<string>()
+    return combined.filter((entry) => {
+      if (seen.has(entry.id)) return false
+      seen.add(entry.id)
+      return true
     })
   }, [detail, mission, messages])
 

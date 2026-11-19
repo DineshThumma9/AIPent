@@ -43,9 +43,19 @@ def build_assessment_graph(
     return build_assessment_graph_v2(checkpointer=checkpointer, executor=executor)
 
 
-def graph_config(assessment_id: int) -> dict:
+def graph_config(assessment_id: int, run_id: str | None = None) -> dict:
     """LangGraph config with thread_id pinned to the assessment."""
+    tags = [f"assessment:{assessment_id}", f"assessment-{assessment_id}"]
+    if run_id:
+        tags.append(f"run:{run_id}")
     return {
+        "run_name": f"Assessment-{assessment_id}",
+        "tags": tags,
+        "metadata": {
+            "assessment_id": assessment_id,
+            "run_id": run_id,
+            "agent_loop": settings.agent_loop,
+        },
         "configurable": {"thread_id": f"agent-{assessment_id}"},
         "recursion_limit": max(80, settings.agent_recursion_limit * 2),
     }

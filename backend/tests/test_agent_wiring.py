@@ -68,8 +68,9 @@ def test_role_tools_are_unique_and_scoped():
         "recon": {"recon_services"},
         "discovery": {"dirb_scan", "nikto_scan", "zap_baseline"},
         "validation": {"curl_request", "sqlmap_scan", "update_finding_status"},
+        "supervisor": set(),
     }
-    assert set(ROLE_TOOLS) == {"recon", "discovery", "validation"}
+    assert set(ROLE_TOOLS) == {"recon", "discovery", "validation", "supervisor"}
     for role, tools in ROLE_TOOLS.items():
         names = [getattr(tool, "name", "") for tool in tools]
         assert len(names) == len(set(names))

@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 from typing import Any, Callable
-from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END
 from langgraph.types import Command, interrupt
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +21,7 @@ from app.actions.executor import execute_action
 from app.agents.control import audit
 from app.agents.graph.state import AssessmentState
 from app.agents.loop.brief import render_brief
+from app.agents.prompts import ROLE_PROMPTS
 from app.agents.loop.contracts import (
     ActionRequest,
     FailureSignal,
@@ -34,7 +35,6 @@ from app.agents.loop.mission_brain import (
     build_mission_digest,
     deterministic_safe_route,
     run_supervisor_agent,
-    supervisor_tools,
     validate_route,
 )
 from app.agents.loop.observations import (
@@ -160,9 +160,6 @@ async def intake_node(state: AssessmentState) -> Command:
             "failure_signal": None,
             "supervisor_calls": 0,
             "observations": [],
-            "handoffs": [],
-            "decisions": [],
-            "steps": [],
             "next_node": "supervisor",
         },
         goto="supervisor",
@@ -209,7 +206,6 @@ async def supervisor_node(state: AssessmentState) -> Command:
     try:
         proposed = await run_supervisor_agent(
             digest=digest,
-            tools=supervisor_tools(assessment_id, run_id),
             response_model=RouteDecision,
             max_tool_calls=settings.supervisor_tool_calls,
         )
@@ -278,19 +274,44 @@ async def supervisor_node(state: AssessmentState) -> Command:
         )
         await session.commit()
 
+    if decision.next_role == "review":
+        return Command(
+            update={
+                "role": decision.next_role,
+                "supervisor_decision": decision.model_dump(),
+                "supervisor_directive": decision.directive,
+                "failure_signal": None,
+                "last_handoff": None,
+                "nudges": 0,
+                "no_progress": 0,
+                "supervisor_calls": state.get("supervisor_calls", 0) + 1,
+                "next_node": decision.next_role,
+            },
+            goto="review",
+        )
+
+    brief_state = dict(state)
+    brief_state["role"] = decision.next_role
+    brief_state["supervisor_directive"] = decision.directive
+    brief_cmd = await brief_node(brief_state)
+
+    update_dict = {
+        "role": decision.next_role,
+        "supervisor_decision": decision.model_dump(),
+        "supervisor_directive": decision.directive,
+        "failure_signal": None,
+        "last_handoff": None,
+        "nudges": 0,
+        "no_progress": 0,
+        "supervisor_calls": state.get("supervisor_calls", 0) + 1,
+        "next_node": decision.next_role,
+    }
+    if brief_cmd and brief_cmd.update:
+        update_dict.update(brief_cmd.update)
+
     return Command(
-        update={
-            "role": decision.next_role,
-            "supervisor_decision": decision.model_dump(),
-            "supervisor_directive": decision.directive,
-            "failure_signal": None,
-            "last_handoff": None,
-            "nudges": 0,
-            "no_progress": 0,
-            "supervisor_calls": state.get("supervisor_calls", 0) + 1,
-            "next_node": decision.next_role,
-        },
-        goto="brief" if decision.next_role != "review" else "review",
+        update=update_dict,
+        goto="model",
     )
 
 
@@ -376,6 +397,11 @@ async def model_node(state: AssessmentState) -> Command:
 
     model = build_role_model(role).bind_tools(bindable_tools(role))
     messages = list(state.get("messages", []))
+    if role in ROLE_PROMPTS:
+        if messages and isinstance(messages[0], SystemMessage):
+            messages[0] = SystemMessage(content=ROLE_PROMPTS[role])
+        else:
+            messages = [SystemMessage(content=ROLE_PROMPTS[role]), *messages]
 
     assessment_id = state["assessment_id"]
     async with get_async_session_ctx() as session:
@@ -391,9 +417,18 @@ async def model_node(state: AssessmentState) -> Command:
         )
 
     ai = None
+    call_config = {
+        "run_name": f"{role}-turn-{turns.get(role, 0) + 1}",
+        "tags": [role, f"assessment:{assessment_id}", f"run:{state.get('run_id')}"],
+        "metadata": {"assessment_id": assessment_id, "role": role, "run_id": state.get("run_id")},
+    }
     for attempt in range(1, 4):
         try:
-            ai = await model.ainvoke(messages)
+            try:
+                ai = await model.ainvoke(messages, config=call_config)
+            except TypeError:
+                # Some chat-model wrappers only accept messages.
+                ai = await model.ainvoke(messages)
             break
         except Exception as exc:
             if attempt == 3:
@@ -422,13 +457,20 @@ async def model_node(state: AssessmentState) -> Command:
 
     if not tool_calls:
         if state.get("nudges", 0) < 2:
+            nudge_msg = HumanMessage(
+                content=(
+                    "You must either select one of your available tools to make progress, "
+                    "or call handoff(next_role=..., why=...) to pass control. "
+                    "Do not output conversational text alone."
+                )
+            )
             return Command(
                 update={
-                    "messages": messages,
+                    "messages": [*messages, nudge_msg],
                     "turns": turns,
                     "nudges": state.get("nudges", 0) + 1,
                 },
-                goto="nudge",
+                goto="model",
             )
         signal = FailureSignal(
             role=role,  # type: ignore[arg-type]
@@ -464,12 +506,7 @@ async def model_node(state: AssessmentState) -> Command:
             )
 
     name = first["name"]
-    if name == "handoff":
-        return Command(
-            update={"messages": messages, "turns": turns},
-            goto="handoff",
-        )
-    if is_direct_tool(role, name):
+    if is_direct_tool(role, name) or name == "handoff":
         return Command(
             update={"messages": messages, "turns": turns},
             goto="direct",
@@ -477,27 +514,6 @@ async def model_node(state: AssessmentState) -> Command:
     return Command(
         update={"messages": messages, "turns": turns},
         goto="prepare",
-    )
-
-
-async def nudge_node(state: AssessmentState) -> Command:
-    """Prompt the model to hand off or choose an action."""
-    return Command(
-        update={
-            "messages": [
-                *state["messages"],
-                HumanMessage(
-                    content=(
-                        "You produced no tool call. You must either invoke an action tool or call handoff(...).\n"
-                        "- Do not repeat an identical request that already ran with the same parameters.\n"
-                        "- If your previous request returned an error (HTTP 4xx/5xx or invalid header/body), "
-                        "you MUST fix the headers, payload, or URL and retry with the corrected parameters.\n"
-                        "- If your investigation is complete or blocked, call handoff(...) with your summary, next_role, and why."
-                    )
-                ),
-            ],
-        },
-        goto="model",
     )
 
 
@@ -956,6 +972,26 @@ async def approve_node(state: AssessmentState) -> Command:
                     step.status = StepStatus.REJECTED.value
                     step.error = rejection_reason[:500]
                     step.ended_at = utcnow()
+                    audit(
+                        session,
+                        assessment_id,
+                        "decision.recorded",
+                        {
+                            "id": f"D-{pending.step_id}",
+                            "run_id": state["run_id"],
+                            "role": state.get("role"),
+                            "action": pending.action,
+                            "target": pending.target,
+                            "hypothesis_id": pending.hypothesis_id,
+                            "evidence_ids": pending.evidence_ids,
+                            "observation": f"Rejected by operator: {rejection_reason[:200]}",
+                            "expected_observation": pending.expected_observation,
+                            "would_falsify": pending.would_falsify,
+                            "confidence": 0.0,
+                            "outcome": "rejected",
+                            "created_at": utcnow().isoformat(),
+                        },
+                    )
                 assessment = await session.get(Assessment, assessment_id)
                 if assessment:
                     assessment.status = AssessmentStatus.RUNNING.value
@@ -979,6 +1015,14 @@ async def approve_node(state: AssessmentState) -> Command:
                 "pending_action": None,
                 "approval_decision": {"decision": "rejected"},
                 "observations": [obs.model_dump()],
+                "steps": [
+                    {
+                        "step_id": obs.step_id,
+                        "action": obs.action,
+                        "target": obs.target,
+                        "status": obs.status,
+                    }
+                ],
                 "last_message": obs.summary,
             },
             goto="model",
@@ -1087,6 +1131,26 @@ def make_execute_node(executor: Callable[..., Any] | None = None):
                     "findings_count": len(obs.findings_created),
                 },
             )
+            audit(
+                session,
+                assessment_id,
+                "decision.recorded",
+                {
+                    "id": f"D-{pending.step_id}",
+                    "run_id": state["run_id"],
+                    "role": state.get("role") or step.role,
+                    "action": pending.action,
+                    "target": pending.target,
+                    "hypothesis_id": pending.hypothesis_id,
+                    "evidence_ids": pending.evidence_ids,
+                    "observation": (obs.summary or "")[:300],
+                    "expected_observation": pending.expected_observation,
+                    "would_falsify": pending.would_falsify,
+                    "confidence": 0.8 if obs.ok else 0.3,
+                    "outcome": obs.status,
+                    "created_at": utcnow().isoformat(),
+                },
+            )
             await session.commit()
 
         return Command(
@@ -1125,8 +1189,11 @@ def make_execute_node(executor: Callable[..., Any] | None = None):
 
 
 async def direct_node(state: AssessmentState) -> Command:
-    """Execute direct in-process tools like read_artifact, hypotheses, findings."""
+    """Execute direct in-process tools like read_artifact, hypotheses, findings, handoff."""
     tool_call = _last_tool_call(state["messages"])
+    if tool_call.get("name") == "handoff":
+        return await handoff_node(state)
+
     role = state["role"]
     assessment_id = state["assessment_id"]
     spec = lookup_tool(role, tool_call["name"])
@@ -1231,7 +1298,6 @@ async def handoff_node(state: AssessmentState) -> Command:
     return Command(
         update={
             "last_handoff": handoff.model_dump(),
-            "handoffs": [handoff.model_dump()],
             "messages": [
                 *state["messages"],
                 ToolMessage(
@@ -1328,12 +1394,11 @@ async def review_node(state: AssessmentState) -> Command:
 
     if not approved:
         return Command(
-            update={"rejected": True, "finished": True},
+            update={"finished": True},
             goto=END,
         )
 
     return Command(
-        update={"review_approved": True},
         goto="report_writer",
     )
 
@@ -1405,7 +1470,6 @@ async def report_node(state: AssessmentState) -> Command:
 
     return Command(
         update={
-            "final_report_path": str(report_path),
             "report_path": str(report_path),
             "finished": True,
         },

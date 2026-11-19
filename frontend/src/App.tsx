@@ -17,6 +17,7 @@ import {
   stopAgent,
 } from './lib/api'
 import type { LocalMessage } from './lib/chatStorage'
+import { mergeMessages } from './lib/messages'
 import { applyTheme, readTheme } from './lib/theme'
 import { actionLabel, deriveMission } from './lib/mission'
 import type { Assessment, AssessmentInput, Message } from './lib/schemas'
@@ -54,41 +55,6 @@ function causeText(cause: unknown): string {
     return cause.message
   }
   return String(cause)
-}
-
-function toLocalMessage(message: Message): LocalMessage {
-  return {
-    id: String(message.id),
-    role: message.role as LocalMessage['role'],
-    text: message.text,
-    at: message.created_at,
-  }
-}
-
-/**
- * Reconcile optimistic turns with server rows by client_message_id, then add
- * any server rows this tab has not seen. Used both by the SSE message effect
- * and the REST fallback so both paths are idempotent.
- */
-function mergeMessages(
-  local: LocalMessage[],
-  server: Message[],
-): LocalMessage[] {
-  const byClient = new Map(
-    server
-      .filter((m) => m.client_message_id)
-      .map((m) => [m.client_message_id as string, m]),
-  )
-  const next = local.filter(
-    (m) =>
-      !m.id.startsWith('local-') ||
-      !byClient.has(m.id.replace('local-', '')),
-  )
-  for (const message of server) {
-    if (!next.some((m) => m.id === String(message.id)))
-      next.push(toLocalMessage(message))
-  }
-  return next.sort((a, b) => Date.parse(a.at) - Date.parse(b.at)).slice(-120)
 }
 
 export default function App() {
@@ -153,12 +119,10 @@ export default function App() {
   ) {
     try {
       const created = await createMessage(assessmentId, { role, text })
-      const local = toLocalMessage(created)
-      setChats((prev) => {
-        const current = prev[assessmentId] ?? []
-        const next = [...current, local].slice(-120)
-        return { ...prev, [assessmentId]: next }
-      })
+      setChats((prev) => ({
+        ...prev,
+        [assessmentId]: mergeMessages(prev[assessmentId] ?? [], [created]),
+      }))
     } catch (cause) {
       const message = causeText(cause)
       setActionError(message)

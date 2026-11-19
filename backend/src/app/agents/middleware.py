@@ -9,7 +9,7 @@ from langchain_groq import ChatGroq
 
 from ..core.config import settings
 from ..domain.models import ThinkingLevel
-from .prompts import summarization_prompt
+from .prompts import ROLE_PROMPTS
 
 
 class HandleToolErrorsMiddleware(AgentMiddleware):
@@ -123,7 +123,7 @@ def middleware_setup(thinking_level: ThinkingLevel = ThinkingLevel.MEDIUM):
             ("tokens", thinking_config.token_limit),
         ],
         keep=("messages", thinking_config.keep_message_limit),
-        summary_prompt=summarization_prompt,
+        summary_prompt=ROLE_PROMPTS.get("summarization"),
     )
 
     call_tracker = ModelCallLimitMiddleware(

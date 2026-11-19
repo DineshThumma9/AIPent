@@ -24,19 +24,16 @@ def keep_last(n: int):
 
 
 class AssessmentState(TypedDict, total=False):
-    # Existing shared root
+    # Scope
     assessment_id: int
     run_id: str
     targets: list[str]
     ports: list[int]
     exclusions: list[str]
-    budget: dict  # actions_used, actions_left, probes_used, probes_left
-    risk_score: float | None
-    final_report_path: str | None
 
     # Loop control
     role: str                      # recon | discovery | validation | review
-    messages: list[AnyMessage]     # replaced at each brief; no reducer
+    messages: list[AnyMessage]     # current turn messages
     pending_action: dict | None
     approval_decision: dict | None
     last_handoff: dict | None
@@ -53,33 +50,13 @@ class AssessmentState(TypedDict, total=False):
     failure_signal: dict | None
     supervisor_calls: int
 
-    # Evidence
-    observations: Annotated[list[dict], keep_last(80)]
-    handoffs: Annotated[list[dict], operator.add]
-    decisions: Annotated[list[dict], keep_last(120)]
-    steps: Annotated[list[dict], operator.add]
+    # Bounded working history (last 10 only)
+    observations: Annotated[list[dict], keep_last(10)]
+    steps: Annotated[list[dict], keep_last(10)]
 
     # Report
     report_narrative: dict | None
-    review_approved: bool
-    rejected: bool
     report_path: str
-
-    # Legacy keys kept only for the old builder/read model
-    recon_state: dict
-    discovery_state: dict
-    validation_state: dict
-    findings: Annotated[list, operator.add]
-    recommendations: Annotated[list, operator.add]
-    audit_events: Annotated[list, operator.add]
-    interrupt_payload: dict | None
-    plan: list[dict]
-    plan_source: str
-    step_count: int
-    role_history: list[dict]
-    role_messages: dict[str, list[AnyMessage]]
-    error: str
-    last_specialist: str | None
 
 
 ROLE_ORDER = ("recon", "discovery", "validation")
@@ -93,14 +70,6 @@ def initial_state(assessment_id: int, run_id: str | None = None) -> AssessmentSt
         "targets": [],
         "ports": [],
         "exclusions": [],
-        "budget": {
-            "actions_used": 0,
-            "actions_left": 12,
-            "probes_used": 0,
-            "probes_left": 10,
-        },
-        "risk_score": None,
-        "final_report_path": None,
         "role": "recon",
         "messages": [],
         "pending_action": None,
@@ -117,25 +86,7 @@ def initial_state(assessment_id: int, run_id: str | None = None) -> AssessmentSt
         "failure_signal": None,
         "supervisor_calls": 0,
         "observations": [],
-        "handoffs": [],
-        "decisions": [],
         "steps": [],
         "report_narrative": None,
-        "review_approved": False,
-        "rejected": False,
         "report_path": "",
-        "recon_state": {},
-        "discovery_state": {},
-        "validation_state": {},
-        "findings": [],
-        "recommendations": [],
-        "audit_events": [],
-        "plan": [],
-        "plan_source": "",
-        "step_count": 0,
-        "role_history": [],
-        "role_messages": {},
-        "error": "",
-        "last_specialist": None,
-        "interrupt_payload": None,
     }

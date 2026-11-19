@@ -8,16 +8,18 @@ from __future__ import annotations
 
 import json
 from typing import TYPE_CHECKING, Any
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.agents.control import audit
+from app.agents.prompts import ROLE_PROMPTS
 if TYPE_CHECKING:
     from app.agents.graph.state import AssessmentState
 from app.agents.loop.contracts import FailureSignal, RouteDecision
 from app.agents.loop.reasoning import build_evidence_board
-from app.agents.loop.tool_specs import SUPERVISOR_TOOL_SPECS, ToolSpec
+from app.agents.loop.tool_specs import bindable_tools
 from app.core.config import settings
 from app.core.db import get_async_session_ctx
 from app.core.log import get_logger
@@ -120,9 +122,7 @@ async def build_mission_digest(
                     entry["status_code"] = facts["status_code"]
             recent_steps.append(entry)
 
-    handoffs = state.get("handoffs", [])
-    if state.get("last_handoff"):
-        handoffs = list(handoffs) + [state["last_handoff"]]
+    recent_handoffs = [state["last_handoff"]] if state.get("last_handoff") else []
 
     return MissionDigest(
         assessment_id=assessment_id,
@@ -135,7 +135,7 @@ async def build_mission_digest(
         candidates=[{"id": c.id, "title": c.title, "severity": c.severity, "endpoint": c.endpoint} for c in candidate_rows[:20]],
         hypotheses=[h.model_dump() for h in board.hypotheses[:10]],
         open_questions=board.open_questions[:10],
-        recent_handoffs=handoffs[-5:],
+        recent_handoffs=recent_handoffs,
         recent_steps=recent_steps,
         budget={
             "turns": state.get("turns", {}),
@@ -157,6 +157,13 @@ def deterministic_safe_route(
     # If specialist recommended a valid next role with budget
     if last_handoff and isinstance(last_handoff, dict):
         rec = last_handoff.get("next_role")
+        if (
+            rec == "validation"
+            and not digest.has_validation_candidates
+            and _role_has_budget("discovery", state)
+        ):
+            # Never validate thin air: map endpoints into candidate findings first.
+            rec = "discovery"
         if rec in ("recon", "discovery", "validation") and _role_has_budget(rec, state):
             return RouteDecision(
                 next_role=rec,
@@ -222,6 +229,9 @@ def validate_route(
     if proposed.next_role != "review" and not _role_has_budget(proposed.next_role, state):
         return deterministic_safe_route(state, digest), "role_budget_exhausted"
 
+    if proposed.next_role == "validation" and not digest.has_validation_candidates:
+        return deterministic_safe_route(state, digest), "validation_without_candidates"
+
     has_run_turns = state.get("turns", {}).get(proposed.next_role, 0) > 0
     if proposed.next_role == state.get("role") and has_run_turns and not (proposed.directive or "").strip():
         return deterministic_safe_route(state, digest), "same_role_without_directive"
@@ -238,9 +248,30 @@ def validate_route(
     return proposed, None
 
 
+def _supervisor_tool_payload(
+    name: str, args: dict[str, Any], digest: MissionDigest
+) -> dict[str, Any]:
+    """Serve supervisor tool calls from the already-built digest."""
+    limit = int(args.get("limit") or 0)
+    if name == "get_mission_digest":
+        return digest.model_dump()
+    if name == "list_services":
+        return {"services": digest.services[: limit or 50]}
+    if name == "list_findings":
+        return {"findings": digest.candidates[: limit or 50]}
+    if name == "get_steps":
+        return {"steps": digest.recent_steps[-limit:] if limit else digest.recent_steps}
+    if name == "get_handoffs":
+        return {
+            "handoffs": digest.recent_handoffs[-limit:] if limit else digest.recent_handoffs
+        }
+    if name == "get_budget":
+        return digest.budget
+    return {"error": f"unknown supervisor tool {name}"}
+
+
 async def run_supervisor_agent(
     digest: MissionDigest,
-    tools: list[Any] | None = None,
     response_model: type[RouteDecision] = RouteDecision,
     max_tool_calls: int = 4,
     chat_model: Any | None = None,
@@ -255,45 +286,53 @@ async def run_supervisor_agent(
             log.warning("supervisor model build failed: %s", exc)
             return deterministic_safe_route({"turns": digest.budget.get("turns", {})}, digest)
 
-    prompt = (
-        "You are the AIPENT Lead Penetration Tester and Mission Supervisor directing a multi-role security assessment.\n"
-        "Your team consists of three specialist roles:\n"
-        "- 'recon': Target discovery, port scanning, and service version identification.\n"
-        "- 'discovery': Web path fuzzing, endpoint enumeration, technology fingerprinting, and identifying candidate vulnerabilities.\n"
-        "- 'validation': Non-destructive verification of candidate findings, auth bypass testing, and discriminating exploit probes (e.g., using curl_request, sqlmap_scan).\n"
-        "- 'review': Final phase to assemble verified findings when testing is complete or budgets are reached.\n\n"
-        "MISSION STRATEGY & DECISION RULES:\n"
-        "1. If no ports/services are mapped, route to 'recon'.\n"
-        "2. If services are known but attack surface/endpoints are unexplored, route to 'discovery'.\n"
-        "3. If candidate vulnerabilities or unauthenticated endpoints exist, route to 'validation' to verify or falsify them.\n"
-        "4. If all discovered candidates have been validated or budgets are spent, route to 'review' with report_ready=True.\n"
-        "5. If a specialist failed, timed out, or repeated an action (see failure and recent_steps), you MUST intervene: "
-        "steer them away from the failing endpoint/tool and direct an alternative path.\n\n"
-        "TACTICAL DIRECTIVE REQUIREMENT:\n"
-        "Whenever next_role is NOT 'review', you MUST provide a concrete, tactical 'directive' field instructing the specialist:\n"
-        "- Specify the exact target endpoint or URL to test.\n"
-        "- Specify the exact tool (curl_request, dirb_scan, sqlmap_scan, etc.), HTTP method, headers, or test payload.\n"
-        "- Specify the hypothesis to test and what response (e.g. HTTP status, response body, reflection) confirms or refutes it.\n"
-        "- Emphasize what dead ends or past mistakes to avoid.\n\n"
+
+    user_content = (
         f"MISSION DIGEST:\n{digest.model_dump_json(indent=2)}\n\n"
-        "Call RouteDecision with your next_role, detailed rationale, confidence score, and tactical directive."
+        "Analyze the mission digest and respond with RouteDecision: next_role, detailed rationale, confidence score, and tactical directive."
     )
+    messages = [
+        SystemMessage(content=ROLE_PROMPTS.get("supervisor")),
+        HumanMessage(content=user_content),
+    ]
 
-    # 1. Try native tool binding for RouteDecision
+    call_config = {
+        "run_name": "supervisor-route-decision",
+        "tags": ["supervisor", f"assessment:{digest.assessment_id}", f"run:{digest.run_id}"],
+        "metadata": {"assessment_id": digest.assessment_id, "run_id": digest.run_id},
+    }
+
+    # 1. Let the supervisor read mission state through its tools.
+    conversation = list(messages)
     try:
-        model_with_tool = model.bind_tools([RouteDecision])
-        ai_msg = await model_with_tool.ainvoke(prompt)
-        tool_calls = getattr(ai_msg, "tool_calls", []) or []
-        for call in tool_calls:
-            if call.get("name") == "RouteDecision":
-                return RouteDecision.model_validate(call.get("args") or {})
+        tool_model = model.bind_tools(bindable_tools("supervisor"))
+        for _ in range(max(0, max_tool_calls)):
+            ai = await tool_model.ainvoke(conversation, config=call_config)
+            tool_calls = list(getattr(ai, "tool_calls", []) or [])
+            if not tool_calls:
+                break
+            conversation.append(ai)
+            for call in tool_calls:
+                conversation.append(
+                    ToolMessage(
+                        tool_call_id=call.get("id") or "",
+                        name=call.get("name") or "unknown",
+                        content=json.dumps(
+                            _supervisor_tool_payload(
+                                call.get("name") or "",
+                                call.get("args") or {},
+                                digest,
+                            )
+                        ),
+                    )
+                )
     except Exception as exc:
-        log.warning("supervisor tool-call route failed: %s", exc)
+        log.warning("supervisor tool loop failed: %s", exc)
 
-    # 2. Try structured output
+    # 2. RouteDecision is the response format.
     try:
         structured = model.with_structured_output(response_model)
-        result = await structured.ainvoke(prompt)
+        result = await structured.ainvoke(conversation, config=call_config)
         if isinstance(result, RouteDecision):
             return result
         if isinstance(result, dict):
@@ -308,7 +347,3 @@ async def run_supervisor_agent(
     fallback.why = f"Supervisor model unavailable; deterministic fallback. {fallback.why}"
     return fallback
 
-
-def supervisor_tools(assessment_id: int, run_id: str) -> list[ToolSpec]:
-    """Return read-only supervisor tools."""
-    return list(SUPERVISOR_TOOL_SPECS)

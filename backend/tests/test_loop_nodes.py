@@ -262,6 +262,32 @@ def test_validate_route_guards():
     assert accepted.next_role == "discovery"
 
 
+def test_validate_route_blocks_validation_without_candidates():
+    state: AssessmentState = {
+        "turns": {"recon": 1, "discovery": 0},
+        "role": "recon",
+        "nudges": 0,
+    }
+    digest = MissionDigest(
+        assessment_id=1,
+        run_id="run_no_candidates",
+        services=[{"id": 1}],
+        candidates=[],
+        budget={"turns": state["turns"]},
+    )
+    proposed = RouteDecision(
+        next_role="validation",
+        why="Service is Juice Shop, test SQL injection",
+        confidence=0.9,
+        directive="Run sqlmap against /rest/search",
+    )
+
+    safe, reason = validate_route(proposed, state, digest)
+
+    assert reason == "validation_without_candidates"
+    assert safe.next_role != "validation"
+
+
 def test_deterministic_safe_route_budget_exhausted():
     state: AssessmentState = {
         "turns": {k: v for k, v in ROLE_TURN_CAPS.items() if k != "review"},
@@ -293,6 +319,24 @@ def test_deterministic_route_skips_validation_without_candidates():
     safe = deterministic_safe_route(state, digest)
 
     assert safe.next_role == "review"
+
+
+def test_handoff_to_validation_without_candidates_routes_discovery():
+    state: AssessmentState = {
+        "turns": {"recon": 1, "discovery": 0},
+        "last_handoff": {"next_role": "validation", "confidence": 0.8},
+    }
+    digest = MissionDigest(
+        assessment_id=1,
+        run_id="run_ex",
+        services=[{"id": 1}],
+        candidates=[],
+        budget={"turns": state["turns"]},
+    )
+
+    safe = deterministic_safe_route(state, digest)
+
+    assert safe.next_role == "discovery"
 
 
 @pytest.mark.asyncio

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 from urllib.parse import parse_qsl, urlsplit
 
-from app.adapters import hashcat, nikto, nmap, whatweb, zap
+from app.adapters import dirb, hashcat, nikto, nmap, sqlmap, whatweb, zap
 from app.adapters.base import FindingDraft
 from app.core.config import settings
 from app.domain.models import Assessment
@@ -407,7 +407,7 @@ ACTIONS: dict[str, ActionSpec] = {
         transport="local",
         ok_codes=(0, 1),
         build_argv=_sqlmap_argv,
-        parse=lambda _text, _host, _port: [],
+        parse=lambda text, host, port: sqlmap.scan(text, host, port),
     ),
     "dirb_scan": ActionSpec(
         name="dirb_scan",
@@ -417,7 +417,7 @@ ACTIONS: dict[str, ActionSpec] = {
         transport="local",
         ok_codes=(0, 1),
         build_argv=_dirb_argv,
-        parse=lambda _text, _host, _port: [],
+        parse=lambda text, host, port: dirb.scan(text, host, port),
     ),
     "curl_request": ActionSpec(
         name="curl_request",

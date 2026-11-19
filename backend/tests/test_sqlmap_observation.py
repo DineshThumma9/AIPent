@@ -1,6 +1,7 @@
 """sqlmap observations must distinguish proof, inconclusive negatives, and clean negatives."""
 
 import asyncio
+import json
 
 import pytest
 
@@ -106,5 +107,91 @@ def test_sqlmap_proof_marker_is_reported_as_confirmed(engine, tmp_path):
 
         assert "confirmed by sqlmap" in obs.summary
         assert "Attach" in obs.next_hint
+
+    _run_with_session(body)
+
+
+def test_curl_observation_reports_json_row_count(engine, tmp_path):
+    async def body(session):
+        assessment = await _assessment(session)
+        path = tmp_path / "curl.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "ok": True,
+                    "code": 200,
+                    "request": {
+                        "url": "http://host.docker.internal:3000/rest/products/search?q=x"
+                    },
+                    "response": {
+                        "status_code": 200,
+                        "headers": {"content-type": "application/json"},
+                        "body": json.dumps(
+                            {"status": "success", "data": [{"id": i} for i in range(46)]}
+                        ),
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        step = Step(
+            assessment_id=assessment.id,
+            seq=1,
+            action="curl_request",
+            target="127.0.0.1",
+            status=StepStatus.SUCCEEDED.value,
+            output_path=str(path),
+        )
+        session.add(step)
+        await session.commit()
+        await session.refresh(step)
+
+        obs = await observation_from_step(session, step)
+
+        assert obs.facts is not None
+        assert obs.facts["json_items"] == 46
+        assert "46 items" in obs.summary
+        assert "record_finding" in (obs.next_hint or "")
+
+    _run_with_session(body)
+
+
+def test_local_curl_result_reports_search_hint(engine, tmp_path):
+    async def body(session):
+        assessment = await _assessment(session)
+        path = tmp_path / "curl-local.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "curl_result": {
+                        "url": "http://127.0.0.1:3000/rest/products/search?q=x",
+                        "method": "GET",
+                        "status_code": 200,
+                        "headers": {"content-type": "application/json"},
+                        "body_preview": json.dumps(
+                            {"status": "success", "data": [{"id": i} for i in range(46)]}
+                        ),
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        step = Step(
+            assessment_id=assessment.id,
+            seq=1,
+            action="curl_request",
+            target="127.0.0.1",
+            status=StepStatus.SUCCEEDED.value,
+            output_path=str(path),
+        )
+        session.add(step)
+        await session.commit()
+        await session.refresh(step)
+
+        obs = await observation_from_step(session, step)
+
+        assert obs.facts is not None
+        assert obs.facts["json_items"] == 46
+        assert "baseline" in (obs.next_hint or "")
 
     _run_with_session(body)

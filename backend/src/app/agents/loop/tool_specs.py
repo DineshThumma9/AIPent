@@ -477,7 +477,7 @@ lookup_cve_tool = ToolSpec(
 )
 
 
-ROLE_TOOL_SPECS: dict[str, list[ToolSpec]] = {
+ROLE_TOOLS: dict[str, list[ToolSpec]] = {
     "recon": [
         recon_services_tool,
         whatweb_tool,
@@ -515,11 +515,7 @@ ROLE_TOOL_SPECS: dict[str, list[ToolSpec]] = {
         update_hypothesis_tool,
         handoff_tool,
     ],
-}
-
-ROLE_TOOLS = ROLE_TOOL_SPECS  # compatibility alias
-
-SUPERVISOR_TOOL_SPECS: list[ToolSpec] = [
+"supervisor":  [
     get_mission_digest_tool,
     list_services_tool,
     list_findings_tool,
@@ -527,14 +523,13 @@ SUPERVISOR_TOOL_SPECS: list[ToolSpec] = [
     get_handoffs_tool,
     get_budget_tool,
 ]
+}
+ROLE_TOOL_SPECS = ROLE_TOOLS
 
 
 def lookup_tool(role: str, name: str) -> ToolSpec:
-    specs = ROLE_TOOL_SPECS.get(role, [])
+    specs = ROLE_TOOLS.get(role, [])
     for s in specs:
-        if s.name == name:
-            return s
-    for s in SUPERVISOR_TOOL_SPECS:
         if s.name == name:
             return s
     raise KeyError(f"tool {name!r} not found for role {role!r}")
@@ -566,7 +561,7 @@ def _direct_tool(spec: ToolSpec):
 
 
 def bindable_tools(role: str):
-    specs = ROLE_TOOL_SPECS.get(role, [])
+    specs = ROLE_TOOLS.get(role, [])
     tools = []
     for spec in specs:
         if spec.kind == "action":
