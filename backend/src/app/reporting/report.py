@@ -13,13 +13,15 @@ import shutil
 from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlmodel import col, select
 
 import typst
 from app.domain import risk
 from app.actions import ACTIONS, ARTIFACT_DIR
 from app.core.log import get_logger
 from app.domain.models import Approval, Assessment, Audit, Evidence, Finding, FindingCve, Step
+from app.persistence.audit_repo import AuditRepo
+from app.persistence.finding_repo import FindingRepo
+from app.persistence.step_repo import StepRepo
 from app.reporting.common import (
     clean_endpoint as _clean_endpoint,
     clean_finding_title as _clean_finding_title,
@@ -56,41 +58,15 @@ async def build_report_data(
     narrative: ReportNarrative | None = None,
 ) -> dict:
     assessment_id = assessment.id or 0
-    result = await session.execute(
-        select(Finding)
-        .where(Finding.assessment_id == assessment_id)
-        .order_by(col(Finding.id))
-    )
-    findings = list(result.scalars().all())
+    finding_repo = FindingRepo(session)
+    step_repo = StepRepo(session)
 
-    result = await session.execute(
-        select(Evidence)
-        .join(Finding, Evidence.finding_id == Finding.id)
-        .where(Finding.assessment_id == assessment_id)
-        .order_by(Evidence.id)
-    )
-    evidence = list(result.scalars().all())
+    findings = await finding_repo.get_all(assessment_id, limit=10000)
+    evidence = await finding_repo.get_all_evidence(assessment_id)
+    steps = await step_repo.get_all(assessment_id)
+    approvals = await step_repo.get_all_approvals(assessment_id)
+    finding_cves = await finding_repo.get_all_cves(assessment_id)
 
-    result = await session.execute(
-        select(Step)
-        .where(Step.assessment_id == assessment_id)
-        .order_by(Step.seq)
-    )
-    steps = list(result.scalars().all())
-
-    result = await session.execute(
-        select(Approval)
-        .where(Approval.assessment_id == assessment_id)
-        .order_by(col(Approval.id))
-    )
-    approvals = list(result.scalars().all())
-
-    result = await session.execute(
-        select(FindingCve)
-        .join(Finding, FindingCve.finding_id == Finding.id)
-        .where(Finding.assessment_id == assessment_id)
-    )
-    finding_cves = list(result.scalars().all())
     cves_by_finding: dict[int, list[FindingCve]] = {}
     for fc in finding_cves:
         cves_by_finding.setdefault(fc.finding_id, []).append(fc)
@@ -332,6 +308,7 @@ async def generate_report(
         final = pdf_path
     except Exception as exc:
         log.warning("Typst compilation failed assessment=%s error=%s", assessment_id, exc)
+        audit_repo = AuditRepo(session)
         # Fallback to evidence-only if compilation failed with LLM narrative
         if narrative is not None:
             try:
@@ -342,31 +319,26 @@ async def generate_report(
                 final = pdf_path
             except Exception:
                 log.exception("Typst fallback compilation also failed assessment=%s", assessment_id)
-                session.add(
-                    Audit(
-                        assessment_id=assessment_id,
-                        event_type="report.compile_failed",
-                        payload={"source": str(typ_path)},
-                    )
-                )
-        else:
-            session.add(
-                Audit(
+                await audit_repo.record_event(
                     assessment_id=assessment_id,
                     event_type="report.compile_failed",
                     payload={"source": str(typ_path)},
                 )
+        else:
+            await audit_repo.record_event(
+                assessment_id=assessment_id,
+                event_type="report.compile_failed",
+                payload={"source": str(typ_path)},
             )
 
     digest = hashlib.sha256(final.read_bytes()).hexdigest()
     assessment.report_path = str(final)
     assessment.report_sha256 = digest
-    session.add(
-        Audit(
-            assessment_id=assessment_id,
-            event_type="report.generated",
-            payload={"path": str(final), "sha256": digest},
-        )
+    audit_repo = AuditRepo(session)
+    await audit_repo.record_event(
+        assessment_id=assessment_id,
+        event_type="report.generated",
+        payload={"path": str(final), "sha256": digest},
     )
     await session.commit()
     return final

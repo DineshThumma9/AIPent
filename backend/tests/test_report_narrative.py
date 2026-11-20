@@ -41,6 +41,13 @@ from app.reporting.narrative import (
 from app.reporting.report import build_report_data, generate_report
 
 
+def test_no_raw_sql_in_reporting_modules():
+    import app.reporting.report as rep
+    import app.reporting.narrative as narr
+    assert "select" not in rep.__dict__
+    assert "select" not in narr.__dict__
+
+
 @pytest.fixture
 def sample_context() -> dict:
     return {
