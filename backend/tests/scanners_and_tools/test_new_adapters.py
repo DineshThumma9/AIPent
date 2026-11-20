@@ -17,6 +17,25 @@ def test_ffuf_argv_builder():
     assert "http://127.0.0.1:3000/FUZZ" in args
     assert "-w" in args
     assert "-o" in args
+    assert "-ac" in args
+
+
+def test_ffuf_argv_builder_with_calibration_and_filters():
+    from app.adapters import ffuf
+
+    args = ffuf.argv(
+        "127.0.0.1",
+        3000,
+        "/tmp/out.json",
+        filter_status="404,500",
+        filter_size="1542",
+        auto_calibrate=True,
+    )
+    assert "-ac" in args
+    assert "-fc" in args
+    assert "404,500" in args
+    assert "-fs" in args
+    assert "1542" in args
 
 
 def test_ffuf_argv_builder_preserves_custom_fuzz():
@@ -67,6 +86,28 @@ def test_ffuf_parser_empty():
 
     assert ffuf.scan("", "127.0.0.1", 3000) == []
     assert ffuf.scan("{}", "127.0.0.1", 3000) == []
+
+
+def test_ffuf_parser_spa_catchall_filtering():
+    from app.adapters import ffuf
+
+    # Simulating an SPA where 6 non-existent paths return HTTP 200 with identical length (5230 bytes)
+    mock_results = [
+        {"input": {"FUZZ": f"random_{i}"}, "url": f"http://127.0.0.1:3000/random_{i}", "status": 200, "length": 5230}
+        for i in range(6)
+    ]
+    # And one real API endpoint with different length (340 bytes)
+    mock_results.append(
+        {"input": {"FUZZ": "api/v1/status"}, "url": "http://127.0.0.1:3000/api/v1/status", "status": 200, "length": 340}
+    )
+
+    mock_json = json.dumps({"results": mock_results})
+    findings = ffuf.scan(mock_json, "127.0.0.1", 3000)
+
+    # The 6 wildcard/SPA responses of length 5230 should be filtered out, leaving only the real endpoint
+    assert len(findings) == 1
+    assert findings[0].endpoint == "/api/v1/status"
+
 
 
 def test_katana_argv_builder():

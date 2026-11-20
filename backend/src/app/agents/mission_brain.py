@@ -400,9 +400,9 @@ def _template_plan(
         },
         {
             "role": "discovery",
-            "action": "dirb_scan",
+            "action": "ffuf_scan",
             "target": host,
-            "rationale": f"Enumerate common paths on {where}; use only discovered endpoints in later steps.",
+            "rationale": f"Enumerate common paths and routes on {where} using high-speed FFUF; use only discovered endpoints in later steps.",
         },
     ]
 

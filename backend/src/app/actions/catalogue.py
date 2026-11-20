@@ -344,6 +344,9 @@ def _ffuf_argv(
         output_path=str(output),
         wordlist=p.get("wordlist"),
         path=p.get("path") or p.get("endpoint"),
+        filter_status=p.get("filter_status") or p.get("filter_code"),
+        filter_size=p.get("filter_size"),
+        auto_calibrate=bool(p.get("auto_calibrate", True)),
     )
 
 

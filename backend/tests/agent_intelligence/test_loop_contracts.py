@@ -162,7 +162,7 @@ def test_route_decision_truncates_long_structured_directive():
 def test_role_tools_are_unique_and_scoped():
     expected_actions = {
         "recon": {"recon_services"},
-        "discovery": {"dirb_scan", "nikto_scan", "zap_baseline"},
+        "discovery": {"ffuf_scan", "nikto_scan", "zap_baseline"},
         "validation": {"curl_request", "sqlmap_scan", "update_finding_status"},
         "supervisor": set(),
     }

@@ -57,7 +57,7 @@ TACTICAL PRINCIPLES
 YOUR TOOLS
 ----------
 - curl_request: Fast, targeted HTTP requests (GET, POST, PUT, DELETE, PATCH, OPTIONS, custom headers, body payloads) to inspect specific routes, API endpoints, or directory contents.
-- dirb_scan: Web content, directory, and route enumeration.
+- ffuf_scan: High-speed web content, directory, and route enumeration with auto-calibration.
 - nikto_scan: Web server configuration, known dangerous files, and server misconfigurations.
 - zap_baseline: Passive web baseline audit and spidering (requires operator approval).
 - lookup_cve: Correlate discovered software versions with published CVEs.
@@ -156,7 +156,7 @@ SUPERVISOR_PROMPT = (
         "TACTICAL DIRECTIVE REQUIREMENT:\n"
         "Whenever next_role is NOT 'review', you MUST provide a concrete, tactical 'directive' field instructing the specialist:\n"
         "- Specify the exact target endpoint or URL to test.\n"
-        "- Specify the exact tool (curl_request, dirb_scan, sqlmap_scan, etc.), HTTP method, headers, or test payload.\n"
+        "- Specify the exact tool (curl_request, ffuf_scan, sqlmap_scan, etc.), HTTP method, headers, or test payload.\n"
         "- Specify the hypothesis to test and what response (e.g. HTTP status, response body, reflection) confirms or refutes it.\n"
         "- Emphasize what dead ends or past mistakes to avoid.\n\n"
         "GROUNDING & ANTI-HALLUCINATION RULES:\n"

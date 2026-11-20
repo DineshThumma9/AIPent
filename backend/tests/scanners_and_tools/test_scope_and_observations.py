@@ -365,3 +365,67 @@ async def test_curl_observation_extracts_keys_and_routes_from_large_json(engine,
         assert "/api/Feedbacks" in routes
         assert "/rest/captcha" in routes
         assert "/api/Users" in routes
+
+
+@pytest.mark.asyncio
+async def test_ffuf_scan_observation(engine, tmp_path):
+    from app.domain.models import Evidence, Finding, FindingStatus, Origin, Severity
+
+    async with get_async_session_ctx() as session:
+        assessment = Assessment(title="Lab FFUF", targets=["127.0.0.1"], ports=[3000])
+        session.add(assessment)
+        await session.commit()
+        await session.refresh(assessment)
+
+        step = Step(
+            assessment_id=assessment.id,
+            seq=1,
+            action="ffuf_scan",
+            target="127.0.0.1",
+            status=StepStatus.SUCCEEDED.value,
+        )
+        session.add(step)
+        await session.commit()
+        await session.refresh(step)
+
+        f1 = Finding(
+            assessment_id=assessment.id,
+            canonical_key="ffuf:127.0.0.1:3000:/rest/admin",
+            title="Discovered Endpoint (FFUF): /rest/admin (HTTP 200)",
+            asset="127.0.0.1",
+            endpoint="/rest/admin",
+            severity=Severity.LOW,
+            status=FindingStatus.SUSPECTED,
+            origin=Origin.TOOL,
+        )
+        f2 = Finding(
+            assessment_id=assessment.id,
+            canonical_key="ffuf:127.0.0.1:3000:/robots.txt",
+            title="Discovered Endpoint (FFUF): /robots.txt (HTTP 200)",
+            asset="127.0.0.1",
+            endpoint="/robots.txt",
+            severity=Severity.INFO,
+            status=FindingStatus.SUSPECTED,
+            origin=Origin.TOOL,
+        )
+        session.add(f1)
+        session.add(f2)
+        await session.commit()
+        await session.refresh(f1)
+        await session.refresh(f2)
+
+        e1 = Evidence(finding_id=f1.id, step_id=step.id, excerpt="admin endpoint")
+        e2 = Evidence(finding_id=f2.id, step_id=step.id, excerpt="robots.txt endpoint")
+        session.add(e1)
+        session.add(e2)
+        await session.commit()
+
+        obs = await observation_from_step(session, step)
+        assert obs.ok is True
+        assert "2 web endpoints discovered by FFUF" in obs.summary
+        assert "sensitive: /rest/admin" in obs.summary
+        assert obs.facts["discovered_endpoints"] == ["/rest/admin", "/robots.txt"]
+        assert obs.facts["sensitive_endpoints"] == ["/rest/admin"]
+        assert "sensitive surfaces (/rest/admin)" in (obs.next_hint or "")
+
+

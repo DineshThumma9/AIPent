@@ -63,7 +63,8 @@ class ReadArtifactArgs(BaseModel):
     step_id: int = Field(description="Step id whose artifact to inspect.")
     offset: int = Field(default=0, ge=0, description="Character offset from start of artifact to read from.")
     max_chars: int = Field(default=4000, le=8000, description="Max characters to read.")
-    search: str | None = Field(default=None, description="Optional substring to search within artifact.")
+    search: str | None = Field(default=None, description="Optional substring to search within artifact (returns grep-style multi-matches with line numbers).")
+    view: str | None = Field(default=None, description="Optional view mode: 'content' (default), 'manifest', 'forms', or 'routes'.")
 
 
 class ListServicesArgs(BaseModel):
@@ -93,6 +94,13 @@ class UpdateHypothesisArgs(BaseModel):
 
 class DirbArgs(ActionReasoning):
     path: str = Field(default="/", description="Base path to enumerate.")
+
+
+class FfufArgs(ActionReasoning):
+    path: str = Field(default="/FUZZ", description="Base path to fuzz (e.g. /FUZZ or /api/FUZZ).")
+    wordlist: str | None = Field(default=None, description="Optional custom wordlist path inside container or local environment.")
+    filter_size: str | None = Field(default=None, description="Filter response size (e.g. '5230') to suppress wildcard/SPA catch-all pages.")
+
 
 
 class WhatwebArgs(ActionReasoning):
@@ -386,6 +394,19 @@ dirb_scan_tool = ToolSpec(
     param_fields=("path",),
 )
 
+ffuf_scan_tool = ToolSpec(
+    name="ffuf_scan",
+    kind="action",
+    action="ffuf_scan",
+    args_model=FfufArgs,
+    description=(
+        "Enumerate web paths and routes on one in-scope HTTP service using high-speed FFUF fuzzing. "
+        "Use when content/endpoint discovery is the missing evidence. "
+        "Automatically suppresses SPA catch-all false positives and returns discovered endpoints as findings."
+    ),
+    param_fields=("path", "wordlist", "filter_size"),
+)
+
 nikto_scan_tool = ToolSpec(
     name="nikto_scan",
     kind="action",
@@ -532,7 +553,7 @@ ROLE_TOOLS: dict[str, list[ToolSpec]] = {
     ],
     "discovery": [
         curl_request_tool,
-        dirb_scan_tool,
+        ffuf_scan_tool,
         nikto_scan_tool,
         zap_baseline_tool,
         lookup_cve_tool,
