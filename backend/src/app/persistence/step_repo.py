@@ -416,6 +416,14 @@ class StepRepo(BaseRepo):
         )
         return result.scalars().first()
 
+    async def get_all_approvals(self, assessment_id: int) -> list[Approval]:
+        result = await self.session.execute(
+            select(Approval)
+            .where(Approval.assessment_id == assessment_id)
+            .order_by(Approval.id.desc())
+        )
+        return list(result.scalars().all())
+
     async def get_pending_approval_by_action(
         self, assessment_id: int, action: str
     ) -> Approval | None:

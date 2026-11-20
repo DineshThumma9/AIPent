@@ -474,3 +474,12 @@ class FindingRepo(BaseRepo):
             select(Evidence).where(Evidence.finding_id == finding_id)
         )
         return list(result.scalars().all())
+
+    async def get_all_evidence(self, assessment_id: int) -> list[Evidence]:
+        result = await self.session.execute(
+            select(Evidence)
+            .join(Finding, Evidence.finding_id == Finding.id)
+            .where(Finding.assessment_id == assessment_id)
+            .order_by(Evidence.id)
+        )
+        return list(result.scalars().all())

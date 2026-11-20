@@ -11,6 +11,7 @@ from app.domain.models import (
     AssessmentStatus,
     Audit,
     Decision,
+    Message,
     Step,
     StepStatus,
     utcnow,
@@ -52,6 +53,20 @@ class AssessmentRepo(BaseRepo):
 
     async def get(self, assessment_id: int) -> Assessment | None:
         return await self.session.get(Assessment, assessment_id)
+
+    async def get_all(self) -> list[Assessment]:
+        result = await self.session.execute(
+            select(Assessment).order_by(Assessment.created_at.desc())
+        )
+        return list(result.scalars().all())
+
+    async def get_messages(self, assessment_id: int) -> list[Message]:
+        result = await self.session.execute(
+            select(Message)
+            .where(Message.assessment_id == assessment_id)
+            .order_by(Message.created_at)
+        )
+        return list(result.scalars().all())
 
     async def set_status(
         self,
