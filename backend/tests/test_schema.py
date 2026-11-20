@@ -117,3 +117,11 @@ def test_logger_writes_stream_and_file(tmp_path, capsys):
     for handler in logging.getLogger("aipent").handlers:
         handler.flush()
     assert "hello from test" in log_file.read_text()
+
+
+def test_assessment_detail_uses_pure_pydantic_dtos():
+    from sqlmodel import SQLModel
+    from app.api.schema import AssessmentCreate, AssessmentDetail, FindingOut, StepOut
+    assert not issubclass(AssessmentCreate, SQLModel)
+    assert AssessmentDetail.model_fields["findings"].annotation == list[FindingOut]
+

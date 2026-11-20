@@ -56,7 +56,7 @@ class AssessmentRepo(BaseRepo):
 
     async def get_all(self) -> list[Assessment]:
         result = await self.session.execute(
-            select(Assessment).order_by(Assessment.created_at.desc())
+            select(Assessment).order_by(Assessment.id.desc())
         )
         return list(result.scalars().all())
 
@@ -64,9 +64,38 @@ class AssessmentRepo(BaseRepo):
         result = await self.session.execute(
             select(Message)
             .where(Message.assessment_id == assessment_id)
-            .order_by(Message.created_at)
+            .order_by(Message.created_at.asc(), Message.id.asc())
         )
         return list(result.scalars().all())
+
+    async def get_message_by_client_id(
+        self, assessment_id: int, client_message_id: str
+    ) -> Message | None:
+        result = await self.session.execute(
+            select(Message).where(
+                Message.assessment_id == assessment_id,
+                Message.client_message_id == client_message_id,
+            )
+        )
+        return result.scalars().first()
+
+    async def add_message(
+        self,
+        assessment_id: int,
+        role: str,
+        text: str,
+        client_message_id: str | None = None,
+    ) -> Message:
+        message = Message(
+            assessment_id=assessment_id,
+            role=role,
+            text=text,
+            client_message_id=client_message_id,
+        )
+        self.session.add(message)
+        await self.session.commit()
+        await self.session.refresh(message)
+        return message
 
     async def set_status(
         self,

@@ -3,7 +3,6 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlmodel import col, select
 
 from app.api.queries import load_assessment_detail
 from app.api.schema import (
@@ -38,10 +37,7 @@ router = APIRouter()
 @router.get("/assessments", response_model=list[Assessment])
 async def list_assessments(session: AsyncSession = Depends(get_session)):
     repo = AssessmentRepo(session)
-    result = await repo.session.execute(
-        select(Assessment).order_by(Assessment.id.desc())
-    )
-    return list(result.scalars().all())
+    return await repo.get_all()
 
 
 @router.post("/assessments", response_model=Assessment, status_code=201)
@@ -105,15 +101,11 @@ async def list_messages(
     assessment_id: int,
     session: AsyncSession = Depends(get_session),
 ):
-    assessment = await session.get(Assessment, assessment_id)
+    repo = AssessmentRepo(session)
+    assessment = await repo.get(assessment_id)
     if assessment is None:
         raise HTTPException(404, "assessment not found")
-    result = await session.execute(
-        select(Message)
-        .where(Message.assessment_id == assessment_id)
-        .order_by(Message.created_at.asc(), Message.id.asc())
-    )
-    return list(result.scalars().all())
+    return await repo.get_messages(assessment_id)
 
 
 @router.post("/assessments/{assessment_id}/messages", response_model=MessageOut)
@@ -122,19 +114,16 @@ async def create_message(
     payload: MessageIn,
     session: AsyncSession = Depends(get_session),
 ):
-    assessment = await session.get(Assessment, assessment_id)
+    repo = AssessmentRepo(session)
+    assessment = await repo.get(assessment_id)
     if assessment is None:
         raise HTTPException(404, "assessment not found")
 
-    message = Message(
+    return await repo.add_message(
         assessment_id=assessment_id,
         role=payload.role,
         text=payload.text.strip(),
     )
-    session.add(message)
-    await session.commit()
-    await session.refresh(message)
-    return message
 
 
 @router.post(
@@ -147,18 +136,15 @@ async def chat(
     payload: ChatIn,
     session: AsyncSession = Depends(get_session),
 ):
-    assessment = await session.get(Assessment, assessment_id)
+    repo = AssessmentRepo(session)
+    assessment = await repo.get(assessment_id)
     if assessment is None:
         raise HTTPException(404, "assessment not found")
 
     if payload.client_message_id:
-        existing = await session.execute(
-            select(Message).where(
-                Message.assessment_id == assessment_id,
-                Message.client_message_id == payload.client_message_id,
-            )
+        existing_msg = await repo.get_message_by_client_id(
+            assessment_id, payload.client_message_id
         )
-        existing_msg = existing.scalars().first()
         if existing_msg is not None:
             return ChatAccepted(
                 assessment_id=assessment_id,
@@ -167,15 +153,12 @@ async def chat(
                 message="duplicate message ignored",
             )
 
-    operator = Message(
+    operator = await repo.add_message(
         assessment_id=assessment_id,
         role="operator",
         text=payload.text.strip(),
         client_message_id=payload.client_message_id,
     )
-    session.add(operator)
-    await session.commit()
-    await session.refresh(operator)
 
     from app.runtime import runner
     running = runner.is_running(assessment_id)
