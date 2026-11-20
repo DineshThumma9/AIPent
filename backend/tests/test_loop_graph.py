@@ -551,3 +551,61 @@ async def test_update_finding_status_evidence_guard(engine):
         f = await session.get(Finding, fid)
         assert f is not None
         assert f.status == "confirmed"
+
+
+@pytest.mark.asyncio
+async def test_prepare_run_skips_juiceshop_when_target_is_not_juiceshop(engine, monkeypatch):
+    from app.agents.graph.builder import prepare_run
+    from app.domain.models import Assessment
+    from app.core.db import get_async_session_ctx
+
+    called = []
+
+    async def mock_capture(*args, **kwargs):
+        called.append(True)
+
+    monkeypatch.setattr("app.integrations.juiceshop.capture_baseline", mock_capture)
+
+    async with get_async_session_ctx() as session:
+        assessment = Assessment(
+            title="Generic Target",
+            request="Test",
+            targets=["192.168.1.50"],
+            ports=[80],
+        )
+        session.add(assessment)
+        await session.commit()
+        await session.refresh(assessment)
+
+        await prepare_run(session, assessment.id)
+        assert not called
+
+
+@pytest.mark.asyncio
+async def test_prepare_run_captures_juiceshop_when_target_matches(engine, monkeypatch):
+    from app.agents.graph.builder import prepare_run
+    from app.domain.models import Assessment
+    from app.core.db import get_async_session_ctx
+
+    called = []
+
+    async def mock_capture(*args, **kwargs):
+        called.append(True)
+
+    monkeypatch.setattr("app.integrations.juiceshop.capture_baseline", mock_capture)
+
+    async with get_async_session_ctx() as session:
+        assessment = Assessment(
+            title="JuiceShop Target",
+            request="Test",
+            targets=["http://localhost:3000"],
+            ports=[3000],
+        )
+        session.add(assessment)
+        await session.commit()
+        await session.refresh(assessment)
+
+        await prepare_run(session, assessment.id)
+        assert called == [True]
+
+

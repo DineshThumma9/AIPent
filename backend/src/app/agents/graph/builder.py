@@ -102,14 +102,18 @@ async def prepare_run(
     steering_repo = SteeringRepo(session)
     await steering_repo.expire_for_new_run(assessment_id)
 
-    from app.integrations.juiceshop import capture_baseline
+    is_juiceshop_target = any(
+        "3000" in t or "juice" in t.lower() or (t and t in settings.juiceshop_url)
+        for t in assessment.targets
+    )
+    if is_juiceshop_target:
+        try:
+            from app.integrations.juiceshop import capture_baseline
+            await capture_baseline(session, assessment_id)
+        except Exception as exc:  # noqa: BLE001 - bonus feature
+            from app.core.log import get_logger
 
-    try:
-        await capture_baseline(session, assessment_id)
-    except Exception as exc:  # noqa: BLE001 - bonus feature
-        from app.core.log import get_logger
-
-        get_logger("agent.graph").debug("challenge baseline unavailable: %s", exc)
+            get_logger("agent.graph").debug("challenge baseline unavailable: %s", exc)
 
     audit_repo = AuditRepo(session)
     from app.agents.model import role_model_config
