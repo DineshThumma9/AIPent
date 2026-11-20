@@ -5,8 +5,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.agents.loop.contracts import EvidenceBoard
-
+from app.agents.contracts import EvidenceBoard
 
 class AssessmentCreate(BaseModel):
     title: str = Field(min_length=1)

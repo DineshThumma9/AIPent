@@ -7,7 +7,7 @@ from typing import Any
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from sqlmodel import select
 
-from app.agents.control import audit
+from app.persistence.audit_repo import audit
 from app.agents.conversation.agent import build_coordinator_agent
 from app.agents.conversation.tools import set_conversation_assessment_id
 from app.api.queries import load_assessment_detail

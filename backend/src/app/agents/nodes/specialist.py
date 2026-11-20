@@ -1,80 +1,42 @@
-"""Graph nodes for the V2 agent loop.
-
-Implements intake, supervisor, brief, model, prepare, approve, execute,
-direct, handoff, nudge, review, report_writer, and report.
-All inter-node transitions use Command(update=..., goto=...).
-"""
+"""Specialist and model execution nodes for V2 agent loop."""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
-from typing import TYPE_CHECKING, Any, Callable
+from pathlib import Path
+import sys
+from typing import TYPE_CHECKING, Any
+
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
-from langgraph.graph import END
 from langgraph.types import Command, interrupt
-from sqlalchemy.ext.asyncio import AsyncSession
 
 if TYPE_CHECKING:
-    from app.agents.graph.state import AssessmentState
+    from app.agents.state import AssessmentState
 
 from app.actions.catalogue import check_scope
-from app.actions.executor import execute_action
-from app.agents.loop.brief import render_brief
-from app.agents.prompts import ROLE_PROMPTS
-from app.agents.loop.contracts import (
-    ActionRequest,
-    FailureSignal,
-    Handoff,
-    Observation,
-    RouteDecision,
-)
-from app.agents.loop.direct_tools import run_direct
-from app.agents.loop.mission_brain import (
-    ROLE_TURN_CAPS,
-    build_mission_digest,
-    deterministic_safe_route,
-    run_supervisor_agent,
-    validate_route,
-)
-from app.agents.loop.observations import (
-    error_observation,
-    observation_from_step,
-    rejection_observation,
-)
-from app.agents.loop.reasoning import build_evidence_board
-from app.agents.loop.tool_specs import bindable_tools, is_direct_tool, lookup_tool
+from app.agents.brief import render_brief
+from app.agents.contracts import ActionRequest, FailureSignal, Handoff, Observation
+from app.agents.mission_brain import ROLE_TURN_CAPS
 from app.agents.model import build_role_model
+from app.agents.observations import error_observation, rejection_observation
+from app.agents.prompts import ROLE_PROMPTS
+from app.agents.tool_specs import bindable_tools, is_direct_tool, lookup_tool
 from app.core.config import settings
 from app.core.db import get_async_session_ctx
 from app.core.log import get_logger
 from app.core.policy import policy_for
-from app.domain.risk import summarize
-
-logger = get_logger("agent.nodes")
-from app.domain.models import (
-    Approval,
-    Assessment,
-    AssessmentStatus,
-    Audit,
-    Decision,
-    Step,
-    StepStatus,
-    utcnow,
-)
+from app.domain.models import Approval, Assessment, AssessmentStatus, Decision, Step
 from app.persistence import (
     AssessmentRepo,
     AuditRepo,
-    FindingRepo,
-    MissionContext,
     SteeringRepo,
     StepRepo,
     load_mission_context,
 )
-from app.reporting.narrative import build_narrative_context, write_narrative_result
-from app.reporting.report import generate_report
-import asyncio
-from pathlib import Path 
+
+logger = get_logger("agent.nodes.specialist")
 
 
 def curl_response_fingerprint(observation: dict[str, Any]) -> str | None:
@@ -128,211 +90,6 @@ def next_no_progress(
     if not observation.ok or status_code >= 400 or duplicate:
         return current + 1
     return 0
-
-
-async def intake_node(state: AssessmentState) -> Command:
-    """Initialize state for V2 loop from DB and route to supervisor."""
-    assessment_id = state["assessment_id"]
-    logger.info("intake_node: initializing assessment=%s run=%s", assessment_id, state.get("run_id"))
-    async with get_async_session_ctx() as session:
-        assessment = await AssessmentRepo(session).get(assessment_id)
-        if assessment is None:
-            raise LookupError(f"assessment {assessment_id} not found")
-
-        targets = list(assessment.targets or [])
-        ports = list(assessment.ports or [])
-        exclusions = list(assessment.exclusions or [])
-
-        from app.agents.model import role_model_config
-
-        await AuditRepo(session).record_event(
-            assessment_id=assessment_id,
-            event_type="agent.started",
-            payload={
-                "run_id": state["run_id"],
-                "loop": "v2",
-                "targets": targets,
-                "ports": ports,
-                "models": role_model_config(),
-            },
-        )
-        await session.commit()
-
-    return Command(
-        update={
-            "targets": targets,
-            "ports": ports,
-            "exclusions": exclusions,
-            "messages": [],
-            "pending_action": None,
-            "approval_decision": None,
-            "last_handoff": None,
-            "turns": {},
-            "nudges": 0,
-            "no_progress": 0,
-            "finished": False,
-            "report_narrative": None,
-            "supervisor_decision": None,
-            "supervisor_directive": None,
-            "failure_signal": None,
-            "supervisor_calls": 0,
-            "observations": [],
-            "next_node": "supervisor",
-        },
-        goto="supervisor",
-    )
-
-
-def _failure_from_state(state: AssessmentState) -> FailureSignal | None:
-    raw = state.get("failure_signal")
-    if raw and isinstance(raw, dict):
-        try:
-            return FailureSignal.model_validate(raw)
-        except Exception:
-            return None
-    return None
-
-
-async def supervisor_node(state: AssessmentState) -> Command:
-    """LLM mission director + Python validate_route guard."""
-    assessment_id = state["assessment_id"]
-    run_id = state["run_id"]
-    failure = _failure_from_state(state)
-
-    async with get_async_session_ctx() as session:
-        context = await load_mission_context(session, assessment_id, run_id=run_id)
-        digest = await build_mission_digest(
-            assessment_id=assessment_id,
-            run_id=run_id,
-            state=state,
-            failure=failure,
-            context=context,
-        )
-        await AuditRepo(session).record_event(
-            assessment_id=assessment_id,
-            event_type="supervisor.digest",
-            payload={
-                "run_id": run_id,
-                "failure": failure.model_dump() if failure else None,
-                "services_count": len(digest.services),
-                "candidates_count": len(digest.candidates),
-            },
-        )
-        await session.commit()
-
-    supervisor_exc: Exception | None = None
-    try:
-        proposed = await run_supervisor_agent(
-            digest=digest,
-            response_model=RouteDecision,
-            max_tool_calls=settings.supervisor_tool_calls,
-        )
-    except Exception as exc:
-        supervisor_exc = exc
-        proposed = deterministic_safe_route(state, digest)
-
-    decision, rejection = validate_route(proposed, state, digest)
-    logger.info(
-        "supervisor_node: routed to role=%s directive=%r (confidence=%.2f)",
-        decision.next_role,
-        decision.directive,
-        decision.confidence,
-    )
-
-    async with get_async_session_ctx() as session:
-        audit_repo = AuditRepo(session)
-        if supervisor_exc is not None:
-            await audit_repo.record_event(
-                assessment_id=assessment_id,
-                event_type="supervisor.unavailable",
-                payload={"run_id": run_id, "error": str(supervisor_exc)},
-            )
-        await audit_repo.record_event(
-            assessment_id=assessment_id,
-            event_type="supervisor.route_proposed",
-            payload={
-                "run_id": run_id,
-                "proposed_role": proposed.next_role,
-                "why": proposed.why,
-                "confidence": proposed.confidence,
-                "overrides_specialist": proposed.overrides_specialist,
-                "directive": proposed.directive,
-            },
-        )
-        if failure:
-            await audit_repo.record_event(
-                assessment_id=assessment_id,
-                event_type="supervisor.recovered",
-                payload={
-                    "run_id": run_id,
-                    "failure_kind": failure.kind,
-                    "recovered_role": decision.next_role,
-                    "attempts": failure.attempts,
-                },
-            )
-        if rejection:
-            await audit_repo.record_event(
-                assessment_id=assessment_id,
-                event_type="supervisor.route_rejected",
-                payload={
-                    "run_id": run_id,
-                    "proposed_role": proposed.next_role,
-                    "rejection_reason": rejection,
-                    "fallback_role": decision.next_role,
-                },
-            )
-        await audit_repo.record_event(
-            assessment_id=assessment_id,
-            event_type="supervisor.route",
-            payload={
-                "run_id": run_id,
-                "accepted_role": decision.next_role,
-                "why": decision.why,
-                "confidence": decision.confidence,
-                "directive": decision.directive,
-            },
-        )
-        await session.commit()
-
-    if decision.next_role == "review":
-        return Command(
-            update={
-                "role": decision.next_role,
-                "supervisor_decision": decision.model_dump(),
-                "supervisor_directive": decision.directive,
-                "failure_signal": None,
-                "last_handoff": None,
-                "nudges": 0,
-                "no_progress": 0,
-                "supervisor_calls": state.get("supervisor_calls", 0) + 1,
-                "next_node": decision.next_role,
-            },
-            goto="review",
-        )
-
-    brief_state = dict(state)
-    brief_state["role"] = decision.next_role
-    brief_state["supervisor_directive"] = decision.directive
-    brief_cmd = await brief_node(brief_state)
-
-    update_dict = {
-        "role": decision.next_role,
-        "supervisor_decision": decision.model_dump(),
-        "supervisor_directive": decision.directive,
-        "failure_signal": None,
-        "last_handoff": None,
-        "nudges": 0,
-        "no_progress": 0,
-        "supervisor_calls": state.get("supervisor_calls", 0) + 1,
-        "next_node": decision.next_role,
-    }
-    if brief_cmd and brief_cmd.update:
-        update_dict.update(brief_cmd.update)
-
-    return Command(
-        update=update_dict,
-        goto="model",
-    )
 
 
 async def brief_node(state: AssessmentState) -> Command:
@@ -408,7 +165,8 @@ async def model_node(state: AssessmentState) -> Command:
             goto="supervisor",
         )
 
-    model = build_role_model(role).bind_tools(bindable_tools(role))
+    role_model_fn = getattr(sys.modules.get("app.agents.nodes"), "build_role_model", build_role_model)
+    model = role_model_fn(role).bind_tools(bindable_tools(role))
     messages = list(state.get("messages", []))
     if role in ROLE_PROMPTS:
         if messages and isinstance(messages[0], SystemMessage):
@@ -1048,205 +806,6 @@ async def approve_node(state: AssessmentState) -> Command:
     )
 
 
-def make_execute_node(executor: Callable[..., Any] | None = None):
-    """Factory creating execute_node with optional injected executor."""
-
-    async def execute_node(state: AssessmentState) -> Command:
-        pending = ActionRequest.model_validate(state["pending_action"])
-        assessment_id = state["assessment_id"]
-
-        async with get_async_session_ctx() as session:
-            step_repo = StepRepo(session)
-            audit_repo = AuditRepo(session)
-
-            step = await step_repo.get_by_id(pending.step_id)
-            approval = await step_repo.get_approval_for_step(pending.step_id)
-            if step is None or approval is None:
-                obs = error_observation(pending.action, pending.target, "Step or approval record missing")
-                return Command(
-                    update={
-                        "messages": [
-                            *state["messages"],
-                            ToolMessage(
-                                tool_call_id=pending.tool_call_id,
-                                name=pending.tool_name or pending.action,
-                                status="error",
-                                content=obs.model_dump_json(),
-                            ),
-                        ],
-                        "pending_action": None,
-                    },
-                    goto="model",
-                )
-
-            if approval.decision != Decision.APPROVED.value:
-                obs = error_observation(pending.action, pending.target, "Step is not approved")
-                return Command(
-                    update={
-                        "messages": [
-                            *state["messages"],
-                            ToolMessage(
-                                tool_call_id=pending.tool_call_id,
-                                name=pending.tool_name or pending.action,
-                                status="error",
-                                content=obs.model_dump_json(),
-                            ),
-                        ],
-                        "pending_action": None,
-                    },
-                    goto="model",
-                )
-
-            if list(approval.argv or []) != list(step.argv or []):
-                await step_repo.reject_step(
-                    step_id=step.id,
-                    error="approval.argv does not match step.argv",
-                )
-                await session.commit()
-                obs = error_observation(pending.action, pending.target, "argv mismatch between approval and step")
-                return Command(
-                    update={
-                        "messages": [
-                            *state["messages"],
-                            ToolMessage(
-                                tool_call_id=pending.tool_call_id,
-                                name=pending.tool_name or pending.action,
-                                status="error",
-                                content=obs.model_dump_json(),
-                            ),
-                        ],
-                        "pending_action": None,
-                    },
-                    goto="model",
-                )
-
-            # Execute action through executor
-            logger.info("execute_node: executing step=%s action=%s target=%s", step.id, step.action, step.target)
-            executed = await (executor or execute_action)(
-                session,
-                assessment_id,
-                step.action,
-                target=step.target,
-                rationale=step.rationale,
-                step=step,
-            )
-            await session.refresh(executed)
-            logger.info("execute_node: finished step=%s status=%s exit_code=%s", step.id, executed.status, executed.exit_code)
-            obs = await observation_from_step(session, executed)
-            await audit_repo.record_event(
-                assessment_id=assessment_id,
-                event_type="observation.recorded",
-                payload={
-                    "run_id": state["run_id"],
-                    "step_id": obs.step_id,
-                    "action": obs.action,
-                    "ok": obs.ok,
-                    "status": obs.status,
-                    "findings_count": len(obs.findings_created),
-                },
-            )
-            await audit_repo.record_decision(
-                assessment_id=assessment_id,
-                run_id=state["run_id"],
-                role=state.get("role") or step.role,
-                step_id=pending.step_id,
-                action=pending.action,
-                target=pending.target,
-                observation=(obs.summary or "")[:300],
-                expected_observation=pending.expected_observation,
-                would_falsify=pending.would_falsify,
-                confidence=0.8 if obs.ok else 0.3,
-                outcome=obs.status,
-                hypothesis_id=pending.hypothesis_id,
-                evidence_ids=pending.evidence_ids,
-            )
-            await session.commit()
-
-        return Command(
-            update={
-                "messages": [
-                    *state["messages"],
-                    ToolMessage(
-                        tool_call_id=pending.tool_call_id,
-                        name=pending.tool_name or pending.action,
-                        status="success" if obs.ok else "error",
-                        content=obs.model_dump_json(),
-                    ),
-                ],
-                "pending_action": None,
-                "approval_decision": None,
-                "observations": [obs.model_dump()],
-                "steps": [
-                    {
-                        "step_id": obs.step_id,
-                        "action": obs.action,
-                        "target": obs.target,
-                        "status": obs.status,
-                    }
-                ],
-                "last_message": obs.summary,
-                "no_progress": next_no_progress(
-                    state.get("no_progress", 0),
-                    obs,
-                    state.get("observations", []),
-                ),
-            },
-            goto="model",
-        )
-
-    return execute_node
-
-
-async def direct_node(state: AssessmentState) -> Command:
-    """Execute direct in-process tools like read_artifact, hypotheses, findings, handoff."""
-    tool_call = _last_tool_call(state["messages"])
-    if tool_call.get("name") == "handoff":
-        return await handoff_node(state)
-
-    role = state["role"]
-    assessment_id = state["assessment_id"]
-    spec = lookup_tool(role, tool_call["name"])
-    logger.info("direct_node: role=%s running direct tool=%s", role, tool_call.get("name"))
-
-    args_raw = tool_call.get("args") or {}
-    if isinstance(args_raw, str):
-        try:
-            args_raw = json.loads(args_raw)
-        except Exception:
-            args_raw = {}
-
-    async with get_async_session_ctx() as session:
-        obs = await run_direct(session, spec, args_raw, state)
-        await AuditRepo(session).record_event(
-            assessment_id=assessment_id,
-            event_type="observation.recorded",
-            payload={
-                "run_id": state["run_id"],
-                "action": obs.action,
-                "ok": obs.ok,
-                "status": obs.status,
-            },
-        )
-        await session.commit()
-
-    return Command(
-        update={
-            "messages": [
-                *state["messages"],
-                ToolMessage(
-                    tool_call_id=tool_call["id"],
-                    name=tool_call["name"],
-                    status="success" if obs.ok else "error",
-                    content=obs.model_dump_json(),
-                ),
-            ],
-            "observations": [obs.model_dump()],
-            "last_message": obs.summary,
-        },
-        goto="model",
-    )
-
-
 async def handoff_node(state: AssessmentState) -> Command:
     """Validate specialist handoff and route to supervisor."""
     call = _last_tool_call(state["messages"])
@@ -1326,145 +885,4 @@ async def handoff_node(state: AssessmentState) -> Command:
             "finished": True,
         },
         goto="supervisor",
-    )
-
-
-async def review_node(state: AssessmentState) -> Command:
-    """Final human delivery review gate."""
-    assessment_id = state["assessment_id"]
-
-    async with get_async_session_ctx() as session:
-        assessment_repo = AssessmentRepo(session)
-        step_repo = StepRepo(session)
-        finding_repo = FindingRepo(session)
-        audit_repo = AuditRepo(session)
-
-        board = await audit_repo.get_evidence_board(assessment_id)
-        findings = await finding_repo.get_all(assessment_id, limit=10000)
-        summary = summarize(findings)
-
-        approval = await step_repo.get_pending_approval_by_action(assessment_id, "final_review")
-        if approval is None:
-            approval = await step_repo.create_approval(
-                assessment_id=assessment_id,
-                action="final_review",
-                argv=[],
-                detail={
-                    "risk_score": summary["score"],
-                    "counts": summary["counts"],
-                    "findings": len(findings),
-                    "role": "review",
-                    "source": "three_role_loop",
-                },
-            )
-        approval_id = approval.id
-        await assessment_repo.set_status(assessment_id, AssessmentStatus.AWAITING_APPROVAL.value)
-
-    decision = interrupt({
-        "gate": "review",
-        "role": "review",
-        "approval_id": approval_id,
-        "evidence_board": board.model_dump(),
-        "message": "Approve the report, or reject to stop without a report.",
-    })
-
-    decision_dict = decision if isinstance(decision, dict) else {}
-    approved = str(decision_dict.get("decision", "approved")).lower() == "approved"
-
-    async with get_async_session_ctx() as session:
-        step_repo = StepRepo(session)
-        assessment_repo = AssessmentRepo(session)
-
-        pending = await step_repo.get_pending_approval_by_action(assessment_id, "final_review")
-        if pending is not None:
-            await step_repo.resolve_approval(
-                approval_id=pending.id,
-                decision=Decision.APPROVED.value if approved else Decision.REJECTED.value,
-                actor=str(decision_dict.get("actor") or "operator"),
-                reason=str(decision_dict.get("reason") or "") or None,
-                outcome="review " + ("accepted" if approved else "rejected"),
-            )
-
-        new_status = AssessmentStatus.RUNNING.value if approved else AssessmentStatus.CANCELLED.value
-        await assessment_repo.set_status(assessment_id, new_status)
-
-    if not approved:
-        return Command(
-            update={"finished": True},
-            goto=END,
-        )
-
-    return Command(
-        goto="report_writer",
-    )
-
-
-async def report_writer_node(state: AssessmentState) -> Command:
-    """Report narrative generator node (LLM structured output + Python validation)."""
-    assessment_id = state["assessment_id"]
-    narrative_data = None
-    logger.info("report_writer_node: compiling report narrative for assessment=%s...", assessment_id)
-    async with get_async_session_ctx() as session:
-        audit_repo = AuditRepo(session)
-        try:
-            context = await build_narrative_context(session, assessment_id)
-            narrative, err = await write_narrative_result(context)
-            if narrative is not None:
-                narrative_data = narrative.model_dump()
-                await audit_repo.record_event(
-                    assessment_id=assessment_id,
-                    event_type="report.narrative_generated",
-                    payload={
-                        "findings_count": len(narrative.findings),
-                        "executive_summary_len": len(narrative.executive_summary),
-                    },
-                )
-            else:
-                await audit_repo.record_event(
-                    assessment_id=assessment_id,
-                    event_type="report.narrative_fallback",
-                    payload={
-                        "reason": "validation_failed_or_model_error",
-                        "error": err or "unknown",
-                    },
-                )
-            await session.commit()
-        except Exception as exc:
-            logger.exception("report_writer_node unexpected exception: %s", exc)
-            await audit_repo.record_event(
-                assessment_id=assessment_id,
-                event_type="report.narrative_fallback",
-                payload={"reason": "exception", "error": str(exc)},
-            )
-            await session.commit()
-
-    return Command(
-        update={"report_narrative": narrative_data},
-        goto="report",
-    )
-
-
-async def report_node(state: AssessmentState) -> Command:
-    """Compile PDF report and finish run."""
-    assessment_id = state["assessment_id"]
-    narrative = state.get("report_narrative")
-    async with get_async_session_ctx() as session:
-        assessment_repo = AssessmentRepo(session)
-        await assessment_repo.set_status(
-            assessment_id,
-            AssessmentStatus.COMPLETED.value,
-            finished_at=utcnow(),
-        )
-        report_path = await generate_report(session, assessment_id, narrative=narrative)
-        assessment = await assessment_repo.get(assessment_id)
-        if assessment:
-            assessment.report_path = str(report_path)
-            await session.commit()
-
-    return Command(
-        update={
-            "report_path": str(report_path),
-            "finished": True,
-        },
-        goto=END,
     )

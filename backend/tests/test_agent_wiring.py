@@ -16,8 +16,8 @@ from sqlmodel import select
 from app.actions import catalogue, check_scope, get_action, resolve_argv
 from app.actions import probe
 from app.actions.catalogue import ScopeError
-from app.agents.graph.state import AssessmentState
-from app.agents.tools import ROLE_TOOLS
+from app.agents.state import AssessmentState
+from app.agents.tool_specs import ROLE_TOOLS
 from app.api.queries import load_assessment_detail
 from app.api.schema import DecisionIn
 from app.core.config import settings
@@ -452,7 +452,7 @@ def test_resume_replays_an_identical_decision(engine, monkeypatch):
 def test_one_action_per_specialist_turn(engine, monkeypatch):
     async def body(session):
         assessment = await _assessment(session)
-        from app.agents.loop.nodes import model_node
+        from app.agents.nodes import model_node
         from langchain_core.language_models.chat_models import BaseChatModel
         from langchain_core.messages import AIMessage, HumanMessage
         from langchain_core.outputs import ChatGeneration, ChatResult
@@ -480,7 +480,7 @@ def test_one_action_per_specialist_turn(engine, monkeypatch):
             def _llm_type(self):
                 return "scripted-two-calls"
 
-        monkeypatch.setattr("app.agents.loop.nodes.build_role_model", lambda role: ScriptedTwoCalls())
+        monkeypatch.setattr("app.agents.nodes.build_role_model", lambda role: ScriptedTwoCalls())
 
         state = {
             "assessment_id": assessment.id,

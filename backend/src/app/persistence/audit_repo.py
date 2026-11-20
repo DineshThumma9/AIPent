@@ -9,9 +9,104 @@ from app.domain.models import Audit, utcnow
 from app.persistence.base import BaseRepo
 
 if TYPE_CHECKING:
-    from app.agents.loop.contracts import EvidenceBoard
+    from app.agents.contracts import EvidenceBoard
 
 ROLES = ("recon", "discovery", "validation")
+
+
+def audit(
+    session: AsyncSession,
+    assessment_id: int,
+    event_type: str,
+    payload: dict,
+    actor: str = "agent",
+) -> None:
+    session.add(
+        Audit(
+            assessment_id=assessment_id,
+            actor=actor,
+            event_type=event_type,
+            payload=payload,
+        )
+    )
+
+
+def record_role(
+    session: AsyncSession,
+    assessment_id: int,
+    run_id: str,
+    role: str,
+    reason: str,
+    from_role: str | None = None,
+) -> dict:
+    if role not in ROLES:
+        raise ValueError(f"unknown role {role!r}; expected one of {ROLES}")
+    payload = {
+        "run_id": run_id,
+        "from": from_role,
+        "to": role,
+        "role": role,
+        "reason": reason,
+    }
+    audit(session, assessment_id, "role.started", payload)
+    return payload
+
+
+async def current_role(session: AsyncSession, assessment_id: int, run_id: str) -> str:
+    """The last role entered during this run."""
+    return await AuditRepo(session).current_role(assessment_id, run_id)
+
+
+async def record_turn(
+    session: AsyncSession,
+    assessment_id: int,
+    run_id: str,
+    role: str,
+    reason: str = "role turn",
+    from_role: str | None = None,
+) -> int:
+    """Record one specialist model invocation and return its turn number."""
+    return await AuditRepo(session).record_turn(
+        assessment_id=assessment_id,
+        run_id=run_id,
+        role=role,
+        reason=reason,
+        from_role=from_role,
+    )
+
+
+def record_handoff(
+    session: AsyncSession,
+    assessment_id: int,
+    run_id: str,
+    role: str,
+    payload: dict[str, Any],
+) -> dict:
+    if role not in ROLES:
+        raise ValueError(f"unknown role {role!r}; expected one of {ROLES}")
+    body = {
+        "run_id": run_id,
+        "role": role,
+        "summary": str(payload.get("summary") or "")[:1000],
+        "decisions": payload.get("decisions") or [],
+        "finding_ids": payload.get("finding_ids") or [],
+        "step_ids": payload.get("step_ids") or [],
+        "next_recommendation": payload.get("next_recommendation") or "review",
+        "needs_input": bool(payload.get("needs_input")),
+        "question": payload.get("question") or None,
+        "open_questions": payload.get("open_questions") or [],
+    }
+    audit(session, assessment_id, "handoff.created", body)
+    return body
+
+
+async def latest_handoff(
+    session: AsyncSession,
+    assessment_id: int,
+    run_id: str,
+    role: str | None = None,
+) -> dict | None:
+    return await AuditRepo(session).latest_handoff(assessment_id, run_id, role)
 
 
 class AuditRepo(BaseRepo):

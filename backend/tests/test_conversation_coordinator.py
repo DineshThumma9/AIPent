@@ -18,8 +18,8 @@ from app.agents.conversation.tools import (
     set_conversation_assessment_id,
     update_objective,
 )
-from app.agents.graph.state import AssessmentState, initial_state
-from app.agents.loop.nodes import brief_node, model_node
+from app.agents.state import AssessmentState, initial_state
+from app.agents.nodes import brief_node, model_node
 from app.core.config import settings
 from app.core.db import get_async_session_ctx, init_db, make_engine, set_engine
 from app.domain.models import (
@@ -340,7 +340,7 @@ async def test_brief_and_model_nodes_consume_steering(engine):
     from unittest.mock import patch
 
     with patch(
-        "app.agents.loop.nodes.build_role_model",
+        "app.agents.nodes.build_role_model",
         return_value=mock_model,
     ):
         await model_node(state)

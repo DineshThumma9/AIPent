@@ -1,5 +1,5 @@
 import pytest
-from app.agents.loop.observations import observation_from_step
+from app.agents.observations import observation_from_step
 from app.domain.models import Step, StepStatus
 
 def test_observation_from_step_pure():

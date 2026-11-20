@@ -50,7 +50,7 @@ async def load_assessment_detail(
         and requires_approval
     )
 
-    from app.agents.loop.reasoning import build_evidence_board
+    from app.agents.reasoning import build_evidence_board
 
     board = await build_evidence_board(session, assessment_id)
 

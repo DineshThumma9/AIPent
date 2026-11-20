@@ -3,7 +3,7 @@ from app.core.db import get_async_session_ctx
 from app.domain.models import Assessment, Step, StepStatus
 from app.persistence.finding_repo import FindingRepo
 from app.persistence.step_repo import StepRepo
-from app.agents.loop.direct_tools import record_finding, read_artifact
+from app.agents.direct_tools import record_finding, read_artifact
 
 @pytest.mark.asyncio
 async def test_finding_repo_record_agent_finding_create_and_extend(engine, tmp_path):
@@ -82,7 +82,7 @@ async def test_finding_repo_record_agent_finding_create_and_extend(engine, tmp_p
         assert "secret data" in obs.summary
 
         # 5. Test hash_identify_direct
-        from app.agents.loop.direct_tools import hash_identify_direct
+        from app.agents.direct_tools import hash_identify_direct
         hash_file = tmp_path / "hash.txt"
         hash_file.write_text("user:$1$abcdef12$1234567890123456789012:1000:1000", encoding="utf-8")
         step_hash, _ = await step_repo.create_planned_step(

@@ -7,8 +7,8 @@ import json
 
 from langchain_core.messages import AIMessage, ToolMessage
 
-from app.agents.loop.contracts import RouteDecision
-from app.agents.loop.mission_brain import MissionDigest, run_supervisor_agent
+from app.agents.contracts import RouteDecision
+from app.agents.mission_brain import MissionDigest, run_supervisor_agent
 
 
 class _FakeModel:

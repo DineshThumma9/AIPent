@@ -13,12 +13,12 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.control import audit
+from app.persistence.audit_repo import audit
 from app.agents.prompts import ROLE_PROMPTS
 if TYPE_CHECKING:
-    from app.agents.graph.state import AssessmentState
-from app.agents.loop.contracts import FailureSignal, RouteDecision
-from app.agents.loop.tool_specs import bindable_tools
+    from app.agents.state import AssessmentState
+from app.agents.contracts import FailureSignal, RouteDecision
+from app.agents.tool_specs import bindable_tools
 from app.core.config import settings
 from app.core.db import get_async_session_ctx
 from app.core.log import get_logger

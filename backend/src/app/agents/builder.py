@@ -1,24 +1,31 @@
-"""Compile the three-role assessment graph using native LangGraph patterns.
+"""V2 StateGraph builder with native observe-reason-act loop nodes.
 
-StateGraph handles orchestration; persistence repos own all SQL.
-Routing is owned by nodes via Command(update=..., goto=...) — no DB
-router functions. The security gate stays (scope, budget, policy, argv,
-evidence) because LangGraph does not provide those.
-
-Specialist sub-graphs (recon, discovery, validation) live under
-``agents/specialists/`` and are invoked inline by the supervisor node —
-they are not graph nodes themselves.
+Replaces the legacy gate conveyor belt with a closed Specialist loop and
+LLM Supervisor Mission Director.
 """
 
 from __future__ import annotations
 
 import asyncio
 from typing import Any, Callable
-
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlmodel import select
 
-from app.agents.graph.state import AssessmentState, initial_state
+from app.agents.state import AssessmentState, initial_state
+from app.agents.nodes import (
+    approve_node,
+    direct_node,
+    intake_node,
+    make_execute_node,
+    model_node,
+    prepare_node,
+    report_node,
+    report_writer_node,
+    review_node,
+    supervisor_node,
+)
 from app.core.config import settings
 from app.domain.models import (
     Approval,
@@ -28,19 +35,37 @@ from app.domain.models import (
     StepStatus,
     utcnow,
 )
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlmodel import select
-
 from app.persistence import AssessmentRepo, AuditRepo, SteeringRepo, StepRepo
+
+
+def build_assessment_graph_v2(
+    checkpointer=None,
+    executor: Callable[..., Any] | None = None,
+):
+    """Compile the V2 assessment graph."""
+    builder = StateGraph(AssessmentState)
+
+    builder.add_node("intake", intake_node)
+    builder.add_node("supervisor", supervisor_node)
+    builder.add_node("model", model_node)
+    builder.add_node("prepare", prepare_node)
+    builder.add_node("approve", approve_node)
+    builder.add_node("execute", make_execute_node(executor))
+    builder.add_node("direct", direct_node)
+    builder.add_node("review", review_node)
+    builder.add_node("report_writer", report_writer_node)
+    builder.add_node("report", report_node)
+
+    builder.add_edge(START, "intake")
+
+    return builder.compile(checkpointer=checkpointer)
 
 
 def build_assessment_graph(
     checkpointer=None,
     executor: Callable[..., Any] | None = None,
 ):
-    """Compile the three-role loop."""
-    from app.agents.loop.builder import build_assessment_graph_v2
-
+    """Compile the assessment graph."""
     return build_assessment_graph_v2(checkpointer=checkpointer, executor=executor)
 
 
@@ -158,10 +183,5 @@ async def get_assessment_graph():
                     _graph_conn = await aiosqlite.connect(str(graph_path))
                 saver = AsyncSqliteSaver(_graph_conn)
                 await saver.setup()
-                if loop_version == "v2":
-                    from app.agents.loop.builder import build_assessment_graph_v2
-
-                    _graphs[loop_version] = build_assessment_graph_v2(checkpointer=saver)
-                else:
-                    _graphs[loop_version] = build_assessment_graph(checkpointer=saver)
+                _graphs[loop_version] = build_assessment_graph_v2(checkpointer=saver)
     return _graphs[loop_version]

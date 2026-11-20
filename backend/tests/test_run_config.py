@@ -4,7 +4,7 @@ import asyncio
 
 from sqlmodel import select
 
-from app.agents.graph.builder import prepare_run
+from app.agents.builder import prepare_run
 from app.agents.model import role_model_config
 from app.core.config import settings
 from app.core.db import get_async_session_ctx

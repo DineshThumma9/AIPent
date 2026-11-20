@@ -7,8 +7,8 @@ from typing import Any
 from langchain_core.tools import tool
 from sqlmodel import select
 
-from app.agents.control import audit
-from app.agents.loop.reasoning import build_evidence_board
+from app.persistence.audit_repo import audit
+from app.agents.reasoning import build_evidence_board
 from app.api.queries import load_assessment_detail
 from app.core.db import get_async_session_ctx
 from app.domain.models import Approval, Assessment, Finding, Step

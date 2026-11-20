@@ -10,13 +10,10 @@ from typing import Any
 from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.loop.contracts import (
-    DecisionRecord,
+from app.agents.contracts import (
     EvidenceBoard,
-    Hypothesis,
     Observation,
 )
-from app.domain.models import Audit, utcnow
 from app.domain.reasoning import fold_events_into_evidence_board
 
 

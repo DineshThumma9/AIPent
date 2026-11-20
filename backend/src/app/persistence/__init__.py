@@ -7,10 +7,9 @@ never on raw SQL or ``get_async_session_ctx`` directly.
 """
 
 from app.persistence.assessment_repo import AssessmentRepo
-from app.persistence.audit_repo import AuditRepo
+from app.persistence.audit_repo import AuditRepo, audit
 from app.persistence.context_loader import MissionContext, load_mission_context
 from app.persistence.finding_repo import FindingRepo
-from app.persistence.role_repo import RoleRepo
 from app.persistence.steering_repo import SteeringRepo
 from app.persistence.step_repo import StepRepo
 
@@ -19,8 +18,8 @@ __all__ = [
     "AuditRepo",
     "FindingRepo",
     "MissionContext",
-    "RoleRepo",
     "SteeringRepo",
     "StepRepo",
+    "audit",
     "load_mission_context",
 ]

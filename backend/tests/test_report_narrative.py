@@ -11,8 +11,8 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel import SQLModel
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.agents.graph.state import initial_state
-from app.agents.loop.nodes import report_node, report_writer_node
+from app.agents.state import initial_state
+from app.agents.nodes import report_node, report_writer_node
 from app.core.config import settings
 from app.core.db import get_async_session_ctx, init_db, make_engine, set_engine
 from sqlmodel import select
@@ -527,7 +527,7 @@ async def test_report_writer_node_audit_events(test_db, valid_narrative: ReportN
     async def mock_write_success(ctx, model=None):
         return valid_narrative, None
 
-    monkeypatch.setattr("app.agents.loop.nodes.write_narrative_result", mock_write_success)
+    monkeypatch.setattr("app.agents.nodes.write_narrative_result", mock_write_success)
 
     cmd = await report_writer_node(state)
     assert cmd.goto == "report"
@@ -567,7 +567,7 @@ async def test_report_writer_node_fallback_audit(test_db, monkeypatch):
     async def mock_write_failure(ctx, model=None):
         return None, "Fabricated CVE detected"
 
-    monkeypatch.setattr("app.agents.loop.nodes.write_narrative_result", mock_write_failure)
+    monkeypatch.setattr("app.agents.nodes.write_narrative_result", mock_write_failure)
 
     cmd = await report_writer_node(state)
     assert cmd.goto == "report"

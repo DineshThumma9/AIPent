@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 if TYPE_CHECKING:
-    from app.agents.loop.contracts import EvidenceBoard
+    from app.agents.contracts import EvidenceBoard
 from app.domain.models import Assessment, Finding, Step
 from app.persistence.audit_repo import AuditRepo
 from app.persistence.finding_repo import FindingRepo

@@ -26,7 +26,7 @@ from app.actions.catalogue import (
     resolve_argv,
 )
 from app.adapters import hashcat, sslscan, whatweb
-from app.agents.loop.direct_tools import hash_identify_direct
+from app.agents.direct_tools import hash_identify_direct
 from app.core.db import get_async_session_ctx
 from app.domain.models import (
     Assessment,

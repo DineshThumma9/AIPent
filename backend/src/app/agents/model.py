@@ -21,7 +21,7 @@ from langchain.agents import create_agent
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_nvidia_ai_endpoints import ChatNVIDIA
 from app.agents.prompts import ROLE_PROMPTS
-from app.agents.tools import ROLE_TOOLS
+from app.agents.tool_specs import ROLE_TOOLS
 from app.core.config import settings
 from app.core.log import get_logger
 from langchain_google_genai import ChatGoogleGenerativeAI

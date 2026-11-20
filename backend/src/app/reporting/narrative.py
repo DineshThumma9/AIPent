@@ -17,7 +17,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from app.agents.prompts import ROLE_PROMPTS
 from app.adapters.base import strip_html
-from app.agents.loop.reasoning import build_evidence_board
+from app.agents.reasoning import build_evidence_board
 from app.core.config import settings
 from app.core.log import get_logger
 from app.domain import risk
@@ -32,7 +32,7 @@ from app.reporting.common import (
     count_severities as _counts,
     iso_timestamp as _iso,
 )
-from app.agents.loop.contracts import ReportNarrative,FindingNarrative
+from app.agents.contracts import ReportNarrative, FindingNarrative
 log = get_logger("reporting.narrative")
 
 

@@ -21,11 +21,11 @@ from langgraph.types import Command
 from sqlmodel import select
 
 from app.actions import catalogue
-from app.agents.graph.state import initial_state
-from app.agents.loop.builder import build_assessment_graph_v2
-from app.agents.loop.contracts import Observation
-from app.agents.loop.direct_tools import update_finding_status
-from app.agents.loop.mission_brain import deterministic_safe_route
+from app.agents.state import initial_state
+from app.agents.builder import build_assessment_graph_v2
+from app.agents.contracts import Observation
+from app.agents.direct_tools import update_finding_status
+from app.agents.mission_brain import deterministic_safe_route
 from app.core.config import settings
 from app.core.db import get_async_session_ctx, init_db, make_engine, set_engine
 from app.domain.models import (
@@ -164,7 +164,7 @@ async def test_recon_discovery_validation_end_to_end_with_approval(engine, monke
             )
             session.add(ev)
 
-        from app.agents.control import audit
+        from app.persistence.audit_repo import audit
         audit(session, a_id, "step.succeeded", {"step_id": step.id, "action": action})
         await session.commit()
         return step
@@ -278,7 +278,7 @@ async def test_recon_discovery_validation_end_to_end_with_approval(engine, monke
         ]
     )
 
-    monkeypatch.setattr("app.agents.loop.nodes.build_role_model", lambda role: scripted_model)
+    monkeypatch.setattr("app.agents.nodes.build_role_model", lambda role: scripted_model)
 
     async def mock_supervisor(digest, **kwargs):
         last_h = digest.recent_handoffs[-1] if digest.recent_handoffs else None
@@ -287,7 +287,7 @@ async def test_recon_discovery_validation_end_to_end_with_approval(engine, monke
             digest,
         )
 
-    monkeypatch.setattr("app.agents.loop.nodes.run_supervisor_agent", mock_supervisor)
+    monkeypatch.setattr("app.agents.nodes.run_supervisor_agent", mock_supervisor)
 
     # 4. Build and start graph
     checkpointer = MemorySaver()
@@ -432,19 +432,19 @@ async def test_action_approval_rejection_resumes_cleanly(engine, monkeypatch):
         ]
     )
 
-    monkeypatch.setattr("app.agents.loop.nodes.build_role_model", lambda role: scripted_model)
+    monkeypatch.setattr("app.agents.nodes.build_role_model", lambda role: scripted_model)
 
     async def mock_supervisor(digest, **kwargs):
         last_h = digest.recent_handoffs[-1] if digest.recent_handoffs else None
         if not last_h:
-            from app.agents.loop.contracts import RouteDecision
+            from app.agents.contracts import RouteDecision
             return RouteDecision(next_role="validation", why="Test validation directly", confidence=0.9)
         return deterministic_safe_route(
             {"turns": digest.budget.get("turns", {}), "last_handoff": last_h},
             digest,
         )
 
-    monkeypatch.setattr("app.agents.loop.nodes.run_supervisor_agent", mock_supervisor)
+    monkeypatch.setattr("app.agents.nodes.run_supervisor_agent", mock_supervisor)
 
     checkpointer = MemorySaver()
     graph = build_assessment_graph_v2(checkpointer=checkpointer, executor=mock_executor)
@@ -555,7 +555,7 @@ async def test_update_finding_status_evidence_guard(engine):
 
 @pytest.mark.asyncio
 async def test_prepare_run_skips_juiceshop_when_target_is_not_juiceshop(engine, monkeypatch):
-    from app.agents.graph.builder import prepare_run
+    from app.agents.builder import prepare_run
     from app.domain.models import Assessment
     from app.core.db import get_async_session_ctx
 
@@ -583,7 +583,7 @@ async def test_prepare_run_skips_juiceshop_when_target_is_not_juiceshop(engine, 
 
 @pytest.mark.asyncio
 async def test_prepare_run_captures_juiceshop_when_target_matches(engine, monkeypatch):
-    from app.agents.graph.builder import prepare_run
+    from app.agents.builder import prepare_run
     from app.domain.models import Assessment
     from app.core.db import get_async_session_ctx
 

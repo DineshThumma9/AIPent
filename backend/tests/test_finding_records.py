@@ -6,7 +6,7 @@ import json
 import pytest
 from sqlmodel import select
 
-from app.agents.loop.direct_tools import record_finding
+from app.agents.direct_tools import record_finding
 from app.core.db import get_async_session_ctx, init_db, make_engine, set_engine
 from app.domain.models import Assessment, Evidence, Finding, Step, StepStatus
 from app.persistence.finding_repo import FindingRepo

@@ -18,7 +18,7 @@ import typst
 from app.domain import risk
 from app.actions import ACTIONS, ARTIFACT_DIR
 from app.core.log import get_logger
-from app.domain.models import Approval, Assessment, Audit, Evidence, Finding, FindingCve, Step
+from app.domain.models import  Assessment, FindingCve
 from app.persistence.audit_repo import AuditRepo
 from app.persistence.finding_repo import FindingRepo
 from app.persistence.step_repo import StepRepo

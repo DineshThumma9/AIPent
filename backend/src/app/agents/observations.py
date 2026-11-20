@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.actions.evidence import SQLMAP_PROOF
-from app.agents.loop.contracts import ActionRequest, Observation
+from app.agents.contracts import ActionRequest, Observation
 from app.domain.models import Evidence, Finding, Step, StepStatus
 
 

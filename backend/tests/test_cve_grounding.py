@@ -263,7 +263,7 @@ async def test_finding_cve_provenance(test_db, fixture_db_path: Path, monkeypatc
 async def test_direct_tool_lookup_cve(test_db, fixture_db_path: Path, monkeypatch):
     """Specialists' lookup_cve direct tool returns structured candidate facts."""
     monkeypatch.setattr(settings, "vulnify_db_path", str(fixture_db_path))
-    from app.agents.loop.direct_tools import lookup_cve_direct
+    from app.agents.direct_tools import lookup_cve_direct
 
     async with get_async_session_ctx() as session:
         obs = await lookup_cve_direct(

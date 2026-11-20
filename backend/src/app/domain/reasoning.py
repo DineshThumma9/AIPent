@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from app.agents.loop.contracts import (
+from app.agents.contracts import (
     DecisionRecord,
     EvidenceBoard,
     Hypothesis,

@@ -4,8 +4,8 @@ from datetime import datetime, timezone
 import pytest
 from app.core.db import get_async_session_ctx
 from app.domain.models import Assessment, AssessmentStatus, Audit
-from app.agents.loop.contracts import EvidenceBoard, Hypothesis, DecisionRecord
-from app.agents.loop.reasoning import (
+from app.agents.contracts import EvidenceBoard, Hypothesis, DecisionRecord
+from app.agents.reasoning import (
     fold_events_into_evidence_board,
     build_evidence_board,
     record_hypothesis,

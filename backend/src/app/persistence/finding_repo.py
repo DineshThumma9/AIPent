@@ -10,6 +10,7 @@ from app.domain.models import (
     Evidence,
     Finding,
     FindingCve,
+    Step,
     utcnow,
 )
 from app.persistence.base import BaseRepo
@@ -307,6 +308,126 @@ class FindingRepo(BaseRepo):
 
     async def get(self, finding_id: int) -> Finding | None:
         return await self.session.get(Finding, finding_id)
+
+    async def get_by_canonical_key(
+        self,
+        assessment_id: int,
+        canonical_key: str,
+    ) -> Finding | None:
+        """Find a finding by assessment_id and canonical_key."""
+        result = await self.session.execute(
+            select(Finding).where(
+                Finding.assessment_id == assessment_id,
+                Finding.canonical_key == canonical_key,
+            )
+        )
+        return result.scalars().first()
+
+    async def upsert_from_draft(
+        self,
+        assessment_id: int,
+        step: Step,
+        draft: Any,
+    ) -> tuple[Finding, bool]:
+        """Insert or merge a FindingDraft and its evidence. Returns (finding, created)."""
+        from app.domain.correlate import canonical_key
+
+        key = canonical_key(draft)
+        existing = await self.get_by_canonical_key(assessment_id, key)
+
+        if existing is None:
+            finding = Finding(
+                assessment_id=assessment_id,
+                canonical_key=key,
+                asset=draft.asset,
+                endpoint=draft.endpoint,
+                title=draft.title,
+                description=draft.description,
+                severity=draft.severity.value,
+                confidence=draft.confidence,
+                status=draft.status.value,
+                origin=draft.origin.value,
+                impact=draft.impact,
+                remediation=draft.remediation,
+                cvss=draft.cvss,
+                cve=draft.cve,
+                cwe=draft.cwe,
+            )
+            self.session.add(finding)
+            await self.session.flush()
+            target_finding = finding
+            created = True
+        else:
+            target_finding = existing
+            target_finding.updated_at = utcnow()
+            target_finding.confidence = max(
+                existing.confidence or 0, draft.confidence
+            )
+            if SEVERITY_RANK.get(draft.severity.value, 9) < SEVERITY_RANK.get(
+                existing.severity, 9
+            ):
+                target_finding.severity = draft.severity.value
+            if not existing.description:
+                target_finding.description = draft.description
+            if not existing.remediation:
+                target_finding.remediation = draft.remediation
+            if draft.cve:
+                target_finding.cve = sorted(set(existing.cve or []) | set(draft.cve))
+            if draft.cwe:
+                target_finding.cwe = sorted(set(existing.cwe or []) | set(draft.cwe))
+            if draft.status.value == "confirmed" and existing.status != "confirmed":
+                target_finding.status = "confirmed"
+            created = False
+
+        evidence_result = await self.session.execute(
+            select(Evidence).where(Evidence.finding_id == target_finding.id)
+        )
+        current_evidence = list(evidence_result.scalars().all())
+        for evidence in draft.evidence:
+            duplicate = any(
+                row.step_id == step.id
+                and row.locator == evidence.locator
+                and row.excerpt == evidence.excerpt
+                for row in current_evidence
+            )
+            if duplicate:
+                continue
+            ev = Evidence(
+                finding_id=target_finding.id,
+                step_id=step.id,
+                locator=evidence.locator,
+                excerpt=evidence.excerpt,
+            )
+            self.session.add(ev)
+            current_evidence.append(ev)
+
+        # Two independent tools observing the same key is confirmation, not a guess.
+        tools = {
+            row.locator.get("tool")
+            for row in current_evidence
+            if row.locator and row.locator.get("tool")
+        }
+        if len(tools) >= 2:
+            target_finding.status = "confirmed"
+
+        return target_finding, created
+
+    async def save_drafts(
+        self,
+        assessment_id: int,
+        step: Step,
+        drafts: list[Any],
+    ) -> tuple[int, int]:
+        """Save a list of FindingDrafts and link step evidence. Returns (added, merged)."""
+        added = 0
+        merged = 0
+        for draft in drafts:
+            _, created = await self.upsert_from_draft(assessment_id, step, draft)
+            if created:
+                added += 1
+            else:
+                merged += 1
+        return added, merged
 
     async def get_all(
         self,

@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from app.agents.loop.observations import observation_from_step
+from app.agents.observations import observation_from_step
 from app.core.db import get_async_session_ctx, init_db, make_engine, set_engine
 from app.domain.models import Assessment, Step, StepStatus
 

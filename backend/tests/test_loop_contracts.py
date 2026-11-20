@@ -3,7 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
-from app.agents.loop.contracts import (
+from app.agents.contracts import (
     ActionRequest,
     FailureSignal,
     Handoff,

@@ -10,20 +10,20 @@ from langchain_core.messages import AIMessage, ToolMessage
 from sqlmodel import select
 
 from app.actions import catalogue
-from app.agents.graph.state import AssessmentState, initial_state
-from app.agents.loop.contracts import (
+from app.agents.state import AssessmentState, initial_state
+from app.agents.contracts import (
     ActionRequest,
     FailureSignal,
     Observation,
     RouteDecision,
 )
-from app.agents.loop.mission_brain import (
+from app.agents.mission_brain import (
     MissionDigest,
     ROLE_TURN_CAPS,
     deterministic_safe_route,
     validate_route,
 )
-from app.agents.loop.nodes import (
+from app.agents.nodes import (
     approve_node,
     brief_node,
     curl_response_fingerprint,

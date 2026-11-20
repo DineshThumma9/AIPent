@@ -4,7 +4,7 @@ import pytest
 from app.core.db import get_async_session_ctx
 from app.domain.models import Assessment, AssessmentStatus
 from app.persistence.audit_repo import AuditRepo
-from app.agents import control
+from app.persistence import audit_repo as control
 
 
 @pytest.mark.asyncio

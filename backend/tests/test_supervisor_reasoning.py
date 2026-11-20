@@ -8,9 +8,9 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 from sqlmodel import select
 
-from app.agents.graph.state import AssessmentState, initial_state
-from app.agents.loop.brief import render_brief
-from app.agents.loop.contracts import (
+from app.agents.state import AssessmentState, initial_state
+from app.agents.brief import render_brief
+from app.agents.contracts import (
     ActionRequest,
     DecisionRecord,
     EvidenceBoard,
@@ -18,16 +18,16 @@ from app.agents.loop.contracts import (
     Hypothesis,
     RouteDecision,
 )
-from app.agents.loop.mission_brain import (
+from app.agents.mission_brain import (
     MissionDigest,
     deterministic_safe_route,
     validate_route,
 )
-from app.agents.loop.nodes import (
+from app.agents.nodes import (
     prepare_node,
     supervisor_node,
 )
-from app.agents.loop.reasoning import (
+from app.agents.reasoning import (
     build_evidence_board,
     record_hypothesis,
     update_hypothesis,

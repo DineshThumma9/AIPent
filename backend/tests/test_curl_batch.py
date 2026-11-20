@@ -10,8 +10,8 @@ from sqlmodel import select
 
 from app.actions import executor, mcp_command
 from app.actions.evidence import excerpt_for, locator_for
-from app.agents.loop.observations import observation_from_step
-from app.agents.loop.tool_specs import CurlArgs
+from app.agents.observations import observation_from_step
+from app.agents.tool_specs import CurlArgs
 from app.cli import _argv_preview, _curl_batch_requests
 from app.core.config import settings
 from app.core.db import get_async_session_ctx, init_db, make_engine, set_engine

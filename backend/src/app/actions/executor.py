@@ -50,12 +50,10 @@ from app.actions.catalogue import (
 from app.actions.evidence import link_step_evidence
 from app.adapters.base import FindingDraft
 from app.core.config import settings
-from app.domain.correlate import canonical_key
 from app.domain.models import (
     Assessment,
     Approval,
     Audit,
-    Evidence,
     Finding,
     Step,
     StepStatus,
@@ -63,15 +61,13 @@ from app.domain.models import (
 )
 from app.integrations.mcp_client import GatewayClient
 from app.integrations.zap_guided import run_zap_baseline
+from app.persistence.finding_repo import FindingRepo
 
 
 @dataclass
 class MCPResult:
     text: str
     calls: list[dict]
-
-
-SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
 
 async def _next_seq(session: AsyncSession, assessment_id: int) -> int:
@@ -94,102 +90,7 @@ async def _save_findings(
     step: Step,
     drafts: list[FindingDraft],
 ) -> tuple[int, int]:
-    added = 0
-    merged = 0
-    for draft in drafts:
-        key = canonical_key(draft)
-        result = await session.execute(
-            select(Finding).where(
-                Finding.assessment_id == assessment_id,
-                Finding.canonical_key == key,
-            )
-        )
-        existing = result.scalars().first()
-
-        if existing is None:
-            finding = Finding(
-                assessment_id=assessment_id,
-                canonical_key=key,
-                asset=draft.asset,
-                endpoint=draft.endpoint,
-                title=draft.title,
-                description=draft.description,
-                severity=draft.severity.value,
-                confidence=draft.confidence,
-                status=draft.status.value,
-                origin=draft.origin.value,
-                impact=draft.impact,
-                remediation=draft.remediation,
-                cvss=draft.cvss,
-                cve=draft.cve,
-                cwe=draft.cwe,
-            )
-            session.add(finding)
-            await session.flush()
-            target_finding = finding
-            added += 1
-        else:
-            target_finding = existing
-            target_finding.updated_at = utcnow()
-            target_finding.confidence = max(
-                existing.confidence or 0, draft.confidence
-            )
-            if SEVERITY_RANK.get(draft.severity.value, 9) < SEVERITY_RANK.get(
-                existing.severity, 9
-            ):
-                target_finding.severity = draft.severity.value
-            if not existing.description:
-                target_finding.description = draft.description
-            if not existing.remediation:
-                target_finding.remediation = draft.remediation
-            if draft.cve:
-                target_finding.cve = sorted(set(existing.cve or []) | set(draft.cve))
-            if draft.cwe:
-                target_finding.cwe = sorted(set(existing.cwe or []) | set(draft.cwe))
-            if draft.status.value == "confirmed" and existing.status != "confirmed":
-                target_finding.status = "confirmed"
-            merged += 1
-
-        evidence_result = await session.execute(
-            select(Evidence).where(Evidence.finding_id == target_finding.id)
-        )
-        current_evidence = list(evidence_result.scalars().all())
-        for evidence in draft.evidence:
-            duplicate = any(
-                row.step_id == step.id
-                and row.locator == evidence.locator
-                and row.excerpt == evidence.excerpt
-                for row in current_evidence
-            )
-            if duplicate:
-                continue
-            session.add(
-                Evidence(
-                    finding_id=target_finding.id,
-                    step_id=step.id,
-                    locator=evidence.locator,
-                    excerpt=evidence.excerpt,
-                )
-            )
-            current_evidence.append(
-                Evidence(
-                    finding_id=target_finding.id,
-                    step_id=step.id,
-                    locator=evidence.locator,
-                    excerpt=evidence.excerpt,
-                )
-            )
-
-        # Two independent tools observing the same key is confirmation, not a
-        # guess. One tool's report keeps the finding suspected.
-        tools = {
-            row.locator.get("tool")
-            for row in current_evidence
-            if row.locator.get("tool")
-        }
-        if len(tools) >= 2:
-            target_finding.status = "confirmed"
-    return added, merged
+    return await FindingRepo(session).save_drafts(assessment_id, step, drafts)
 
 
 async def _run(
@@ -401,7 +302,7 @@ async def execute_action(
             except (TypeError, ValueError):
                 linked_finding_id = 0
             if linked_finding_id:
-                finding = await session.get(Finding, linked_finding_id)
+                finding = await FindingRepo(session).get(linked_finding_id)
                 if finding is not None and finding.assessment_id == assessment_id:
                     await link_step_evidence(
                         session, step, linked_finding_id, text=text

@@ -6,7 +6,7 @@ Produces the initial prompt context for a specialist turn from current DB state.
 from __future__ import annotations
 
 from typing import Any
-from app.agents.loop.contracts import EvidenceBoard
+from app.agents.contracts import EvidenceBoard
 from app.domain.models import Assessment, Finding
 
 

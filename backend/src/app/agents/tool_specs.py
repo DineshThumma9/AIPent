@@ -11,7 +11,7 @@ from typing import Any, Callable, Literal
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
-from app.agents.loop.contracts import Handoff
+from app.agents.contracts import Handoff
 
 
 @dataclass(frozen=True)

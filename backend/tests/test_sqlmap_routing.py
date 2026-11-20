@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.actions import catalogue
-from app.agents.loop.tool_specs import SqlmapArgs
+from app.agents.tool_specs import SqlmapArgs
 from app.core.config import settings
 from app.domain.models import Assessment
 

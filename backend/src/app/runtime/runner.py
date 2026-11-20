@@ -16,7 +16,7 @@ from langgraph.types import Command
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.actions.executor import terminate_process
-from app.agents.graph import (
+from app.agents import (
     get_assessment_graph,
     graph_config,
     initial_state,

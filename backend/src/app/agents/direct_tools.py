@@ -11,9 +11,9 @@ from pathlib import Path
 from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.loop.contracts import Observation
-from app.agents.loop.reasoning import record_hypothesis, update_hypothesis
-from app.agents.loop.tool_specs import ToolSpec
+from app.agents.contracts import Observation
+from app.agents.reasoning import record_hypothesis, update_hypothesis
+from app.agents.tool_specs import ToolSpec
 from app.core.config import settings
 from app.persistence.audit_repo import AuditRepo
 from app.persistence.finding_repo import FindingRepo
