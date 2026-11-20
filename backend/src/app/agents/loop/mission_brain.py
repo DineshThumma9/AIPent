@@ -23,7 +23,7 @@ from app.core.config import settings
 from app.core.db import get_async_session_ctx
 from app.core.log import get_logger
 from app.domain.models import Assessment, Audit, Finding, Step
-from app.persistence.context_loader import MissionContext, load_mission_context
+from app.persistence import MissionContext, load_mission_context
 from app.persistence.finding_repo import FindingRepo
 
 log = get_logger("agent.mission")

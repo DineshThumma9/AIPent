@@ -5,8 +5,7 @@ from __future__ import annotations
 from typing import Sequence
 from sqlmodel import select
 
-from app.agents.control import audit
-from app.domain.models import SteeringNote, utcnow
+from app.domain.models import Audit, SteeringNote, utcnow
 from app.persistence.base import BaseRepo
 
 
@@ -31,15 +30,17 @@ class SteeringRepo(BaseRepo):
         await self.session.commit()
         await self.session.refresh(note)
 
-        audit(
-            self.session,
-            assessment_id,
-            "steering.queued",
-            {
-                "note_id": note.id,
-                "run_id": run_id,
-                "text": note.text,
-            },
+        self.session.add(
+            Audit(
+                assessment_id=assessment_id,
+                actor="system",
+                event_type="steering.queued",
+                payload={
+                    "note_id": note.id,
+                    "run_id": run_id,
+                    "text": note.text,
+                },
+            )
         )
         await self.session.commit()
         return note
@@ -70,15 +71,17 @@ class SteeringRepo(BaseRepo):
         for note in notes:
             note.status = "consumed"
             note.consumed_at = now
-            audit(
-                self.session,
-                assessment_id,
-                "steering.consumed",
-                {
-                    "note_id": note.id,
-                    "run_id": run_id,
-                    "text": note.text,
-                },
+            self.session.add(
+                Audit(
+                    assessment_id=assessment_id,
+                    actor="system",
+                    event_type="steering.consumed",
+                    payload={
+                        "note_id": note.id,
+                        "run_id": run_id,
+                        "text": note.text,
+                    },
+                )
             )
 
         if notes:

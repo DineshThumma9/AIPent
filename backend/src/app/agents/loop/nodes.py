@@ -9,15 +9,17 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END
 from langgraph.types import Command, interrupt
 from sqlalchemy.ext.asyncio import AsyncSession
 
+if TYPE_CHECKING:
+    from app.agents.graph.state import AssessmentState
+
 from app.actions.catalogue import check_scope
 from app.actions.executor import execute_action
-from app.agents.graph.state import AssessmentState
 from app.agents.loop.brief import render_brief
 from app.agents.prompts import ROLE_PROMPTS
 from app.agents.loop.contracts import (
@@ -60,12 +62,15 @@ from app.domain.models import (
     StepStatus,
     utcnow,
 )
-from app.persistence.assessment_repo import AssessmentRepo
-from app.persistence.audit_repo import AuditRepo
-from app.persistence.context_loader import MissionContext, load_mission_context
-from app.persistence.finding_repo import FindingRepo
-from app.persistence.steering_repo import SteeringRepo
-from app.persistence.step_repo import StepRepo
+from app.persistence import (
+    AssessmentRepo,
+    AuditRepo,
+    FindingRepo,
+    MissionContext,
+    SteeringRepo,
+    StepRepo,
+    load_mission_context,
+)
 from app.reporting.narrative import build_narrative_context, write_narrative_result
 from app.reporting.report import generate_report
 import asyncio
@@ -865,6 +870,8 @@ async def approve_node(state: AssessmentState) -> Command:
     pending = ActionRequest.model_validate(pending_raw)
     assessment_id = state["assessment_id"]
 
+    approved = False
+    rejection_reason = "rejected by analyst"
     needs_human_approval = False
     interrupt_payload: dict[str, Any] = {}
 

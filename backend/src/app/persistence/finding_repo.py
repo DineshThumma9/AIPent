@@ -387,8 +387,6 @@ class FindingRepo(BaseRepo):
         CONFIRMED and FALSE_POSITIVE require at least one executed
         curl_request evidence row with a non-null http_status.
         """
-        from app.agents.control import audit
-
         row = await self.session.get(Finding, finding_id)
         if row is None or row.assessment_id != assessment_id:
             return {"error": f"finding {finding_id} not in current assessment"}

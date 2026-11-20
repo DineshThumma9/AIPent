@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.loop.contracts import EvidenceBoard
-from app.agents.loop.reasoning import build_evidence_board
+if TYPE_CHECKING:
+    from app.agents.loop.contracts import EvidenceBoard
 from app.domain.models import Assessment, Finding, Step
+from app.persistence.audit_repo import AuditRepo
 from app.persistence.finding_repo import FindingRepo
 from app.persistence.step_repo import StepRepo
 from app.persistence.steering_repo import SteeringRepo
@@ -37,7 +38,8 @@ async def load_mission_context(
     finding_repo = FindingRepo(session)
     services = await finding_repo.get_services(assessment_id)
     candidates = await finding_repo.get_candidates(assessment_id)
-    board = await build_evidence_board(session, assessment_id)
+    audit_repo = AuditRepo(session)
+    board = await audit_repo.get_evidence_board(assessment_id)
 
     steering_repo = SteeringRepo(session)
     steering_notes = await steering_repo.take_pending(assessment_id, run_id)

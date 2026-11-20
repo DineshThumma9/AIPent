@@ -18,7 +18,6 @@ from typing import Any, Callable
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
 
-from app.agents.loop.builder import build_assessment_graph_v2
 from app.agents.graph.state import AssessmentState, initial_state
 from app.core.config import settings
 from app.domain.models import (
@@ -40,6 +39,8 @@ def build_assessment_graph(
     executor: Callable[..., Any] | None = None,
 ):
     """Compile the three-role loop."""
+    from app.agents.loop.builder import build_assessment_graph_v2
+
     return build_assessment_graph_v2(checkpointer=checkpointer, executor=executor)
 
 
