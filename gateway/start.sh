@@ -68,7 +68,7 @@ if ! port_open 127.0.0.1 7458; then
 fi
 
 # Tools catalog for AIPENT
-tools="${AIPENT_MCP_TOOLS:-nmap_scan,nikto_scan,sqlmap_scan,dirb_scan,whatweb_scan,hashcat_crack,curl_request,zap_crawl_start,zap_crawl_status,zap_crawl_stop,zap_passive_scan_wait,zap_report_generate,zap_report_read_chunk}"
+tools="${AIPENT_MCP_TOOLS:-nmap_scan,nikto_scan,sqlmap_scan,dirb_scan,whatweb_scan,hashcat_crack,curl_request,zap_crawl_start,zap_crawl_status,zap_crawl_stop,zap_passive_scan_wait,zap_report_generate,zap_report_read_chunk,ffuf_scan,katana_crawl,nuclei_scan}"
 
 echo "[*] Launching Docker MCP Gateway on 127.0.0.1:${AIPENT_MCP_PORT:-8812}..."
 exec docker mcp gateway run \

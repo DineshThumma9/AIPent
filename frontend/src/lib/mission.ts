@@ -158,6 +158,9 @@ export function actionLabel(action: string): string {
     curl_tool: 'HTTP request (curl)',
     hashcat_crack: 'Credential recovery (hashcat)',
     hash_identify: 'Hash format identification',
+    ffuf_scan: 'Web fuzzing (ffuf)',
+    katana_crawl: 'Endpoint crawl (Katana)',
+    nuclei_scan: 'Vulnerability scan (Nuclei)',
   }
   return labels[action] ?? action.replaceAll('_', ' ')
 }

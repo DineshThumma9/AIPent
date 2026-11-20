@@ -125,3 +125,20 @@ def test_policy_overrides_dict_and_json():
     # Empty / invalid JSON fails gracefully to defaults
     assert load_policies_from_json(None) == DEFAULT_ACTION_POLICIES
     assert load_policies_from_json("invalid json") == DEFAULT_ACTION_POLICIES
+
+
+def test_new_tools_policies():
+    from app.core.policy import policy_for
+
+    ffuf_policy = policy_for("ffuf_scan")
+    assert ffuf_policy.risk == "low"
+    assert ffuf_policy.approve is False
+
+    katana_policy = policy_for("katana_crawl")
+    assert katana_policy.risk == "low"
+    assert katana_policy.approve is False
+
+    nuclei_policy = policy_for("nuclei_scan")
+    assert nuclei_policy.risk == "medium"
+    assert nuclei_policy.approve is True
+

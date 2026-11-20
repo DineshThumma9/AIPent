@@ -49,6 +49,9 @@ ACTION_TITLES = {
     "sqlmap_scan": "SQL Injection Test (Sqlmap)",
     "hashcat_crack": "Offline Hash Analysis (Hashcat)",
     "sslscan": "TLS/SSL Configuration Scan",
+    "ffuf_scan": "Web Fuzzing & Route Discovery (FFUF)",
+    "katana_crawl": "Web Spidering & Endpoint Crawl (Katana)",
+    "nuclei_scan": "Vulnerability Assessment (Nuclei)",
 }
 
 

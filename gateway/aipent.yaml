@@ -21,6 +21,12 @@ registry:
         description: Run WhatWeb to identify CMS, web technologies, and headers of a website.
       - name: hashcat_crack
         description: Run Hashcat to crack an inline hash string.
+      - name: ffuf_scan
+        description: Run FFUF for fast web directory and parameter fuzzing.
+      - name: katana_crawl
+        description: Run Katana next-generation web crawler and spider for endpoint discovery.
+      - name: nuclei_scan
+        description: Run Nuclei template-based vulnerability scanner against target URL.
     
   vulnify:
     name: vulnify
