@@ -121,6 +121,36 @@ class ZapArgs(ActionReasoning):
     pass
 
 
+class CurlRequestItem(BaseModel):
+    """One independent read-only request inside a curl batch."""
+
+    path: str = Field(
+        default="/",
+        description="Path on the scoped target starting with / (e.g. '/login').",
+    )
+    url: str | None = Field(
+        default=None,
+        description="Full URL or path alternative to path. Host must be in scope.",
+    )
+    method: Literal["GET", "HEAD", "OPTIONS"] = Field(
+        default="GET",
+        description="Read-only HTTP method for batched requests.",
+    )
+    headers: dict[str, str] = Field(
+        default_factory=dict,
+        description="Optional request headers dict.",
+    )
+    body: str | None = Field(
+        default=None,
+        description="Optional request body (rarely needed for read-only probes).",
+    )
+    follow_redirects: bool = Field(
+        default=True,
+        description="Follow HTTP redirects automatically.",
+    )
+    expected_status: int = Field(default=200, description="Expected HTTP response status code.")
+
+
 class CurlArgs(ActionReasoning):
     path: str = Field(
         default="/",
@@ -148,6 +178,15 @@ class CurlArgs(ActionReasoning):
     )
     expected_status: int = Field(default=200, description="Expected HTTP response status code.")
     finding_id: int | None = Field(default=None, description="Candidate finding ID being probed.")
+    requests: list[CurlRequestItem] = Field(
+        default_factory=list,
+        max_length=3,
+        description=(
+            "Up to 3 independent read-only requests to run concurrently. Use for separate "
+            "endpoints that do not depend on each other. Never batch login/logout flows, "
+            "state-changing methods, or requests that share a session. Omit for a single request."
+        ),
+    )
 
 
 
@@ -379,11 +418,14 @@ curl_request_tool = ToolSpec(
     action="curl_request",
     args_model=CurlArgs,
     description=(
-        "Send one HTTP request via curl-mcp. "
+        "Send one HTTP request via curl-mcp, or up to 3 independent read-only requests "
+        "concurrently through `requests` (GET/HEAD/OPTIONS only). "
         "Supports all HTTP methods (GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD), headers, body payloads, and redirect controls. "
-        "Returns status code, response headers, and body excerpt."
+        "Returns status code, response headers, and body excerpt for each request. "
+        "Never batch dependent requests (login then authenticated page), state-changing "
+        "methods, or requests that share a session token."
     ),
-    param_fields=("url", "path", "method", "headers", "body", "expected_status", "follow_redirects", "finding_id"),
+    param_fields=("url", "path", "method", "headers", "body", "expected_status", "follow_redirects", "finding_id", "requests"),
 )
 
 

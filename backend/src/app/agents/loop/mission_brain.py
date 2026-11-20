@@ -7,6 +7,7 @@ Python's validate_route guard accepts, rejects, or replaces it.
 from __future__ import annotations
 
 import json
+import re
 from typing import TYPE_CHECKING, Any
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from pydantic import BaseModel, Field
@@ -254,11 +255,16 @@ def _supervisor_tool_payload(
     """Serve supervisor tool calls from the already-built digest."""
     limit = int(args.get("limit") or 0)
     if name == "get_mission_digest":
-        return digest.model_dump()
+        return digest.model_dump(mode="json")
     if name == "list_services":
         return {"services": digest.services[: limit or 50]}
     if name == "list_findings":
-        return {"findings": digest.candidates[: limit or 50]}
+        return {
+            "findings": [
+                f.model_dump(mode="json") if hasattr(f, "model_dump") else f
+                for f in digest.candidates[: limit or 50]
+            ]
+        }
     if name == "get_steps":
         return {"steps": digest.recent_steps[-limit:] if limit else digest.recent_steps}
     if name == "get_handoffs":
@@ -268,6 +274,63 @@ def _supervisor_tool_payload(
     if name == "get_budget":
         return digest.budget
     return {"error": f"unknown supervisor tool {name}"}
+
+
+def _extract_route_decision(raw_obj: Any) -> RouteDecision | None:
+    """Robustly extract RouteDecision from a Pydantic object, dict, or AIMessage/text."""
+    if isinstance(raw_obj, RouteDecision):
+        return raw_obj
+    if isinstance(raw_obj, dict):
+        if isinstance(raw_obj.get("parsed"), RouteDecision):
+            return raw_obj["parsed"]
+        if raw_obj.get("parsed"):
+            try:
+                return RouteDecision.model_validate(raw_obj["parsed"])
+            except Exception:
+                pass
+        if "next_role" in raw_obj:
+            try:
+                return RouteDecision.model_validate(raw_obj)
+            except Exception:
+                pass
+        if "raw" in raw_obj:
+            raw_obj = raw_obj["raw"]
+
+    tool_calls = getattr(raw_obj, "tool_calls", None) or []
+    for tc in tool_calls:
+        args = tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", None)
+        if args and isinstance(args, dict) and args.get("next_role"):
+            try:
+                return RouteDecision.model_validate(args)
+            except Exception:
+                pass
+
+    candidates: list[str] = []
+    content = getattr(raw_obj, "content", None) or (raw_obj if isinstance(raw_obj, str) else None)
+    if content and isinstance(content, str):
+        candidates.append(content)
+
+    additional_kwargs = getattr(raw_obj, "additional_kwargs", {}) or {}
+    for k in ("reasoning", "reasoning_content"):
+        if additional_kwargs.get(k):
+            candidates.append(str(additional_kwargs[k]))
+
+    for text in candidates:
+        m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+        if m:
+            try:
+                return RouteDecision.model_validate(json.loads(m.group(1)))
+            except Exception:
+                pass
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            try:
+                return RouteDecision.model_validate(json.loads(text[start : end + 1]))
+            except Exception:
+                pass
+
+    return None
 
 
 async def run_supervisor_agent(
@@ -289,7 +352,8 @@ async def run_supervisor_agent(
 
     user_content = (
         f"MISSION DIGEST:\n{digest.model_dump_json(indent=2)}\n\n"
-        "Analyze the mission digest and respond with RouteDecision: next_role, detailed rationale, confidence score, and tactical directive."
+        "Analyze the mission digest and provide your RouteDecision by calling the RouteDecision tool with next_role, why, confidence score, and tactical directive. "
+        "Populate all required arguments directly inside the tool call."
     )
     messages = [
         SystemMessage(content=ROLE_PROMPTS.get("supervisor")),
@@ -308,37 +372,65 @@ async def run_supervisor_agent(
         tool_model = model.bind_tools(bindable_tools("supervisor"))
         for _ in range(max(0, max_tool_calls)):
             ai = await tool_model.ainvoke(conversation, config=call_config)
+            decision = _extract_route_decision(ai)
+            if decision:
+                return decision
+
             tool_calls = list(getattr(ai, "tool_calls", []) or [])
             if not tool_calls:
                 break
             conversation.append(ai)
             for call in tool_calls:
+                cname = call.get("name") or "unknown"
+                if cname == "RouteDecision":
+                    continue
                 conversation.append(
                     ToolMessage(
                         tool_call_id=call.get("id") or "",
-                        name=call.get("name") or "unknown",
+                        name=cname,
                         content=json.dumps(
                             _supervisor_tool_payload(
-                                call.get("name") or "",
+                                cname,
                                 call.get("args") or {},
                                 digest,
-                            )
+                            ),
+                            default=str,
                         ),
                     )
                 )
     except Exception as exc:
         log.warning("supervisor tool loop failed: %s", exc)
+        # Clean up any trailing assistant message that has unresolved tool calls
+        if conversation and getattr(conversation[-1], "tool_calls", None):
+            conversation.pop()
 
-    # 2. RouteDecision is the response format.
+    # 2. RouteDecision is the response format (first attempt with include_raw=True).
     try:
-        structured = model.with_structured_output(response_model)
+        structured = model.with_structured_output(response_model, include_raw=True)
         result = await structured.ainvoke(conversation, config=call_config)
-        if isinstance(result, RouteDecision):
-            return result
-        if isinstance(result, dict):
-            return RouteDecision.model_validate(result)
+        decision = _extract_route_decision(result)
+        if decision:
+            return decision
     except Exception as exc:
-        log.warning("supervisor structured route failed: %s", exc)
+        log.warning("supervisor structured route with include_raw failed: %s", exc)
+        try:
+            structured = model.with_structured_output(response_model)
+            result = await structured.ainvoke(conversation, config=call_config)
+            decision = _extract_route_decision(result)
+            if decision:
+                return decision
+        except Exception as exc2:
+            log.warning("supervisor structured route failed: %s", exc2)
+
+    # Fallback to direct model invocation and text extraction if structured tool-calling failed
+    try:
+        raw_ai = await model.ainvoke(conversation, config=call_config)
+        decision = _extract_route_decision(raw_ai)
+        if decision:
+            log.info("recovered RouteDecision via direct text fallback (role=%s)", decision.next_role)
+            return decision
+    except Exception as exc:
+        log.warning("supervisor direct invoke fallback failed: %s", exc)
 
     log.warning("supervisor unavailable; using deterministic route")
     fallback = deterministic_safe_route(

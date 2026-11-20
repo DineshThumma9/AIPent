@@ -24,6 +24,19 @@ from anyio import BrokenResourceError, ClosedResourceError
 from mcp import ClientSession
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import streamable_http_client
+import mcp.client.sse
+from contextlib import asynccontextmanager
+
+# Configure MCP SSE max event size to 32MB so large HTTP response artifacts (such as JS bundles) do not fail
+_orig_sse_within_origin = mcp.client.sse.sse_within_origin
+
+@asynccontextmanager
+async def _mcp_sse_within_origin(client, url, **kwargs):
+    kwargs.setdefault("max_event_size", 32 * 1024 * 1024)
+    async with _orig_sse_within_origin(client, url, **kwargs) as es:
+        yield es
+
+mcp.client.sse.sse_within_origin = _mcp_sse_within_origin
 
 from app.core.config import settings
 

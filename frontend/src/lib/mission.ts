@@ -150,6 +150,7 @@ export function actionLabel(action: string): string {
     sqlmap_scan: 'sqlmap scan',
     dirb_scan: 'Directory scan',
     zap_baseline: 'ZAP baseline scan',
+    curl_request: 'HTTP request (curl)',
     curl_tool: 'HTTP request (curl)',
     hashcat_crack: 'Credential recovery (hashcat)',
     hash_identify: 'Hash format identification',

@@ -118,11 +118,62 @@ def _url_and_method(text: str, step: Step) -> tuple[str | None, str | None]:
     return (str(url) if url else None, clean_method)
 
 
+def _status_rank(status: int) -> int:
+    """Rank a batch result for evidence: prefer a successful probe, then server errors."""
+    if 200 <= status < 300:
+        return 0
+    if 500 <= status < 600:
+        return 1
+    if status in (401, 403):
+        return 2
+    if status in (400, 422):
+        return 3
+    if status == 404:
+        return 4
+    return 5
+
+
+def _batch_candidate(entry: dict[str, Any]) -> dict[str, Any]:
+    """Flatten one batch entry into the shape the locator helpers read."""
+    result = entry.get("result") if isinstance(entry.get("result"), dict) else {}
+    candidate = dict(result)
+    request = entry.get("request") or result.get("request")
+    if isinstance(request, dict):
+        candidate.setdefault("request", request)
+    return candidate
+
+
+def _best_batch_entry(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Pick the most evidentiary entry from a batched curl artifact."""
+    best: tuple[int, dict[str, Any]] | None = None
+    for entry in payload.get("results") or []:
+        if not isinstance(entry, dict):
+            continue
+        status = http_status(json.dumps(_batch_candidate(entry)))
+        if status is None:
+            continue
+        rank = _status_rank(status)
+        if best is None or rank < best[0]:
+            best = (rank, entry)
+    return best[1] if best is not None else None
+
+
+def _best_batch_result(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Pick the most evidentiary result from a batched curl artifact."""
+    entry = _best_batch_entry(payload)
+    return _batch_candidate(entry) if entry is not None else None
+
+
 def locator_for(step: Step, text: str) -> dict[str, Any]:
     """Build the locator the verdict gate inspects."""
     locator: dict[str, Any] = {"tool": step.action}
 
     if step.action == "curl_request":
+        payload = _json_payload(text)
+        if isinstance(payload, dict) and payload.get("batch"):
+            chosen = _best_batch_result(payload)
+            if chosen is not None:
+                text = json.dumps(chosen)
         status = http_status(text)
         if status is not None:
             locator["http_status"] = status
@@ -137,6 +188,32 @@ def locator_for(step: Step, text: str) -> dict[str, Any]:
     return locator
 
 
+def excerpt_for(step: Step, text: str) -> str:
+    """Readable evidence text; batches use the result the locator selects."""
+    body = text.strip()
+    if step.action != "curl_request":
+        return body[:800]
+
+    payload = _json_payload(body)
+    if not isinstance(payload, dict) or not payload.get("batch"):
+        return body[:800]
+
+    entry = _best_batch_entry(payload)
+    if entry is None:
+        return body[:800]
+
+    result = entry.get("result") if isinstance(entry.get("result"), dict) else {}
+    response = (
+        result.get("response") if isinstance(result.get("response"), dict) else {}
+    )
+    content = response.get("body") or result.get("body")
+    if isinstance(content, str) and content.strip():
+        return content.strip()[:800]
+    if content:
+        return json.dumps(content)[:800]
+    return json.dumps(_batch_candidate(entry))[:800]
+
+
 async def link_step_evidence(
     session: AsyncSession,
     step: Step,
@@ -146,7 +223,7 @@ async def link_step_evidence(
     """Attach one executed step to a finding, deduplicated by locator + excerpt."""
     body = step_text(step) if text is None else text
     locator = locator_for(step, body)
-    excerpt = body.strip()[:800]
+    excerpt = excerpt_for(step, body)
 
     existing = await session.execute(
         select(Evidence).where(

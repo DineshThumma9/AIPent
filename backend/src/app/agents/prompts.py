@@ -51,6 +51,7 @@ TACTICAL PRINCIPLES
 - Always put the endpoint in `path` (for example '/rest/user/login'). `target` must be the scoped host or IP only; a URL placed in `target` reaches the site root.
 - If two different paths return the same body and size, you are hitting an SPA catch-all. Stop guessing paths and read the JavaScript bundle or API description instead.
 - Prefer quick, surgical HTTP checks (curl_request) to inspect discovered paths or suspected endpoints before launching heavy crawlers.
+- Batch up to 3 independent GET/HEAD/OPTIONS probes in one curl_request call via `requests`. Never batch dependent requests (login then authenticated page), state-changing methods, or requests that share a session token.
 - Select the scanner that matches the service architecture rather than running every tool blindly.
 
 YOUR TOOLS
@@ -86,6 +87,8 @@ TACTICAL PRINCIPLES
 - When a payload changes the result set (for example a search returns 46 rows for `' OR '1'='1` versus 3 for a benign term), that is proof. Call record_finding with both step ids, set the status to confirmed, then hand off. Do not keep probing the same endpoint.
 - Run sqlmap_scan against the exact route that produced the anomalous response, not a guessed sibling path.
 - Always prefer targeted, surgical requests before requesting approval for heavy scanners.
+- Batch up to 3 independent GET/HEAD/OPTIONS probes in one curl_request call via `requests`. Never batch dependent requests (login then authenticated page), state-changing methods, or requests that share a session token.
+- Use a batch for exploration. When one response is the proof, rerun that request alone with finding_id so the evidence locator is unambiguous.
 
 YOUR TOOLS
 ----------
@@ -135,7 +138,11 @@ SUPERVISOR_PROMPT = (
         "GROUNDING & ANTI-HALLUCINATION RULES:\n"
         "- ONLY reference endpoints, hosts, or paths that are explicitly observed in the MISSION DIGEST (e.g. from service enumeration, candidate findings, or recent steps). DO NOT invent or hallucinate routes like '/rest/search' if discovery revealed '/rest/products/search'.\n"
         "- If the endpoint path is uncertain, direct the specialist to run discovery/fuzzing first to find the exact route.\n"
-        "- Never instruct validation to probe a guessed endpoint when 5xx errors or 404s were recently returned."
+        "- Never instruct validation to probe a guessed endpoint when 5xx errors or 404s were recently returned.\n\n"
+        "STRUCTURED ROUTE DECISION REQUIREMENT:\n"
+        "- You MUST call the 'RouteDecision' tool with all required fields (next_role, why, confidence, directive) fully populated inside the function call arguments.\n"
+        "- Do NOT provide an empty tool call or write the JSON decision only in message text.\n"
+        "- The 'next_role' must be one of: 'recon', 'discovery', 'validation', or 'review'."
     )
 
 

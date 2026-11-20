@@ -63,6 +63,7 @@ usage() {
   echo ""
   echo "Options:"
   echo "  --with-lab    Also start the OWASP Juice Shop lab container (port 3000)"
+  echo "  --logs        Stream backend logs directly in the terminal"
   echo "  --status      Check the status of all stack components and exit"
   echo "  --stop        Stop background processes, MCP services, and the lab container"
   echo "  --down        Stop and tear down all Docker containers"
@@ -70,11 +71,17 @@ usage() {
   echo ""
 }
 
+FOLLOW_LOGS=false
+
 # Parse command line flags
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --with-lab)
       WITH_LAB=true
+      shift
+      ;;
+    --logs|--follow-logs)
+      FOLLOW_LOGS=true
       shift
       ;;
     --status)
@@ -257,11 +264,16 @@ wait_for_http() {
 GATEWAY_PID=""
 BACKEND_PID=""
 FRONTEND_PID=""
+TAIL_PID=""
 
 cleanup() {
   echo ""
   echo -e "${YELLOW}[*] Received shutdown signal. Terminating AIPENT host services...${NC}"
   
+  if [[ -n "$TAIL_PID" ]] && kill -0 "$TAIL_PID" 2>/dev/null; then
+    kill "$TAIL_PID" 2>/dev/null || true
+  fi
+
   if [[ -n "$FRONTEND_PID" ]] && kill -0 "$FRONTEND_PID" 2>/dev/null; then
     kill "$FRONTEND_PID" 2>/dev/null || true
   fi
@@ -324,7 +336,7 @@ echo -e "${BLUE}${BOLD}[3/4] Starting AIPENT Backend API (FastAPI / Uvicorn)...$
 if curl -fsS -m 2 http://127.0.0.1:8010/health >/dev/null 2>&1; then
   echo -e "    ${YELLOW}Backend is already running and healthy on port 8010.${NC}"
 else
-  (cd "$ROOT_DIR/backend" && "$PYTHON_CMD" -m uvicorn app.main:app \
+  (cd "$ROOT_DIR/backend" && PYTHONUNBUFFERED=1 "$PYTHON_CMD" -m uvicorn app.main:app \
     --host 127.0.0.1 \
     --port 8010 \
     --reload \
@@ -332,6 +344,12 @@ else
     > "$LOG_DIR/backend.log" 2>&1 &
   BACKEND_PID=$!
   wait_for_http "http://127.0.0.1:8010/health" "Backend API" 35
+fi
+
+# If log streaming is enabled, tail backend.log in background
+if [ "$FOLLOW_LOGS" = true ]; then
+  tail -n 20 -f "$LOG_DIR/backend.log" &
+  TAIL_PID=$!
 fi
 
 # ------------------------------------------------------------------------------
@@ -347,6 +365,9 @@ echo -e "  ${BOLD}Backend API:${NC}       ${CYAN}http://127.0.0.1:8010${NC}"
 echo -e "  ${BOLD}API Docs (Swagger):${NC}${CYAN}http://127.0.0.1:8010/docs${NC}"
 echo -e "  ${BOLD}MCP Gateway SSE:${NC}   ${CYAN}http://127.0.0.1:8812/sse${NC}"
 echo -e "  ${BOLD}Logs Directory:${NC}    ${CYAN}$LOG_DIR/${NC}"
+echo -e "  ${BOLD}Live Backend Log:${NC}  ${YELLOW}tail -f .logs/backend.log${NC}"
+echo -e "  ${BOLD}Agent Run Log:${NC}     ${YELLOW}tail -f backend/data/aipent.log${NC}"
+echo -e "  ${BOLD}Stream in console:${NC} ${YELLOW}./start.sh --logs${NC}"
 echo -e "${GREEN}${BOLD}==================================================================${NC}"
 echo -e "${YELLOW}Press [Ctrl+C] at any time to shut down the stack.${NC}\n"
 

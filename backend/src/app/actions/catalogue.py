@@ -488,6 +488,74 @@ def transport_target(target: str) -> str:
     return host
 
 
+def _curl_tool_args(
+    assessment: Assessment,
+    target: str,
+    p: dict[str, Any],
+    alias: str,
+) -> dict[str, Any]:
+    """Build the gateway arguments for one curl request."""
+    method = str(p.get("method") or "GET").upper()
+    if method not in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}:
+        method = "GET"
+    raw_url = str(p.get("url") or p.get("path") or "").strip()
+    if not raw_url or raw_url == "/":
+        # Models sometimes put the full endpoint in `target` and leave
+        # `path` at its default. Honour the target's path instead of
+        # silently probing the site root.
+        parsed_target = urlsplit(target if "://" in target else f"//{target}")
+        if parsed_target.path and parsed_target.path != "/":
+            raw_url = parsed_target.path
+            if parsed_target.query:
+                raw_url += "?" + parsed_target.query
+    raw_url = raw_url or "/"
+    _, port = _clean_host_and_port(target, _web_port(assessment))
+    if raw_url.startswith(("http://", "https://")):
+        parsed = urlsplit(raw_url)
+        if not parsed.hostname:
+            raise ValueError("curl_request url has no host")
+        check_scope(assessment, parsed.hostname)
+        if parsed.port and (not assessment.ports or parsed.port in assessment.ports):
+            port = parsed.port
+        path = parsed.path or "/"
+        if parsed.query:
+            path += "?" + parsed.query
+        url = f"{'https' if port in (443, 8443) else 'http'}://{alias}:{port}{path}"
+    else:
+        if not raw_url.startswith("/"):
+            raw_url = "/" + raw_url
+        url = f"{'https' if port in (443, 8443) else 'http'}://{alias}:{port}{raw_url}"
+    raw_headers = dict(p.get("headers") or {})
+    headers = {str(k).rstrip(": \t"): str(v) for k, v in raw_headers.items()}
+    raw_body = p.get("body")
+    if isinstance(raw_body, dict):
+        body = json.dumps(raw_body)
+        if not any(k.lower() == "content-type" for k in headers):
+            headers["Content-Type"] = "application/json"
+    elif raw_body:
+        body = str(raw_body)
+        if body.strip().startswith("{") and body.strip().endswith("}") and not any(k.lower() == "content-type" for k in headers):
+            headers["Content-Type"] = "application/json"
+    else:
+        if method in ("POST", "PUT", "PATCH") and any("application/json" in str(v).lower() for v in headers.values()):
+            body = "{}"
+        else:
+            body = None
+
+    tool_args: dict[str, Any] = {
+        "url": url,
+        "method": method,
+        "follow_redirects": bool(p.get("follow_redirects", True)),
+    }
+    if headers:
+        tool_args["headers"] = headers
+    if body is not None:
+        tool_args["body"] = body
+    if "timeout_seconds" in p:
+        tool_args["timeout_seconds"] = int(p["timeout_seconds"])
+    return tool_args
+
+
 def mcp_tool_call(
     action: str,
     assessment: Assessment,
@@ -569,66 +637,22 @@ def mcp_tool_call(
         }
     if action == "curl_request":
         p = params or {}
-        method = str(p.get("method") or "GET").upper()
-        if method not in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}:
-            method = "GET"
-        raw_url = str(p.get("url") or p.get("path") or "").strip()
-        if not raw_url or raw_url == "/":
-            # Models sometimes put the full endpoint in `target` and leave
-            # `path` at its default. Honour the target's path instead of
-            # silently probing the site root.
-            parsed_target = urlsplit(target if "://" in target else f"//{target}")
-            if parsed_target.path and parsed_target.path != "/":
-                raw_url = parsed_target.path
-                if parsed_target.query:
-                    raw_url += "?" + parsed_target.query
-        raw_url = raw_url or "/"
-        _, port = _clean_host_and_port(target, _web_port(assessment))
-        if raw_url.startswith(("http://", "https://")):
-            parsed = urlsplit(raw_url)
-            if not parsed.hostname:
-                raise ValueError("curl_request url has no host")
-            check_scope(assessment, parsed.hostname)
-            if parsed.port and (not assessment.ports or parsed.port in assessment.ports):
-                port = parsed.port
-            path = parsed.path or "/"
-            if parsed.query:
-                path += "?" + parsed.query
-            url = f"{'https' if port in (443, 8443) else 'http'}://{alias}:{port}{path}"
-        else:
-            if not raw_url.startswith("/"):
-                raw_url = "/" + raw_url
-            url = f"{'https' if port in (443, 8443) else 'http'}://{alias}:{port}{raw_url}"
-        raw_headers = dict(p.get("headers") or {})
-        headers = {str(k).rstrip(": \t"): str(v) for k, v in raw_headers.items()}
-        raw_body = p.get("body")
-        if isinstance(raw_body, dict):
-            body = json.dumps(raw_body)
-            if not any(k.lower() == "content-type" for k in headers):
-                headers["Content-Type"] = "application/json"
-        elif raw_body:
-            body = str(raw_body)
-            if body.strip().startswith("{") and body.strip().endswith("}") and not any(k.lower() == "content-type" for k in headers):
-                headers["Content-Type"] = "application/json"
-        else:
-            if method in ("POST", "PUT", "PATCH") and any("application/json" in str(v).lower() for v in headers.values()):
-                body = "{}"
-            else:
-                body = None
-
-        tool_args: dict[str, Any] = {
-            "url": url,
-            "method": method,
-            "follow_redirects": bool(p.get("follow_redirects", True)),
-        }
-        if headers:
-            tool_args["headers"] = headers
-        if body is not None:
-            tool_args["body"] = body
-        if "timeout_seconds" in p:
-            tool_args["timeout_seconds"] = int(p["timeout_seconds"])
-
-        return "curl_request", tool_args
+        batch = p.get("requests") or []
+        if batch:
+            if len(batch) > 3:
+                raise ValueError("curl_request accepts at most 3 batched requests")
+            requests: list[dict[str, Any]] = []
+            for item in batch:
+                if hasattr(item, "model_dump"):
+                    item = item.model_dump(exclude_none=True)
+                args = _curl_tool_args(assessment, target, item, alias)
+                if args["method"] not in {"GET", "HEAD", "OPTIONS"}:
+                    raise ValueError(
+                        "batched curl_request requests must use GET, HEAD, or OPTIONS"
+                    )
+                requests.append(args)
+            return "curl_request", {"batch": requests}
+        return "curl_request", _curl_tool_args(assessment, target, p, alias)
 
     raise UnknownAction(action)
 

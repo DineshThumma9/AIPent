@@ -95,6 +95,17 @@ def next_no_progress(
 ) -> int:
     """Count failed probes and duplicate responses as no-progress."""
     facts = observation.facts or {}
+    batch_results = facts.get("results")
+    if isinstance(batch_results, list) and batch_results:
+        codes: list[int] = []
+        for item in batch_results:
+            try:
+                codes.append(int(item.get("status_code") or 0))
+            except (TypeError, ValueError):
+                codes.append(0)
+        if not observation.ok or all(code == 0 or code >= 400 for code in codes):
+            return current + 1
+        return 0
     try:
         status_code = int(facts.get("status_code") or 0)
     except (TypeError, ValueError):
@@ -116,6 +127,7 @@ def next_no_progress(
 async def intake_node(state: AssessmentState) -> Command:
     """Initialize state for V2 loop from DB and route to supervisor."""
     assessment_id = state["assessment_id"]
+    logger.info("intake_node: initializing assessment=%s run=%s", assessment_id, state.get("run_id"))
     async with get_async_session_ctx() as session:
         assessment = await session.get(Assessment, assessment_id)
         if assessment is None:
@@ -221,6 +233,12 @@ async def supervisor_node(state: AssessmentState) -> Command:
             await session.commit()
 
     decision, rejection = validate_route(proposed, state, digest)
+    logger.info(
+        "supervisor_node: routed to role=%s directive=%r (confidence=%.2f)",
+        decision.next_role,
+        decision.directive,
+        decision.confidence,
+    )
 
     async with get_async_session_ctx() as session:
         audit(
@@ -320,6 +338,7 @@ async def brief_node(state: AssessmentState) -> Command:
     assessment_id = state["assessment_id"]
     role = state["role"]
     directive = state.get("supervisor_directive")
+    logger.info("brief_node: generated brief for role=%s directive=%r", role, directive)
 
     async with get_async_session_ctx() as session:
         assessment = await session.get(Assessment, assessment_id)
@@ -422,6 +441,7 @@ async def model_node(state: AssessmentState) -> Command:
         "tags": [role, f"assessment:{assessment_id}", f"run:{state.get('run_id')}"],
         "metadata": {"assessment_id": assessment_id, "role": role, "run_id": state.get("run_id")},
     }
+    logger.info("model_node: role=%s turn=%d/%d invoking model...", role, turns.get(role, 0) + 1, cap)
     for attempt in range(1, 4):
         try:
             try:
@@ -454,6 +474,9 @@ async def model_node(state: AssessmentState) -> Command:
     turns[role] = turns.get(role, 0) + 1
 
     tool_calls = list(getattr(ai, "tool_calls", []) or [])
+    if tool_calls:
+        for tc in tool_calls:
+            logger.info("model_node: role=%s generated tool_call=%s args=%s", role, tc.get("name"), tc.get("args"))
 
     if not tool_calls:
         if state.get("nudges", 0) < 2:
@@ -605,11 +628,19 @@ async def prepare_node(state: AssessmentState) -> Command:
                 goto="model",
             )
 
-        params = {
-            field: getattr(args, field)
-            for field in spec.param_fields
-            if getattr(args, field, None) is not None
-        }
+        params: dict[str, Any] = {}
+        for field in spec.param_fields:
+            value = getattr(args, field, None)
+            if value is None:
+                continue
+            if field == "requests" and value:
+                value = [
+                    item.model_dump(exclude_none=True)
+                    if hasattr(item, "model_dump")
+                    else item
+                    for item in value
+                ]
+            params[field] = value
         ports_val = getattr(args, "ports", None)
         if ports_val is not None and "ports" in spec.param_fields:
             if isinstance(ports_val, list):
@@ -620,39 +651,6 @@ async def prepare_node(state: AssessmentState) -> Command:
                 params["ports"] = str(ports_val)
 
         action_name = spec.action or spec.name
-        if action_name == "curl_request":
-            probe_res = await session.execute(
-                select(Audit).where(
-                    Audit.assessment_id == state["assessment_id"],
-                    Audit.event_type.in_(["action.requested", "action.queued"]),
-                )
-            )
-            probe_events = [
-                e for e in probe_res.scalars().all()
-                if (e.payload or {}).get("run_id") == state["run_id"]
-                and (e.payload or {}).get("action") == "curl_request"
-            ]
-            if len(probe_events) >= settings.max_validation_probes:
-                obs = error_observation(
-                    action_name,
-                    target,
-                    f"Validation probe budget exhausted ({settings.max_validation_probes} probes per run).",
-                )
-                return Command(
-                    update={
-                        "messages": [
-                            *state["messages"],
-                            ToolMessage(
-                                tool_call_id=tool_call["id"],
-                                name=tool_call["name"],
-                                status="error",
-                                content=obs.model_dump_json(),
-                            ),
-                        ]
-                    },
-                    goto="model",
-                )
-
         if action_name == "hashcat_crack":
             base = settings.artifacts_path / str(assessment_id)
             base.mkdir(parents=True, exist_ok=True)
@@ -930,6 +928,11 @@ async def approve_node(state: AssessmentState) -> Command:
                     assessment.status = AssessmentStatus.AWAITING_APPROVAL.value
                     await session.commit()
 
+                logger.info(
+                    "approve_node: step=%s action=%s requires human approval -> pausing at gate",
+                    step.id,
+                    step.action,
+                )
                 decision = interrupt({
                     "gate": "action",
                     "approval_id": approval.id,
@@ -956,6 +959,12 @@ async def approve_node(state: AssessmentState) -> Command:
                 approval.reason = decision_dict.get("reason") or None
                 approval.decided_at = utcnow()
                 approval.outcome = "action " + ("approved" if approved else "rejected")
+                logger.info(
+                    "approve_node: operator decision received for step=%s decision=%s actor=%s",
+                    step.id,
+                    "APPROVED" if approved else "REJECTED",
+                    approval.actor,
+                )
                 event_name = "approval.approved" if approved else "approval.rejected"
                 audit(
                     session,
@@ -1108,6 +1117,7 @@ def make_execute_node(executor: Callable[..., Any] | None = None):
                 )
 
             # Execute action through executor
+            logger.info("execute_node: executing step=%s action=%s target=%s", step.id, step.action, step.target)
             executed = await (executor or execute_action)(
                 session,
                 assessment_id,
@@ -1117,6 +1127,7 @@ def make_execute_node(executor: Callable[..., Any] | None = None):
                 step=step,
             )
             await session.refresh(executed)
+            logger.info("execute_node: finished step=%s status=%s exit_code=%s", step.id, executed.status, executed.exit_code)
             obs = await observation_from_step(session, executed)
             audit(
                 session,
@@ -1197,6 +1208,7 @@ async def direct_node(state: AssessmentState) -> Command:
     role = state["role"]
     assessment_id = state["assessment_id"]
     spec = lookup_tool(role, tool_call["name"])
+    logger.info("direct_node: role=%s running direct tool=%s", role, tool_call.get("name"))
 
     args_raw = tool_call.get("args") or {}
     if isinstance(args_raw, str):
@@ -1254,6 +1266,13 @@ async def handoff_node(state: AssessmentState) -> Command:
 
     try:
         handoff = Handoff.model_validate(args_raw)
+        logger.info(
+            "handoff_node: role=%s handing off to next_role=%s reason=%r (stop_reason=%s)",
+            role,
+            handoff.next_role,
+            handoff.why,
+            handoff.stop_reason,
+        )
     except Exception as exc:
         return Command(
             update={
@@ -1407,6 +1426,7 @@ async def report_writer_node(state: AssessmentState) -> Command:
     """Report narrative generator node (LLM structured output + Python validation)."""
     assessment_id = state["assessment_id"]
     narrative_data = None
+    logger.info("report_writer_node: compiling report narrative for assessment=%s...", assessment_id)
     async with get_async_session_ctx() as session:
         try:
             context = await build_narrative_context(session, assessment_id)

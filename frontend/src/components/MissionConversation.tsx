@@ -15,6 +15,7 @@ import type {
   Finding,
 } from '../lib/schemas'
 import type { LocalMessage } from '../lib/chatStorage'
+import { curlBatchProbes } from '../lib/command'
 import {
   ROLE_INFO,
   actionLabel,
@@ -239,11 +240,31 @@ function ApprovalCard({
   const evidenceIds: number[] = Array.isArray(detail.evidence_ids)
     ? detail.evidence_ids.filter((id): id is number => typeof id === 'number')
     : []
+  const batch = curlBatchProbes(approval.argv)
   const canDecide = pending && gateOpen && !settled && !busy
 
   const copyArgv = () => {
     navigator.clipboard.writeText(approval.argv.join(' '))
   }
+
+  const argvBlock = (
+    <>
+      <pre className="gate-argv" aria-label="Exact command">
+        <span className="gate-prompt">$</span>{' '}
+        <span className="gate-verb">{approval.argv[0]}</span>{' '}
+        {approval.argv.slice(1).join(' ')}
+      </pre>
+      <button
+        type="button"
+        className="copy-argv"
+        onClick={copyArgv}
+        aria-label="Copy command"
+        disabled={busy}
+      >
+        <Copy size={18} strokeWidth={1.5} aria-hidden="true" />
+      </button>
+    </>
+  )
 
   return (
     <article
@@ -323,6 +344,25 @@ function ApprovalCard({
         </div>
       )}
 
+      {batch && (
+        <div className="gate-batch">
+          <p className="gate-batch-note">
+            <span className="mono">{batch.length}</span> independent read-only
+            request{batch.length === 1 ? '' : 's'} · one approval
+          </p>
+          <ol className="gate-plan gate-batch-list">
+            {batch.map((probe, index) => (
+              <li key={`${probe.method}-${probe.url}-${index}`}>
+                <span className="mono gate-batch-method">{probe.method}</span>
+                <span className="mono" title={probe.url}>
+                  {probe.path}
+                </span>
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
+
       {plan.length > 1 && (
         <ol className="gate-plan">
           {plan.map((step) => (
@@ -335,24 +375,15 @@ function ApprovalCard({
         </ol>
       )}
 
-      {approval.argv.length > 0 && (
-        <div className="gate-argv-wrap">
-          <pre className="gate-argv" aria-label="Exact command">
-            <span className="gate-prompt">$</span>{' '}
-            <span className="gate-verb">{approval.argv[0]}</span>{' '}
-            {approval.argv.slice(1).join(' ')}
-          </pre>
-          <button
-            type="button"
-            className="copy-argv"
-            onClick={copyArgv}
-            aria-label="Copy command"
-            disabled={busy}
-          >
-            <Copy size={18} strokeWidth={1.5} aria-hidden="true" />
-          </button>
-        </div>
-      )}
+      {approval.argv.length > 0 &&
+        (batch ? (
+          <details className="gate-argv-wrap">
+            <summary className="gate-argv-summary">Exact MCP argv</summary>
+            {argvBlock}
+          </details>
+        ) : (
+          <div className="gate-argv-wrap">{argvBlock}</div>
+        ))}
 
       {!pending && (
         <p className="gate-outcome">
@@ -517,6 +548,7 @@ function StepTurn({
     step.status === 'blocked'
   const status = step.status === 'running' ? 'running' : step.status
   const exit = step.exit_code !== null ? ` · exit ${step.exit_code}` : ''
+  const batch = curlBatchProbes(step.argv)
 
   return (
     <p className="turn-note turn-step" data-error={failed}>
@@ -525,6 +557,7 @@ function StepTurn({
       </time>
       <span>
         <span className="mono">{actionLabel(step.action)}</span>
+        {batch ? ` · ${batch.length} requests` : ''}
         {step.target ? ` on ${step.target}` : ''} · {status}
         {exit}
         {step.error ? ` — ${step.error}` : ''}

@@ -455,40 +455,6 @@ async def execute_action(
     return step
 
 
-async def _run_curl(step: Step, assessment: Assessment) -> str:
-    """Execute a curl_request step locally and produce the artifact JSON.
-
-    The agent-generated argv carries the exact method/url/headers/body the
-    human action gate approved.
-    """
-    from app.actions.probe import run_curl
-
-    if len(step.argv) < 5:
-        raise ValueError(f"curl_request argv incomplete: {step.argv}")
-
-    method = step.argv[1]
-    url = step.argv[2]
-    headers = json.loads(step.argv[3] or "{}")
-    expected_status = int(step.argv[4])
-    body = step.argv[5] if len(step.argv) > 5 else ""
-
-    probe = await run_curl(
-        method=method,
-        url=url,
-        headers=headers,
-        body=body,
-        expected_status=expected_status,
-        timeout=15,
-    )
-    artifact_payload = {
-        "curl_result": probe.model_dump(),
-        "expected_status": expected_status,
-        "step_id": step.id,
-        "assessment_id": assessment.id,
-    }
-    return json.dumps(artifact_payload, indent=2)
-
-
 def _curl_tool_error(text: str) -> str | None:
     """Return a curl transport error, or None when the request produced a response.
 
@@ -499,7 +465,19 @@ def _curl_tool_error(text: str) -> str | None:
         payload = json.loads(text)
     except (TypeError, json.JSONDecodeError):
         return None
-    if not isinstance(payload, dict) or payload.get("ok") is not False:
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("batch"):
+        results = payload.get("results") or []
+        errors = [
+            item.get("error")
+            for item in results
+            if isinstance(item, dict) and item.get("error")
+        ]
+        if results and len(errors) == len(results):
+            return f"all batch requests failed: {errors[0]}"[:500]
+        return None
+    if payload.get("ok") is not False:
         return None
     if payload.get("code") is not None:
         return None
@@ -509,6 +487,37 @@ def _curl_tool_error(text: str) -> str | None:
         or payload.get("error")
         or "curl_request failed"
     )[:500]
+
+
+async def _run_curl_batch(requests: list[dict[str, Any]]) -> MCPResult:
+    """Run up to 3 independent curl requests concurrently on one gateway session."""
+    if not requests or len(requests) > 3:
+        raise ValueError("curl_request batch must contain between 1 and 3 requests")
+
+    async with GatewayClient() as gateway:
+        outcomes = await asyncio.gather(
+            *(gateway.call("curl_request", request) for request in requests),
+            return_exceptions=True,
+        )
+
+    results: list[dict[str, Any]] = []
+    calls: list[dict] = []
+    for index, (request, outcome) in enumerate(zip(requests, outcomes)):
+        calls.append({"tool": "curl_request", "arguments": request})
+        entry: dict[str, Any] = {"index": index, "request": request}
+        if isinstance(outcome, BaseException):
+            entry["error"] = str(outcome)[:300]
+        else:
+            try:
+                entry["result"] = json.loads(outcome)
+            except (TypeError, json.JSONDecodeError):
+                entry["result"] = {"raw": outcome}
+        results.append(entry)
+
+    return MCPResult(
+        text=json.dumps({"batch": True, "results": results}, indent=2),
+        calls=calls,
+    )
 
 
 async def _run_gateway(
@@ -529,63 +538,8 @@ async def _run_gateway(
         tool, arguments = mcp_tool_call(action, assessment, target)
     calls: list[dict] = []
 
-    if tool == "curl_request":
-        # 1. Docker MCP Gateway
-        try:
-            async with GatewayClient() as gateway:
-                text = await gateway.call(tool, arguments)
-                calls.append({"tool": tool, "arguments": arguments})
-                return MCPResult(text=text, calls=calls)
-        except Exception:
-            pass
-
-        # 2. Standalone curl-mcp daemon on port 7458
-        try:
-            from mcp.client.streamable_http import streamable_http_client
-            from mcp import ClientSession
-            import httpx
-            async with httpx.AsyncClient(timeout=15) as http_client:
-                async with streamable_http_client("http://127.0.0.1:7458/mcp", http_client=http_client) as (read, write):
-                    async with ClientSession(read, write) as session:
-                        await session.initialize()
-                        res = await session.call_tool("curl_request", arguments)
-                        text = res.content[0].text if res.content else "{}"
-                        calls.append({"tool": tool, "arguments": arguments})
-                        return MCPResult(text=text, calls=calls)
-        except Exception:
-            pass
-
-        # 3. In-process probe fallback
-        from app.actions.probe import run_curl
-        url = arguments.get("url") or f"http://{target}:{_web_port(assessment)}/"
-        method = arguments.get("method") or "GET"
-        headers = arguments.get("headers") or {}
-        body = arguments.get("body") or ""
-        probe = await run_curl(
-            method=method,
-            url=url,
-            headers=headers,
-            body=body,
-            timeout=arguments.get("timeout_seconds", 15),
-            follow_redirects=arguments.get("follow_redirects", True),
-        )
-        simulated_mcp = {
-            "ok": probe.status_code is not None and probe.status_code < 400,
-            "code": probe.status_code,
-            "status": "OK" if probe.status_code == 200 else str(probe.status_code),
-            "message": probe.error or "Executed via local HTTP probe fallback",
-            "request": {"url": url, "method": method, "body": body},
-            "response": {
-                "status_code": probe.status_code,
-                "headers": probe.headers,
-                "body": probe.body_preview,
-            },
-            "timing_ms": probe.elapsed_ms,
-        }
-        return MCPResult(
-            text=json.dumps(simulated_mcp, indent=2),
-            calls=[{"tool": "curl_local_fallback", "arguments": arguments}],
-        )
+    if tool == "curl_request" and isinstance(arguments, dict) and arguments.get("batch"):
+        return await _run_curl_batch(arguments["batch"])
 
     async with GatewayClient() as gateway:
         if action == "zap_baseline":

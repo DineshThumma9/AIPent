@@ -1,4 +1,5 @@
 import type { AssessmentDetail } from './schemas'
+import { curlBatchProbes } from './command'
 import {
   ROLE_INFO,
   actionLabel,
@@ -156,9 +157,18 @@ export function explainReply(
       roleLabel(String(pending.detail.role ?? ''))
     const target = approvalTarget(pending) ?? 'the scoped target'
     const rationale = approvalRationale(pending)
-    const command = pending.argv.length
-      ? ` It will run exactly: ${pending.argv.join(' ')}.`
-      : ''
+    const batch = curlBatchProbes(pending.argv)
+    const command = batch
+      ? ` It will send ${batch.length} independent read-only request${
+          batch.length === 1 ? '' : 's'
+        } in one step, and this single approval covers ${
+          batch.length === 1 ? 'it' : 'all of them'
+        }: ${batch
+          .map((probe) => `${probe.method} ${probe.path}`)
+          .join(', ')}.`
+      : pending.argv.length
+        ? ` It will run exactly: ${pending.argv.join(' ')}.`
+        : ''
     const reason = rationale ? ` The stated rationale is: ${rationale}.` : ''
     return `${role} queued ${actionLabel(
       pending.action,

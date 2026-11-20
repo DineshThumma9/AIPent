@@ -1,3 +1,4 @@
+import { curlBatchProbes } from '../lib/command'
 import { formatClock, pad, shortHash } from '../lib/format'
 import type { AssessmentDetail } from '../lib/schemas'
 import {
@@ -277,25 +278,42 @@ function ActionRecord({ detail }: { detail: AssessmentDetail }) {
         <p className="side-empty">No action has been recorded.</p>
       ) : (
         <ol className="action-log">
-          {detail.steps.map((step) => (
-            <li key={step.id} data-status={step.status}>
-              <div className="action-line">
-                <span className="action-seq mono">{pad(step.seq)}</span>
-                <span className="action-name">{actionLabel(step.action)}</span>
-                <StatusMark status={step.status} />
-              </div>
-              <p className="action-meta mono">
-                {step.target ?? 'no target'} · {formatClock(step.created_at)}
-              </p>
-              {step.argv.length > 0 && (
-                <details className="action-command">
-                  <summary>Command</summary>
-                  <pre>{step.argv.join(' ')}</pre>
-                </details>
-              )}
-              {step.error && <p className="action-error">{step.error}</p>}
-            </li>
-          ))}
+          {detail.steps.map((step) => {
+            const batch = curlBatchProbes(step.argv)
+            return (
+              <li key={step.id} data-status={step.status}>
+                <div className="action-line">
+                  <span className="action-seq mono">{pad(step.seq)}</span>
+                  <span className="action-name">{actionLabel(step.action)}</span>
+                  <StatusMark status={step.status} />
+                </div>
+                <p className="action-meta mono">
+                  {step.target ?? 'no target'} · {formatClock(step.created_at)}
+                </p>
+                {batch && (
+                  <ol className="action-batch">
+                    {batch.map((probe, index) => (
+                      <li key={`${probe.method}-${probe.url}-${index}`}>
+                        <span className="mono action-batch-method">
+                          {probe.method}
+                        </span>
+                        <span className="mono" title={probe.url}>
+                          {probe.path}
+                        </span>
+                      </li>
+                    ))}
+                  </ol>
+                )}
+                {step.argv.length > 0 && (
+                  <details className="action-command">
+                    <summary>{batch ? 'Exact command' : 'Command'}</summary>
+                    <pre>{step.argv.join(' ')}</pre>
+                  </details>
+                )}
+                {step.error && <p className="action-error">{step.error}</p>}
+              </li>
+            )
+          })}
         </ol>
       )}
     </details>

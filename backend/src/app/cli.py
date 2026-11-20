@@ -8,6 +8,7 @@ viewing findings and PDF reports.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import time
@@ -79,6 +80,46 @@ def _status_color(status: str) -> str:
     if st == "false_positive":
         return "dim"
     return "white"
+
+
+def _curl_batch_requests(argv: list[str]) -> list[tuple[str, str]]:
+    """Return (method, path) pairs for a batched curl_request argv."""
+    if len(argv) < 3 or argv[0] != "mcp" or argv[1] != "curl_request":
+        return []
+
+    try:
+        payload = json.loads(argv[2])
+    except (TypeError, ValueError):
+        return []
+
+    batch = payload.get("batch") if isinstance(payload, dict) else None
+    if not isinstance(batch, list):
+        return []
+
+    requests: list[tuple[str, str]] = []
+    for item in batch:
+        if not isinstance(item, dict) or not isinstance(item.get("url"), str):
+            return []
+        parsed = urlsplit(item["url"])
+        path = parsed.path or "/"
+        if parsed.query:
+            path += f"?{parsed.query}"
+        requests.append((str(item.get("method") or "GET").upper(), path))
+    return requests
+
+
+def _argv_preview(argv: list[str], width: int = 60) -> str:
+    """One-line summary of an action's argv for the status table."""
+    if not argv:
+        return "-"
+    batch = _curl_batch_requests(argv)
+    if batch:
+        summary = (
+            f"{len(batch)} request{'s' if len(batch) != 1 else ''} · "
+            + " · ".join(f"{method} {path}" for method, path in batch)
+        )
+        return summary[:width]
+    return " ".join(argv)[:width]
 
 
 def _clean_target(raw: str) -> tuple[str, list[int]]:
@@ -263,14 +304,18 @@ def scan_cmd(
                     elif etype == "step.started":
                         action = payload.get("action")
                         tgt = payload.get("target") or clean_host
-                        console.print(f"   [yellow]⚡ Action queued:[/] [bold]{action}[/] on [bold]{tgt}[/]")
+                        batch = _curl_batch_requests(payload.get("argv") or [])
+                        count = f" ({len(batch)} requests)" if batch else ""
+                        console.print(f"   [yellow]⚡ Action queued:[/] [bold]{action}{count}[/] on [bold]{tgt}[/]")
     
                     elif etype == "step.finished":
                         action = payload.get("action")
                         code = payload.get("exit_code")
                         dur = payload.get("duration_ms")
                         dur_str = f" in {dur}ms" if dur else ""
-                        console.print(f"   [green]✔ Action finished:[/] [bold]{action}[/] (exit: {code}{dur_str})")
+                        batch = _curl_batch_requests(payload.get("argv") or [])
+                        count = f" ({len(batch)} requests)" if batch else ""
+                        console.print(f"   [green]✔ Action finished:[/] [bold]{action}{count}[/] (exit: {code}{dur_str})")
     
                     elif etype == "finding.created":
                         title_f = payload.get("title") or "New finding"
@@ -303,6 +348,7 @@ def scan_cmd(
                     action_name = pending.get("action") or pending.get("role") or "Review Delivery"
                     argv = pending.get("argv") or []
                     rationale = pending.get("rationale") or pending.get("message") or ""
+                    batch = _curl_batch_requests(argv)
     
                     console.print()
                     gate_content = Text()
@@ -311,9 +357,23 @@ def scan_cmd(
                     gate_content.append("Action:     ", style="bold")
                     gate_content.append(f"{action_name}\n", style="bold white")
     
+                    if batch:
+                        gate_content.append("Requests:   ", style="bold")
+                        gate_content.append(
+                            f"{len(batch)} read-only request"
+                            f"{'' if len(batch) == 1 else 's'} · one approval\n",
+                            style="bold yellow",
+                        )
+                        for index, (method, path) in enumerate(batch, start=1):
+                            gate_content.append(f"  {index}. ", style="dim")
+                            gate_content.append(f"{method:<7}", style="bold cyan")
+                            gate_content.append(f"{path}\n", style="white")
                     if argv:
                         gate_content.append("Command:    ", style="bold")
-                        gate_content.append(f"{' '.join(argv)}\n", style="bold cyan")
+                        gate_content.append(
+                            f"{' '.join(argv)}\n",
+                            style="dim" if batch else "bold cyan",
+                        )
                     if rationale:
                         gate_content.append("Rationale:  ", style="bold")
                         gate_content.append(f"{rationale}\n", style="italic")
@@ -613,14 +673,14 @@ async def _print_assessment_summary(aid: int) -> None:
 
         for s in steps:
             status_style = "green" if s.status == "succeeded" else ("yellow" if s.status == "running" else "red")
-            cmd_preview = " ".join(s.argv)[:60] if s.argv else "-"
+            cmd_preview = _argv_preview(s.argv)
             s_table.add_row(
                 str(s.seq),
                 s.action,
                 s.target or "-",
                 Text(s.status, style=status_style),
                 str(s.exit_code) if s.exit_code is not None else "-",
-                cmd_preview,
+                Text(cmd_preview),
             )
         console.print(s_table)
     else:

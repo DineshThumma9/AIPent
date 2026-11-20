@@ -17,6 +17,58 @@ from app.agents.loop.contracts import ActionRequest, Observation
 from app.domain.models import Evidence, Finding, Step, StepStatus
 
 
+def _curl_batch_facts(entry: dict[str, Any]) -> dict[str, Any]:
+    """Normalize one result from a batched curl artifact."""
+    request = entry.get("request") if isinstance(entry.get("request"), dict) else {}
+    result = entry.get("result") if isinstance(entry.get("result"), dict) else {}
+    result_request = (
+        result.get("request") if isinstance(result.get("request"), dict) else {}
+    )
+    response = (
+        result.get("response") if isinstance(result.get("response"), dict) else {}
+    )
+
+    raw_status = response.get("status_code") or result.get("code")
+    try:
+        status = int(raw_status) if raw_status is not None else None
+    except (TypeError, ValueError):
+        status = None
+
+    body = response.get("body") or result.get("body") or ""
+    excerpt = ""
+    json_items: int | None = None
+    if isinstance(body, str):
+        cleaned = re.sub(
+            r"<style[^>]*>[\s\S]*?</style>", "", body, flags=re.IGNORECASE
+        )
+        excerpt = cleaned[:300]
+    elif body:
+        excerpt = str(body)[:300]
+    try:
+        parsed_body = json.loads(body) if isinstance(body, str) else body
+        rows = parsed_body.get("data") if isinstance(parsed_body, dict) else None
+        if isinstance(rows, list):
+            json_items = len(rows)
+    except (TypeError, ValueError):
+        json_items = None
+
+    error = entry.get("error") or result.get("error_details") or result.get("error")
+    if error is None and result.get("ok") is False and status is None:
+        error = result.get("message") or "request failed"
+
+    return {
+        "index": entry.get("index"),
+        "url": str(result_request.get("url") or request.get("url") or ""),
+        "method": str(
+            result_request.get("method") or request.get("method") or "GET"
+        ).upper(),
+        "status_code": status,
+        "json_items": json_items,
+        "body_excerpt": excerpt,
+        "error": str(error)[:300] if error else None,
+    }
+
+
 async def observation_from_step(session: AsyncSession, step: Step) -> Observation:
     """Build a compact Observation from an executed step."""
     # Find all evidence produced for this step
@@ -174,61 +226,126 @@ async def observation_from_step(session: AsyncSession, step: Step) -> Observatio
         )
 
     if step.action == "curl_request":
+        p_data: dict[str, Any] = {}
+        if step.output_path and Path(step.output_path).exists():
+            try:
+                loaded = json.loads(
+                    Path(step.output_path).read_text(
+                        encoding="utf-8", errors="replace"
+                    )
+                )
+                if isinstance(loaded, dict):
+                    p_data = loaded
+            except Exception:
+                p_data = {}
+
+        if p_data.get("batch"):
+            results = [
+                _curl_batch_facts(entry)
+                for entry in (p_data.get("results") or [])
+                if isinstance(entry, dict)
+            ]
+            parts: list[str] = []
+            for item in results:
+                label = f"#{item['index']}" if item.get("index") is not None else "#"
+                if item.get("error"):
+                    parts.append(
+                        f"{label} {item['method']} {item['url']} -> error: {item['error']}"
+                    )
+                else:
+                    part = (
+                        f"{label} {item['method']} {item['url']} "
+                        f"-> HTTP {item.get('status_code')}"
+                    )
+                    if item.get("json_items") is not None:
+                        part += f" ({item['json_items']} items)"
+                    parts.append(part)
+            summary_str = (
+                f"{len(results)} probes: " + "; ".join(parts)
+                if results
+                else "Curl batch produced no results."
+            )
+            statuses = [
+                item["status_code"]
+                for item in results
+                if item.get("status_code") is not None
+            ]
+            if any(item.get("error") for item in results):
+                next_hint = "Some batched requests failed at the transport level. Retry those individually; do not repeat the whole batch."
+            elif any(status >= 500 for status in statuses):
+                next_hint = "A batched request returned 5xx. Inspect that result's artifact entry before retrying."
+            elif any(status in (401, 403) for status in statuses):
+                next_hint = "One or more batched requests require authentication. Do not retry the batch blindly."
+            elif any(200 <= status < 300 for status in statuses):
+                next_hint = "Compare the successful responses. Batch only independent probes; follow dependent auth flows with single requests."
+            else:
+                next_hint = "Compare each result against expected_observation and would_falsify."
+            return Observation(
+                ok=True,
+                status="succeeded",
+                action=step.action,
+                target=step.target,
+                step_id=step.id,
+                summary=summary_str,
+                findings_created=created_ids,
+                findings_updated=updated_ids,
+                evidence_ids=evidence_ids,
+                artifact=artifact_info,
+                facts={"batch": True, "results": results},
+                errors=[item["error"] for item in results if item.get("error")],
+                next_hint=next_hint,
+            )
+
         http_status = None
         body_excerpt = ""
         body_full = ""
         json_items: int | None = None
         request_url = ""
         headers: dict[str, Any] = {}
-        if step.output_path and Path(step.output_path).exists():
-            try:
-                p_data = json.loads(Path(step.output_path).read_text(encoding="utf-8", errors="replace"))
-                res = p_data.get("curl_result") or p_data.get("probe_result") or {}
-                request = p_data.get("request") or {}
-                if isinstance(request, dict):
-                    request_url = str(request.get("url") or "")
-                if not request_url and isinstance(res, dict):
-                    request_url = str(res.get("url") or "")
+        res = p_data.get("curl_result") or p_data.get("probe_result") or {}
+        request = p_data.get("request") or {}
+        if isinstance(request, dict):
+            request_url = str(request.get("url") or "")
+        if not request_url and isinstance(res, dict):
+            request_url = str(res.get("url") or "")
 
-                # 1. curl-mcp format: { ok, code, status, response: { status_code, headers, body } }
-                if "response" in p_data and isinstance(p_data["response"], dict):
-                    resp = p_data["response"]
-                    http_status = resp.get("status_code") or p_data.get("code")
-                    headers = resp.get("headers") or {}
-                    body_full = resp.get("body") or ""
-                # 2. probe fallback format
-                elif "curl_result" in p_data or "probe_result" in p_data:
-                    http_status = res.get("status_code")
-                    headers = res.get("headers") or {}
-                    body_full = res.get("body_preview") or res.get("body") or ""
-                else:
-                    http_status = p_data.get("code") or p_data.get("status_code")
-                    body_full = p_data.get("body") or ""
+        # 1. curl-mcp format: { ok, code, status, response: { status_code, headers, body } }
+        if "response" in p_data and isinstance(p_data["response"], dict):
+            resp = p_data["response"]
+            http_status = resp.get("status_code") or p_data.get("code")
+            headers = resp.get("headers") or {}
+            body_full = resp.get("body") or ""
+        # 2. Legacy in-process probe format
+        elif "curl_result" in p_data or "probe_result" in p_data:
+            http_status = res.get("status_code")
+            headers = res.get("headers") or {}
+            body_full = res.get("body_preview") or res.get("body") or ""
+        else:
+            http_status = p_data.get("code") or p_data.get("status_code")
+            body_full = p_data.get("body") or ""
 
-                if isinstance(body_full, str):
-                    # Strip heavy inline styles so directory listings and API responses aren't masked
-                    cleaned = re.sub(r"<style[^>]*>[\s\S]*?</style>", "", body_full, flags=re.IGNORECASE)
-                    body_excerpt = cleaned[:1000]
-                else:
-                    body_excerpt = str(body_full)[:1000]
+        if isinstance(body_full, str):
+            # Strip heavy inline styles so directory listings and API responses aren't masked
+            cleaned = re.sub(r"<style[^>]*>[\s\S]*?</style>", "", body_full, flags=re.IGNORECASE)
+            body_excerpt = cleaned[:1000]
+        else:
+            body_excerpt = str(body_full)[:1000]
 
-                try:
-                    parsed_body = (
-                        json.loads(body_full)
-                        if isinstance(body_full, str)
-                        else body_full
-                    )
-                    rows = (
-                        parsed_body.get("data")
-                        if isinstance(parsed_body, dict)
-                        else None
-                    )
-                    if isinstance(rows, list):
-                        json_items = len(rows)
-                except (TypeError, ValueError):
-                    json_items = None
-            except Exception:
-                pass
+        try:
+            parsed_body = (
+                json.loads(body_full)
+                if isinstance(body_full, str)
+                else body_full
+            )
+            rows = (
+                parsed_body.get("data")
+                if isinstance(parsed_body, dict)
+                else None
+            )
+            if isinstance(rows, list):
+                json_items = len(rows)
+        except (TypeError, ValueError):
+            json_items = None
 
         status_part = f"HTTP {http_status}" if http_status is not None else "HTTP request succeeded"
         if json_items is not None:

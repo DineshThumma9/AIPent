@@ -36,6 +36,42 @@ ACTIVE_STATES = (
 )
 
 
+def _curl_path(value: str) -> str:
+    """Normalize a path or full URL to path + query for duplicate checks."""
+    text = str(value or "/")
+    if text.startswith(("http://", "https://")):
+        parsed = urlsplit(text)
+        text = parsed.path or "/"
+        if parsed.query:
+            text += "?" + parsed.query
+    if not text.startswith("/"):
+        text = "/" + text
+    return text
+
+
+def _batch_signature(requests: Any) -> tuple[tuple[str, str], ...]:
+    """Order-sensitive signature of a curl batch for duplicate detection."""
+    if not isinstance(requests, list):
+        return ()
+    signature: list[tuple[str, str]] = []
+    for item in requests:
+        if not isinstance(item, dict):
+            return ()
+        signature.append(
+            (
+                str(item.get("method") or "GET").upper(),
+                _curl_path(str(item.get("path") or item.get("url") or "/")),
+            )
+        )
+    return tuple(signature)
+
+
+def _clean_target_host(target: str) -> str:
+    from app.actions.catalogue import _clean_host_and_port
+    host, _ = _clean_host_and_port(target, 80)
+    return host
+
+
 def _step_matches(
     row: Step, target: str, params: dict[str, Any] | None
 ) -> bool:
@@ -44,29 +80,36 @@ def _step_matches(
     Most actions are unique per target. HTTP probes are not: one target can
     have many interesting paths, so compare method and path too.
     """
-    if row.target != target:
+    if row.target != target and _clean_target_host(row.target) != _clean_target_host(target):
         return False
     if row.action != "curl_request":
         return True
     probe = params or {}
+    batch = probe.get("requests")
+    if batch:
+        desired = _batch_signature(batch)
+        if len(row.argv) >= 3 and row.argv[0] == "mcp":
+            try:
+                mcp_args = json.loads(row.argv[2]) if isinstance(row.argv[2], str) else row.argv[2]
+                if isinstance(mcp_args, dict):
+                    return _batch_signature(mcp_args.get("batch")) == desired
+            except Exception:
+                return False
+        return False
     method = str(probe.get("method", "GET")).upper()
-    path = str(probe.get("path") or probe.get("url") or "/")
-    if path.startswith("http"):
-        path = urlsplit(path).path
-    if not path.startswith("/"):
-        path = "/" + path
+    path = _curl_path(str(probe.get("path") or probe.get("url") or "/"))
     if len(row.argv) >= 3 and row.argv[0] == "mcp":
         try:
             mcp_args = json.loads(row.argv[2]) if isinstance(row.argv[2], str) else row.argv[2]
             if isinstance(mcp_args, dict):
                 if mcp_args.get("method", "GET").upper() != method:
                     return False
-                return urlsplit(mcp_args.get("url", "")).path == path
+                return _curl_path(str(mcp_args.get("url", ""))) == path
         except Exception:
             return False
     if len(row.argv) < 3 or row.argv[1].upper() != method:
         return False
-    return urlsplit(row.argv[2]).path == path
+    return _curl_path(row.argv[2]) == path
 
 
 class StepRepo(BaseRepo):
@@ -122,13 +165,15 @@ class StepRepo(BaseRepo):
                 )
             }
 
+        probe_count = 1
         if action == "curl_request":
+            probe_count = len((params or {}).get("requests") or []) or 1
             probes = sum(
-                1
+                int((event.payload or {}).get("probe_count", 1))
                 for event in run_events
                 if (event.payload or {}).get("action") == "curl_request"
             )
-            if probes >= settings.max_validation_probes:
+            if probes + probe_count > settings.max_validation_probes:
                 return {
                     "error": (
                         "validation probe budget exhausted for this run "
@@ -160,6 +205,27 @@ class StepRepo(BaseRepo):
                     "status": row.status,
                     "note": "this action is already queued or executed; not resent",
                 }
+
+        # Circuit breaker: prevent repeated failing attempts on identical target/action in the same run
+        failed_res = await self.session.execute(
+            select(Step).where(
+                Step.assessment_id == assessment_id,
+                Step.action == action,
+                Step.status.in_(["failed", "rejected"]),
+            )
+        )
+        failed_rows = [
+            row for row in failed_res.scalars().all()
+            if row.id in run_step_ids and (row.argv == argv if argv is not None else _step_matches(row, target, params))
+        ]
+        if len(failed_rows) >= 2:
+            last_err = failed_rows[-1].error or "previously failed"
+            return {
+                "error": (
+                    f"Action {action} on {target} has already failed {len(failed_rows)} times in this run "
+                    f"({last_err}). Circuit breaker active: pivot to another endpoint or investigation path."
+                )
+            }
 
         step = Step(
             assessment_id=assessment_id,
@@ -217,6 +283,7 @@ class StepRepo(BaseRepo):
                     "action": action,
                     "target": target,
                     "argv": argv,
+                    "probe_count": probe_count,
                 },
             )
         )

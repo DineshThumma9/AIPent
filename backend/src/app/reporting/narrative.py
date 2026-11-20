@@ -574,6 +574,53 @@ async def build_narrative_context(session: AsyncSession, assessment_id: int) -> 
     }
 
 
+def _is_nvidia_model(model: Any) -> bool:
+    """Check if model is ChatNVIDIA to avoid guided_json incompatibility."""
+    if model is None:
+        return False
+    cls_name = type(model).__name__
+    module_name = getattr(type(model), "__module__", "")
+    return "nvidia" in cls_name.lower() or "nvidia" in module_name.lower()
+
+
+def _extract_report_narrative(raw_obj: Any) -> ReportNarrative | None:
+    """Extract ReportNarrative from Pydantic object, dict, or AIMessage/text."""
+    if isinstance(raw_obj, ReportNarrative):
+        return raw_obj
+    if isinstance(raw_obj, dict):
+        try:
+            return ReportNarrative.model_validate(raw_obj)
+        except Exception:
+            pass
+
+    content = getattr(raw_obj, "content", None) or (raw_obj if isinstance(raw_obj, str) else None)
+    candidates: list[str] = []
+    if content and isinstance(content, str):
+        candidates.append(content)
+
+    additional_kwargs = getattr(raw_obj, "additional_kwargs", {}) or {}
+    for k in ("reasoning", "reasoning_content"):
+        if additional_kwargs.get(k):
+            candidates.append(str(additional_kwargs[k]))
+
+    for text in candidates:
+        m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+        if m:
+            try:
+                return ReportNarrative.model_validate(json.loads(m.group(1)))
+            except Exception:
+                pass
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            try:
+                return ReportNarrative.model_validate(json.loads(text[start : end + 1]))
+            except Exception:
+                pass
+
+    return None
+
+
 async def write_narrative_result(
     context: dict[str, Any],
     model: BaseChatModel | None = None,
@@ -590,12 +637,27 @@ async def write_narrative_result(
             log.warning("failed to build report model: %s", exc)
             return None, f"build_report_model failed: {exc}"
 
-    structured = model.with_structured_output(ReportNarrative)
+    messages = [
+        SystemMessage(content=REPORT_WRITER_PROMPT),
+        HumanMessage(content=json.dumps(context, indent=2)),
+    ]
+
+    # For ChatNVIDIA, bypass with_structured_output to prevent guided_json 400 errors
+    if _is_nvidia_model(model):
+        try:
+            response = await model.ainvoke(messages)
+            narrative = _extract_report_narrative(response)
+            if narrative is None:
+                raise ValueError("failed to extract valid ReportNarrative JSON from NVIDIA model output")
+            validate_narrative(narrative, context)
+            return narrative, None
+        except Exception as exc:
+            log.warning("report narrative invoke failed with NVIDIA model: %s", exc)
+            return None, str(exc)
+
     try:
-        response = await structured.ainvoke([
-            SystemMessage(content=REPORT_WRITER_PROMPT),
-            HumanMessage(content=json.dumps(context, indent=2)),
-        ])
+        structured = model.with_structured_output(ReportNarrative)
+        response = await structured.ainvoke(messages)
 
         if isinstance(response, dict):
             narrative = ReportNarrative.model_validate(response)
@@ -604,11 +666,22 @@ async def write_narrative_result(
         elif isinstance(response, str):
             narrative = ReportNarrative.model_validate_json(response)
         else:
-            raise TypeError(f"unexpected model response type: {type(response)}")
+            narrative = _extract_report_narrative(response)
+            if narrative is None:
+                raise TypeError(f"unexpected model response type: {type(response)}")
 
         validate_narrative(narrative, context)
         return narrative, None
     except Exception as exc:
+        log.warning("structured output failed; attempting direct invoke fallback: %s", exc)
+        try:
+            raw_resp = await model.ainvoke(messages)
+            narrative = _extract_report_narrative(raw_resp)
+            if narrative:
+                validate_narrative(narrative, context)
+                return narrative, None
+        except Exception as exc2:
+            log.warning("direct invoke fallback also failed: %s", exc2)
         log.warning("report narrative validation or invoke failed: %s", exc)
         return None, str(exc)
 

@@ -609,3 +609,30 @@ async def test_report_node_execution(test_db, tmp_path: Path, monkeypatch):
         assert updated.report_path != ""
         assert updated.finished_at is not None
 
+
+@pytest.mark.asyncio
+async def test_write_narrative_nvidia_model_bypasses_structured_output(sample_context, valid_narrative):
+    """ChatNVIDIA models must bypass with_structured_output and use direct ainvoke."""
+    from langchain_core.messages import AIMessage
+
+    class FakeChatNVIDIA:
+        def __init__(self):
+            self.with_structured_output_called = False
+
+        def with_structured_output(self, schema):
+            self.with_structured_output_called = True
+            raise RuntimeError("guided_json 400 error should not be called!")
+
+        async def ainvoke(self, messages):
+            return AIMessage(
+                content=valid_narrative.model_dump_json(),
+                additional_kwargs={"reasoning_content": "Thinking about executive summary..."},
+            )
+
+    nvidia_model = FakeChatNVIDIA()
+    narrative, err = await write_narrative_result(sample_context, model=nvidia_model)
+    assert not nvidia_model.with_structured_output_called
+    assert narrative is not None
+    assert err is None
+    assert narrative.executive_summary == valid_narrative.executive_summary
+

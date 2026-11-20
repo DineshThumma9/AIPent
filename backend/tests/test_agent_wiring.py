@@ -17,7 +17,7 @@ from app.actions import catalogue, check_scope, get_action, resolve_argv
 from app.actions import probe
 from app.actions.catalogue import ScopeError
 from app.agents.graph.state import AssessmentState
-from app.agents.tools import ROLE_TOOLS, set_context
+from app.agents.tools import ROLE_TOOLS
 from app.api.queries import load_assessment_detail
 from app.api.schema import DecisionIn
 from app.core.config import settings

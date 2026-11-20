@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+import json
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 from sqlmodel import select
@@ -121,6 +122,48 @@ async def test_prepare_node_creates_step_and_approval(engine):
         assert approval is not None
         assert step.action == "recon_services"
         assert approval.step_id == step.id
+
+
+@pytest.mark.asyncio
+async def test_prepare_node_serializes_curl_batch(engine):
+    assessment = await _create_assessment()
+    state = initial_state(assessment.id, run_id="run_prep_batch")
+    state["role"] = "validation"
+    state["messages"] = [
+        AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "id": "call_batch_1",
+                    "name": "curl_request",
+                    "args": {
+                        "target": "127.0.0.1",
+                        "rationale": "Probe independent endpoints",
+                        "requests": [
+                            {"path": "/login", "method": "GET"},
+                            {"path": "/admin", "method": "HEAD"},
+                            {"path": "/search?q=x", "method": "GET"},
+                        ],
+                    },
+                }
+            ],
+        )
+    ]
+
+    cmd = await prepare_node(state)
+    assert cmd.goto == "approve"
+    pending = cmd.update["pending_action"]
+
+    async with get_async_session_ctx() as session:
+        step = await session.get(Step, pending["step_id"])
+        approval = await session.get(Approval, pending["approval_id"])
+        assert step is not None
+        assert approval is not None
+        assert step.argv[0] == "mcp"
+        assert step.argv[1] == "curl_request"
+        batch = json.loads(step.argv[2])["batch"]
+        assert [item["method"] for item in batch] == ["GET", "HEAD", "GET"]
+        assert approval.detail["params"]["requests"][0]["path"] == "/login"
 
 
 @pytest.mark.asyncio

@@ -57,3 +57,8 @@ backend/src/app/agents/specialists
 *.pptx 
 *.pdf 
 strix_runs/
+.logs 
+.immpeccable/
+.pytest_cache/
+reports/
+

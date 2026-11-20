@@ -62,3 +62,41 @@ def test_supervisor_binds_tools_then_returns_structured_route():
     assert len(tool_messages) == 1
     assert json.loads(tool_messages[0].content)["supervisor_calls"] == 2
     assert not isinstance(model.structured_messages[-1], AIMessage)
+
+
+def test_supervisor_recovers_route_when_tool_call_args_empty_but_content_has_json():
+    digest = MissionDigest(
+        assessment_id=29,
+        run_id="run-29",
+        services=[{"port": 3000}],
+        budget={"turns": {"discovery": 20}, "supervisor_calls": 5},
+    )
+
+    class _CerebrasLikeModel:
+        def bind_tools(self, tools):
+            return self
+
+        async def ainvoke(self, messages, config=None):
+            return AIMessage(
+                content='{\n  "next_role": "validation",\n  "why": "Concrete endpoint observed; test login bypass.",\n  "confidence": 0.86,\n  "directive": {"tool": "curl_request", "action": "test"}\n}',
+                tool_calls=[{"id": "call-1", "name": "RouteDecision", "args": {}}],
+            )
+
+        def with_structured_output(self, schema, include_raw=False):
+            outer = self
+
+            class _Structured:
+                async def ainvoke(self, messages, config=None):
+                    # Simulate failure / returning raw with empty args
+                    if include_raw:
+                        raw_msg = await outer.ainvoke(messages, config=config)
+                        return {"raw": raw_msg, "parsed": None, "parsing_error": ValueError("Field required: next_role")}
+                    raise ValueError("Field required: next_role")
+
+            return _Structured()
+
+    decision = asyncio.run(run_supervisor_agent(digest, chat_model=_CerebrasLikeModel()))
+    assert decision.next_role == "validation"
+    assert decision.confidence == 0.86
+    assert "Concrete endpoint" in decision.why
+    assert "deterministic fallback" not in decision.why

@@ -80,6 +80,7 @@ exec docker mcp gateway run \
   --port="${AIPENT_MCP_PORT:-8812}" \
   --allow-unauthenticated \
   --verify-signatures=false \
+  --block-secrets=false \
   --long-lived \
   --tools="$tools" \
   --log-calls \
