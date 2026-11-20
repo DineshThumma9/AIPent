@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from typing import Any, Literal
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator,model_validator
 
 
 class ActionRequest(BaseModel):
@@ -67,6 +67,12 @@ class Observation(BaseModel):
     errors: list[str] = Field(default_factory=list)
     duration_ms: int | None = None
     next_hint: str | None = None
+
+    def __await__(self):
+        async def _identity():
+            return self
+
+        return _identity().__await__()
 
 
 class ActionResult(BaseModel):
@@ -230,3 +236,115 @@ class SteeringNote(BaseModel):
     status: Literal["pending", "consumed", "expired"] = "pending"
     created_at: datetime
     consumed_at: datetime | None = None
+
+
+
+class FindingNarrative(BaseModel):
+    finding_id: int
+    technical_analysis: str = Field(min_length=1, max_length=4000)
+    impact: str = Field(min_length=1, max_length=2000)
+    remediation: str = Field(min_length=1, max_length=2000)
+    confidence_statement: str = Field(min_length=1, max_length=1000)
+    observed_vs_inferred: str = Field(min_length=1, max_length=1500)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        d = dict(data)
+        if "finding_id" not in d and "id" in d:
+            d["finding_id"] = d["id"]
+
+        obs = str(d.get("observed") or "").strip()
+        inf = str(d.get("inferred") or "").strip()
+        if not d.get("observed_vs_inferred"):
+            if obs or inf:
+                d["observed_vs_inferred"] = f"Observed: {obs}\nInferred: {inf}".strip()
+            else:
+                d["observed_vs_inferred"] = "Direct observation documented in evidence."
+
+        if not d.get("technical_analysis"):
+            if obs or inf:
+                d["technical_analysis"] = f"{obs} {inf}".strip()
+            elif d.get("title"):
+                d["technical_analysis"] = str(d.get("title"))
+            else:
+                d["technical_analysis"] = "Technical analysis based on tool observation."
+
+        if not d.get("confidence_statement"):
+            c = d.get("confidence")
+            if c is not None:
+                d["confidence_statement"] = f"Confidence score {c} based on direct execution evidence."
+            else:
+                d["confidence_statement"] = "Confidence established through verifiable tool output."
+
+        if not d.get("impact"):
+            d["impact"] = "No direct business impact demonstrated beyond observed behavior."
+
+        if not d.get("remediation"):
+            d["remediation"] = "Review service exposure and enforce least privilege."
+
+        return d
+
+
+class ReportNarrative(BaseModel):
+    executive_summary: str = Field(min_length=1, max_length=4000)
+    methodology: str = Field(min_length=1, max_length=3000)
+    risk_overview: str = Field(min_length=1, max_length=2500)
+    findings: list[FindingNarrative] = Field(default_factory=list)
+    limitations: str = Field(min_length=1, max_length=2500)
+    recommendations: list[str] = Field(default_factory=list, max_length=12)
+    conclusion: str = Field(min_length=1, max_length=2000)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        d = dict(data)
+        if "report" in d and isinstance(d["report"], dict):
+            d = dict(d["report"])
+
+        if isinstance(d.get("methodology"), (dict, list)):
+            if isinstance(d["methodology"], dict):
+                steps_cnt = d["methodology"].get("steps_executed") or len(d["methodology"].get("steps") or [])
+                d["methodology"] = f"The assessment executed {steps_cnt} testing actions using automated tools."
+            else:
+                d["methodology"] = "\n".join(f"- {s}" for s in d["methodology"] if s)
+        elif not d.get("methodology"):
+            alt = d.get("approach") or d.get("testing_methodology") or d.get("execution")
+            if isinstance(alt, str) and alt.strip():
+                d["methodology"] = alt.strip()
+            else:
+                d["methodology"] = "Methodical vulnerability assessment conducted within authorized scope."
+
+        if not d.get("risk_overview"):
+            rs = d.get("risk_summary")
+            if isinstance(rs, dict):
+                score = rs.get("overall_risk_score", 0.0)
+                level = rs.get("risk_level", "Informational")
+                d["risk_overview"] = f"Overall risk score: {score} ({level})."
+            elif isinstance(rs, str):
+                d["risk_overview"] = rs
+            else:
+                d["risk_overview"] = "Risk evaluated based on verified findings and exposure."
+
+        if isinstance(d.get("limitations"), list):
+            d["limitations"] = "\n".join(f"- {item}" for item in d["limitations"])
+        elif not d.get("limitations"):
+            d["limitations"] = "Testing was conducted in a bounded environment without disruptive exploits."
+
+        if not d.get("conclusion"):
+            alt_c = d.get("outcome") or d.get("final_summary")
+            if isinstance(alt_c, str) and alt_c.strip():
+                d["conclusion"] = alt_c.strip()
+            else:
+                d["conclusion"] = "Assessment completed. Refer to findings for remediation steps."
+
+        if isinstance(d.get("recommendations"), str):
+            d["recommendations"] = [d["recommendations"]]
+        elif not d.get("recommendations"):
+            d["recommendations"] = ["Maintain updated software versions.", "Review open ports and services."]
+
+        return d

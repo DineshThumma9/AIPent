@@ -69,8 +69,8 @@ def _curl_batch_facts(entry: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def observation_from_step(session: AsyncSession, step: Step) -> Observation:
-    """Build a compact Observation from an executed step."""
+async def _async_observation_from_step(session: AsyncSession, step: Step) -> Observation:
+    """Legacy async DB-backed observation loader."""
     # Find all evidence produced for this step
     result = await session.execute(
         select(Evidence).where(Evidence.step_id == step.id)
@@ -89,11 +89,63 @@ async def observation_from_step(session: AsyncSession, step: Step) -> Observatio
 
     # Distinguish findings created in this step vs updated
     created_ids: list[int] = []
-    updated_ids: list[int] = []
     for f in findings:
         if f.id is not None:
-            # If all evidence for this finding belongs to this step, it was created here
             created_ids.append(f.id)
+
+    return _build_pure_observation(
+        step=step,
+        finding_ids=created_ids,
+        evidence_ids=evidence_ids,
+        findings=findings,
+    )
+
+
+def observation_from_step(
+    step_or_session: Step | AsyncSession,
+    step: Step | None = None,
+    *,
+    finding_ids: list[int] | None = None,
+    evidence_ids: list[int] | None = None,
+    findings: list[Finding] | None = None,
+) -> Observation | Any:
+    """Build a compact Observation from an executed step.
+
+    Can be called synchronously with (step, finding_ids=..., evidence_ids=...)
+    with zero database dependencies, or asynchronously with (session, step).
+    """
+    if (
+        isinstance(step_or_session, AsyncSession)
+        and step is not None
+        and finding_ids is None
+        and findings is None
+    ):
+        return _async_observation_from_step(step_or_session, step)
+
+    actual_step = step if isinstance(step_or_session, AsyncSession) else step_or_session
+    if actual_step is None:
+        raise ValueError("step is required")
+
+    return _build_pure_observation(
+        step=actual_step,
+        finding_ids=finding_ids,
+        evidence_ids=evidence_ids,
+        findings=findings,
+    )
+
+
+def _build_pure_observation(
+    step: Step,
+    *,
+    finding_ids: list[int] | None = None,
+    evidence_ids: list[int] | None = None,
+    findings: list[Finding] | None = None,
+) -> Observation:
+    """Pure in-memory observation constructor with zero database queries."""
+    created_ids: list[int] = list(finding_ids or [])
+    updated_ids: list[int] = []
+    evidence_ids = list(evidence_ids or [])
+    findings = list(findings or [])
 
     artifact_info: dict[str, Any] | None = None
     if step.output_path:
