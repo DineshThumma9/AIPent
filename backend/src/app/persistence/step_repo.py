@@ -443,3 +443,113 @@ class StepRepo(BaseRepo):
         self.session.add(step)
         await self.session.commit()
         await self.session.refresh(step)
+
+    async def create_planned_step(
+        self,
+        assessment_id: int,
+        run_id: str,
+        role: str,
+        action: str,
+        target: str,
+        argv: list[str] | None = None,
+        risk: str = "medium",
+        requires_approval: bool = True,
+        rationale: str = "",
+        policy_reason: str | None = None,
+        detail: dict[str, Any] | None = None,
+        hypothesis_id: str | None = None,
+        evidence_ids: list[int] | None = None,
+        expected_observation: str | None = None,
+        would_falsify: str | None = None,
+    ) -> tuple[Step, Approval]:
+        """Create Step with sequence number and corresponding Approval atomically."""
+        seq = await self._next_seq(assessment_id)
+        step = Step(
+            assessment_id=assessment_id,
+            seq=seq,
+            action=action,
+            target=target,
+            argv=list(argv or []),
+            rationale=rationale,
+            status=StepStatus.PLANNED.value,
+        )
+        self.session.add(step)
+        await self.session.flush()
+
+        approval_detail: dict[str, Any] = {
+            "run_id": run_id,
+            "role": role,
+            "phase": role,
+            "rationale": rationale,
+            "risk": risk,
+            "requires_approval": requires_approval,
+            "policy_reason": policy_reason,
+            "hypothesis_id": hypothesis_id,
+            "evidence_ids": evidence_ids or [],
+            "expected_observation": expected_observation,
+            "would_falsify": would_falsify,
+        }
+        if detail:
+            approval_detail.update(detail)
+
+        approval = Approval(
+            assessment_id=assessment_id,
+            step_id=step.id,
+            action=action,
+            argv=list(argv or []),
+            detail=approval_detail,
+            decision=Decision.PENDING.value,
+        )
+        self.session.add(approval)
+        await self.session.flush()
+        return step, approval
+
+    async def reject_step(
+        self, step_id: int, reason: str = "rejected by analyst"
+    ) -> Step:
+        """Mark a planned step and its approval as rejected."""
+        step = await self.session.get(Step, step_id)
+        if step is None:
+            raise LookupError(f"step {step_id} not found")
+
+        step.status = StepStatus.REJECTED.value
+        step.error = reason[:500] if reason else "rejected"
+        step.ended_at = utcnow()
+        self.session.add(step)
+
+        result = await self.session.execute(
+            select(Approval).where(Approval.step_id == step_id)
+        )
+        approval = result.scalars().first()
+        if approval:
+            approval.decision = Decision.REJECTED.value
+            approval.reason = reason
+            approval.decided_at = utcnow()
+            approval.outcome = "action rejected"
+            self.session.add(approval)
+
+        await self.session.flush()
+        return step
+
+    async def complete_step(
+        self,
+        step_id: int,
+        status: str,
+        exit_code: int = 0,
+        output_path: str = "",
+        error: str | None = None,
+    ) -> Step:
+        """Update step execution completion fields."""
+        step = await self.session.get(Step, step_id)
+        if step is None:
+            raise LookupError(f"step {step_id} not found")
+
+        step.status = status
+        step.exit_code = exit_code
+        step.output_path = output_path
+        if error:
+            step.error = error[:500]
+        step.ended_at = utcnow()
+        self.session.add(step)
+        await self.session.flush()
+        return step
