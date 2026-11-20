@@ -1,4 +1,4 @@
-"""Unit tests for V2 loop contracts (contracts.py)."""
+"""Unit tests for V2 loop contracts, role tools, models, and observation models."""
 
 import pytest
 from pydantic import ValidationError
@@ -10,6 +10,13 @@ from app.agents.contracts import (
     Observation,
     RouteDecision,
 )
+from app.agents.model import role_model_config
+from app.agents.observations import observation_from_step
+from app.agents.state import AssessmentState
+from app.agents.tool_specs import ROLE_TOOLS
+from app.api.schema import DecisionIn
+from app.core.config import settings
+from app.domain.models import Step, StepStatus
 
 
 def test_handoff_rejects_unknown_role():
@@ -132,7 +139,6 @@ def test_route_decision_coerces_structured_directive():
             "expect": "HTTP 200 with an authentication token",
         },
     )
-
     assert isinstance(dec.directive, str)
     assert "rest/user/login" in dec.directive
     assert "HTTP 200" in dec.directive
@@ -147,8 +153,98 @@ def test_route_decision_truncates_long_structured_directive():
             "steps": [f"step {i}: " + ("x" * 80) for i in range(40)],
         },
     )
-
     assert isinstance(dec.directive, str)
     assert len(dec.directive) == 1500
     assert dec.directive.endswith("...")
     assert "Validate the basket endpoint" in dec.directive
+
+
+def test_role_tools_are_unique_and_scoped():
+    expected_actions = {
+        "recon": {"recon_services"},
+        "discovery": {"dirb_scan", "nikto_scan", "zap_baseline"},
+        "validation": {"curl_request", "sqlmap_scan", "update_finding_status"},
+        "supervisor": set(),
+    }
+    assert set(ROLE_TOOLS) == {"recon", "discovery", "validation", "supervisor"}
+    for role, tools in ROLE_TOOLS.items():
+        names = [getattr(tool, "name", "") for tool in tools]
+        assert len(names) == len(set(names))
+        action_names = {n for n in names if n in expected_actions[role]}
+        assert action_names == expected_actions[role]
+
+    assert "record_finding" in {tool.name for tool in ROLE_TOOLS["discovery"]}
+
+
+def test_assessment_state_declares_steps():
+    assert "steps" in AssessmentState.__annotations__
+
+
+def test_decision_binds_to_a_specific_gate():
+    decision = DecisionIn(
+        decision="approved",
+        approval_id=14,
+        step_id=33,
+    )
+    assert decision.approval_id == 14
+    assert decision.step_id == 33
+
+
+def test_observation_from_step_pure():
+    step = Step(
+        id=42,
+        assessment_id=1,
+        action="curl_request",
+        status=StepStatus.SUCCEEDED.value,
+        target="http://test",
+    )
+    obs = observation_from_step(step, finding_ids=[10], evidence_ids=[100])
+    assert obs.ok is True
+    assert obs.action == "curl_request"
+    assert obs.findings_created == [10]
+    assert obs.evidence_ids == [100]
+
+
+def test_observation_from_step_failed_pure():
+    step = Step(
+        id=43,
+        assessment_id=1,
+        action="sqlmap_scan",
+        status=StepStatus.FAILED.value,
+        target="http://test",
+        error="Connection refused",
+    )
+    obs = observation_from_step(step)
+    assert obs.ok is False
+    assert obs.status == "failed"
+    assert obs.action == "sqlmap_scan"
+    assert "Connection refused" in obs.summary
+
+
+def test_role_model_config_uses_per_role_overrides(monkeypatch):
+    monkeypatch.setattr(settings, "llm_provider", "mistral")
+    monkeypatch.setattr(settings, "llm_model", "base-model")
+    monkeypatch.setattr(settings, "supervisor_provider", "cerebras")
+    monkeypatch.setattr(settings, "supervisor_model", "gpt-oss-120b")
+    monkeypatch.setattr(settings, "discovery_provider", None)
+    monkeypatch.setattr(settings, "discovery_model", None)
+
+    config = role_model_config()
+    assert config["supervisor"] == {
+        "provider": "cerebras",
+        "model": "gpt-oss-120b",
+    }
+    assert config["discovery"] == {"provider": "mistral", "model": "base-model"}
+    assert set(config) == {"supervisor", "coordinator", "recon", "discovery", "validation", "report"}
+
+
+def test_nvidia_provider_uses_configured_model(monkeypatch):
+    import socket
+    from app.agents import model as model_module
+
+    monkeypatch.setenv("NVIDIA_MODEL", "nvidia/test-model")
+    monkeypatch.setenv("NVIDIA_API_KEY", "test-key")
+
+    model = model_module._build_model(None, "nvidia")
+    assert model.model == "nvidia/test-model"
+    assert socket.getaddrinfo is model_module._ipv4_first

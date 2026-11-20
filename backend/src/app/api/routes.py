@@ -287,6 +287,11 @@ async def stop_agent(assessment_id: int):
 
 
 @router.post(
+    "/assessments/{assessment_id}/decisions",
+    response_model=AgentAccepted,
+    status_code=202,
+)
+@router.post(
     "/assessments/{assessment_id}/resume",
     response_model=AgentAccepted,
     status_code=202,

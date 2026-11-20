@@ -23,20 +23,24 @@ def set_conversation_assessment_id(assessment_id: int) -> None:
     _current_conversation_assessment.set(assessment_id)
 
 
+def _resolve_assessment_id(assessment_id: int | None = None) -> int | None:
+    return assessment_id if assessment_id is not None else _current_conversation_assessment.get()
+
+
 @tool("get_mission_status")
-async def get_mission_status() -> dict[str, Any]:
+async def get_mission_status(assessment_id: int | None = None) -> dict[str, Any]:
     """Return status, running flag, active role, next node, pending gate, and resource counts."""
-    assessment_id = _current_conversation_assessment.get()
-    if not assessment_id:
+    resolved_id = _resolve_assessment_id(assessment_id)
+    if not resolved_id:
         return {"error": "no assessment selected"}
 
     async with get_async_session_ctx() as session:
-        detail = await load_assessment_detail(session, assessment_id)
+        detail = await load_assessment_detail(session, resolved_id)
         if detail is None:
             return {"error": "assessment not found"}
         from app.runtime import runner
 
-        view = await runner.get_view(assessment_id, session=session)
+        view = await runner.get_view(resolved_id, session=session)
 
     return {
         "status": detail.status,
@@ -52,15 +56,15 @@ async def get_mission_status() -> dict[str, Any]:
 
 
 @tool("list_findings")
-async def list_findings(limit: int = 10) -> list[dict[str, Any]]:
+async def list_findings(limit: int = 10, assessment_id: int | None = None) -> list[dict[str, Any]]:
     """Return candidate and confirmed findings discovered during this assessment."""
-    assessment_id = _current_conversation_assessment.get()
-    if not assessment_id:
+    resolved_id = _resolve_assessment_id(assessment_id)
+    if not resolved_id:
         return []
 
     async with get_async_session_ctx() as session:
         repo = FindingRepo(session)
-        findings = await repo.get_all(assessment_id)
+        findings = await repo.get_all(resolved_id)
         return [
             {
                 "id": f.id,
@@ -74,16 +78,16 @@ async def list_findings(limit: int = 10) -> list[dict[str, Any]]:
 
 
 @tool("get_evidence")
-async def get_evidence(finding_id: int) -> dict[str, Any]:
+async def get_evidence(finding_id: int, assessment_id: int | None = None) -> dict[str, Any]:
     """Return supporting evidence and raw scan observations for a finding."""
-    assessment_id = _current_conversation_assessment.get()
-    if not assessment_id:
+    resolved_id = _resolve_assessment_id(assessment_id)
+    if not resolved_id:
         return {"error": "no assessment selected"}
 
     async with get_async_session_ctx() as session:
         repo = FindingRepo(session)
         finding = await repo.get(finding_id)
-        if not finding or finding.assessment_id != assessment_id:
+        if not finding or finding.assessment_id != resolved_id:
             return {"error": f"finding {finding_id} not found"}
         evidence = await repo.get_evidence_for_finding(finding_id)
         return {
@@ -94,27 +98,27 @@ async def get_evidence(finding_id: int) -> dict[str, Any]:
 
 
 @tool("get_reasoning")
-async def get_reasoning() -> dict[str, Any]:
+async def get_reasoning(assessment_id: int | None = None) -> dict[str, Any]:
     """Return the current evidence board hypotheses, open questions, and decisions."""
-    assessment_id = _current_conversation_assessment.get()
-    if not assessment_id:
+    resolved_id = _resolve_assessment_id(assessment_id)
+    if not resolved_id:
         return {"error": "no assessment selected"}
 
     async with get_async_session_ctx() as session:
-        board = await build_evidence_board(session, assessment_id)
+        board = await build_evidence_board(session, resolved_id)
         return board.model_dump()
 
 
 @tool("explain_approval")
-async def explain_approval(approval_id: int) -> dict[str, Any]:
+async def explain_approval(approval_id: int, assessment_id: int | None = None) -> dict[str, Any]:
     """Explain why a specific action requires human approval and its risk parameters."""
-    assessment_id = _current_conversation_assessment.get()
-    if not assessment_id:
+    resolved_id = _resolve_assessment_id(assessment_id)
+    if not resolved_id:
         return {"error": "no assessment selected"}
 
     async with get_async_session_ctx() as session:
         approval = await session.get(Approval, approval_id)
-        if not approval or approval.assessment_id != assessment_id:
+        if not approval or approval.assessment_id != resolved_id:
             return {"error": f"approval {approval_id} not found"}
         step = await session.get(Step, approval.step_id)
         detail = approval.detail or {}
@@ -134,21 +138,21 @@ async def explain_approval(approval_id: int) -> dict[str, Any]:
 
 
 @tool("update_objective")
-async def update_objective(text: str) -> dict[str, Any]:
+async def update_objective(text: str, assessment_id: int | None = None) -> dict[str, Any]:
     """Update the assessment objective. Only permitted when no run is active."""
-    assessment_id = _current_conversation_assessment.get()
-    if not assessment_id:
+    resolved_id = _resolve_assessment_id(assessment_id)
+    if not resolved_id:
         return {"error": "no assessment selected"}
 
     from app.runtime import runner
 
-    if runner.is_running(assessment_id):
+    if runner.is_running(resolved_id):
         return {
             "error": "Cannot update objective while a run is active. Please stop the run first."
         }
 
     async with get_async_session_ctx() as session:
-        assessment = await session.get(Assessment, assessment_id)
+        assessment = await session.get(Assessment, resolved_id)
         if not assessment:
             return {"error": "assessment not found"}
         assessment.request = text.strip()
@@ -158,20 +162,20 @@ async def update_objective(text: str) -> dict[str, Any]:
 
 
 @tool("start_run")
-async def start_run() -> dict[str, Any]:
+async def start_run(assessment_id: int | None = None) -> dict[str, Any]:
     """Start the assessment run. Only call on explicit operator intent."""
-    assessment_id = _current_conversation_assessment.get()
-    if not assessment_id:
+    resolved_id = _resolve_assessment_id(assessment_id)
+    if not resolved_id:
         return {"error": "no assessment selected"}
 
     from app.runtime import runner
 
     try:
-        view = await runner.start_run(assessment_id, actor="coordinator")
+        view = await runner.start_run(resolved_id, actor="coordinator")
         async with get_async_session_ctx() as session:
             audit(
                 session,
-                assessment_id,
+                resolved_id,
                 "conversation.start_run",
                 {"actor": "coordinator"},
             )
@@ -182,20 +186,20 @@ async def start_run() -> dict[str, Any]:
 
 
 @tool("stop_run")
-async def stop_run() -> dict[str, Any]:
+async def stop_run(assessment_id: int | None = None) -> dict[str, Any]:
     """Stop the active assessment run. Only call on explicit operator intent."""
-    assessment_id = _current_conversation_assessment.get()
-    if not assessment_id:
+    resolved_id = _resolve_assessment_id(assessment_id)
+    if not resolved_id:
         return {"error": "no assessment selected"}
 
     from app.runtime import runner
 
     try:
-        view = await runner.stop_run(assessment_id, actor="coordinator")
+        view = await runner.stop_run(resolved_id, actor="coordinator")
         async with get_async_session_ctx() as session:
             audit(
                 session,
-                assessment_id,
+                resolved_id,
                 "conversation.stop_run",
                 {"actor": "coordinator"},
             )
@@ -206,25 +210,25 @@ async def stop_run() -> dict[str, Any]:
 
 
 @tool("add_steering_note")
-async def add_steering_note(text: str) -> dict[str, Any]:
+async def add_steering_note(text: str, assessment_id: int | None = None) -> dict[str, Any]:
     """Queue an operator steering directive for the active assessment run."""
-    assessment_id = _current_conversation_assessment.get()
-    if not assessment_id:
+    resolved_id = _resolve_assessment_id(assessment_id)
+    if not resolved_id:
         return {"error": "no assessment selected"}
 
     from app.runtime import runner
 
     run_id: str | None = None
-    if runner.is_running(assessment_id):
+    if runner.is_running(resolved_id):
         try:
-            _, values = await runner._values(assessment_id)
+            _, values = await runner._values(resolved_id)
             run_id = values.get("run_id")
         except Exception:
             pass
 
     async with get_async_session_ctx() as session:
         repo = SteeringRepo(session)
-        note = await repo.add(assessment_id, run_id, text)
+        note = await repo.add(resolved_id, run_id, text)
         return {"ok": True, "note_id": note.id, "text": text}
 
 
