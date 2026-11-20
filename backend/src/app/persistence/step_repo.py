@@ -49,18 +49,58 @@ def _curl_path(value: str) -> str:
     return text
 
 
-def _batch_signature(requests: Any) -> tuple[tuple[str, str], ...]:
+def _normalize_body(body: Any) -> str:
+    """Normalize request body to a canonical string for duplicate checks."""
+    if body is None:
+        return ""
+    if isinstance(body, dict):
+        try:
+            return json.dumps(body, sort_keys=True)
+        except Exception:
+            return str(body).strip()
+    if isinstance(body, str):
+        trimmed = body.strip()
+        if (trimmed.startswith("{") and trimmed.endswith("}")) or (trimmed.startswith("[") and trimmed.endswith("]")):
+            try:
+                parsed = json.loads(trimmed)
+                return json.dumps(parsed, sort_keys=True)
+            except Exception:
+                pass
+        return trimmed
+    return str(body).strip()
+
+
+def _normalize_headers(headers: Any) -> dict[str, str]:
+    """Normalize headers dict with lowercase stripped keys and trimmed values."""
+    if not isinstance(headers, dict):
+        return {}
+    normalized: dict[str, str] = {}
+    for k, v in headers.items():
+        key = str(k).strip().lower()
+        if not key:
+            continue
+        normalized[key] = str(v).strip()
+    return normalized
+
+
+def _batch_signature(requests: Any) -> tuple[Any, ...]:
     """Order-sensitive signature of a curl batch for duplicate detection."""
     if not isinstance(requests, list):
         return ()
-    signature: list[tuple[str, str]] = []
+    signature: list[tuple[str, str, str, tuple[tuple[str, str], ...]]] = []
     for item in requests:
         if not isinstance(item, dict):
             return ()
+        hdrs = tuple(sorted(_normalize_headers(item.get("headers")).items()))
+        body_val = _normalize_body(
+            item.get("body") if item.get("body") is not None else item.get("payload")
+        )
         signature.append(
             (
                 str(item.get("method") or "GET").upper(),
                 _curl_path(str(item.get("path") or item.get("url") or "/")),
+                body_val,
+                hdrs,
             )
         )
     return tuple(signature)
@@ -77,8 +117,10 @@ def _step_matches(
 ) -> bool:
     """Whether a queued step is the same action the agent is asking for.
 
-    Most actions are unique per target. HTTP probes are not: one target can
-    have many interesting paths, so compare method and path too.
+    Most actions are unique per target. For curl_request, two requests are
+    only considered duplicates if HTTP Method, URL Path, AND request body/headers match.
+    When the payload or headers change (e.g. testing with different JSON fields,
+    different tokens, or different parameters), it is a distinct probe and must execute.
     """
     if row.target != target and _clean_target_host(row.target) != _clean_target_host(target):
         return False
@@ -96,17 +138,28 @@ def _step_matches(
             except Exception:
                 return False
         return False
+
     method = str(probe.get("method", "GET")).upper()
     path = _curl_path(str(probe.get("path") or probe.get("url") or "/"))
+    body = _normalize_body(probe.get("body") if probe.get("body") is not None else probe.get("payload"))
+    headers = _normalize_headers(probe.get("headers"))
+
     if len(row.argv) >= 3 and row.argv[0] == "mcp":
         try:
             mcp_args = json.loads(row.argv[2]) if isinstance(row.argv[2], str) else row.argv[2]
             if isinstance(mcp_args, dict):
                 if mcp_args.get("method", "GET").upper() != method:
                     return False
-                return _curl_path(str(mcp_args.get("url", ""))) == path
+                if _curl_path(str(mcp_args.get("url", ""))) != path:
+                    return False
+                if _normalize_body(mcp_args.get("body")) != body:
+                    return False
+                if _normalize_headers(mcp_args.get("headers")) != headers:
+                    return False
+                return True
         except Exception:
             return False
+
     if len(row.argv) < 3 or row.argv[1].upper() != method:
         return False
     return _curl_path(row.argv[2]) == path

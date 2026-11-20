@@ -77,3 +77,28 @@ def test_retry_limits_enforced(monkeypatch):
     )
     decision, rejection = validate_route(proposed, state, digest)
     assert rejection == "retry_limit_reached"
+
+
+@pytest.mark.asyncio
+async def test_model_node_budget_exhaustion_does_not_unbound_local_assessment_id(engine):
+    from app.agents.nodes.specialist import model_node
+    from app.core.db import get_async_session_ctx
+    from app.domain.models import Assessment
+
+    async with get_async_session_ctx() as session:
+        assessment = Assessment(title="Budget Target", targets=["127.0.0.1"], ports=[80])
+        session.add(assessment)
+        await session.commit()
+        await session.refresh(assessment)
+
+        state = {
+            "assessment_id": assessment.id,
+            "run_id": "test-run",
+            "role": "recon",
+            "turns": {"recon": 10},  # equal to cap
+            "messages": [],
+            "no_progress": 0,
+        }
+        cmd = await model_node(state)
+        assert cmd.goto == "supervisor"
+        assert cmd.update["failure_signal"]["kind"] == "budget_exhausted"

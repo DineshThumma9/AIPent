@@ -76,8 +76,9 @@ async def read_artifact(
         max_chars = min(max(max_chars, 100), 8000)
         offset = max(0, int(offset or 0))
 
-        if search:
-            idx = content.lower().find(search.lower(), offset)
+        if search is not None and str(search).strip():
+            search_str = str(search).lower()
+            idx = content.lower().find(search_str, offset)
             if idx != -1:
                 start = max(0, idx - 200)
                 end = min(len(content), start + max_chars)

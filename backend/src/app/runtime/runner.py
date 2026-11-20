@@ -169,6 +169,7 @@ async def get_view(
         next=list(state.next),
         plan=plan,
         plan_source=values.get("plan_source", "") or "",
+        run_config=values.get("run_config", {}) or {},
         pending=pending,
         steps=values.get("step_count", 0) or 0,
         last_message=content,
@@ -259,6 +260,9 @@ async def start_run(
                 raise LookupError(f"assessment {assessment_id} not found")
             await prepare_run(session, assessment_id, actor=actor)
             payload = initial_state(assessment_id)
+            from app.agents.run_config import build_run_manifest
+
+            payload["run_config"] = build_run_manifest(assessment_id)
 
         _launch(assessment_id, payload)
         return await get_view(assessment_id, running=True)

@@ -404,6 +404,34 @@ To stop all services and containers:
 ./start.sh --stop
 ```
 
+### Terminal CLI (`./aipent`)
+
+AIPENT includes a rich terminal CLI for running security assessments, monitoring multi-agent reasoning in real-time, deciding human gates, and compiling reports:
+
+```bash
+# View CLI help, key options, and examples:
+./aipent --help
+
+# Run an unattended assessment with all requests auto-approved:
+./aipent scan http://127.0.0.1:3000 -y
+
+# Pass an assessment query / objective with auto-approval:
+./aipent scan http://127.0.0.1:3000 -r "Find SQL injection and XSS on /rest/products" -y
+./aipent scan http://127.0.0.1:3000 -q "Test auth bypass vulnerabilities" --auto-approve
+
+# Direct shorthand syntax (without explicit 'scan'):
+./aipent http://127.0.0.1:3000 -y
+
+# Scan specific ports with scope exclusions:
+./aipent scan 192.168.1.50 -p 80,443,8080 -e "/admin,/logout" -y
+
+# List previous assessments, view status, steer agent, or compile report:
+./aipent list
+./aipent status 1
+./aipent steer 1 "Focus on JWT token forgery flaws"
+./aipent report 1
+```
+
 ---
 
 ## Verification & Test Results

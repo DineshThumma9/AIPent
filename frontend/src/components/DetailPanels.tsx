@@ -54,9 +54,12 @@ function planFrom(approval: Approval): PlanStep[] {
     }
     return [
       {
+        role: typeof record.role === 'string' ? record.role : '',
         action: record.action,
         target: record.target,
         rationale: record.rationale,
+        enabled: record.enabled !== false,
+        valid_action: typeof record.valid_action === 'boolean' ? record.valid_action : null,
       },
     ]
   })

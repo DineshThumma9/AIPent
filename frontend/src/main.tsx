@@ -6,6 +6,7 @@ import '@fontsource/ibm-plex-mono/latin-500.css'
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
+import './index.plan-editor.css'
 import App from './App.tsx'
 
 createRoot(document.getElementById('root')!).render(

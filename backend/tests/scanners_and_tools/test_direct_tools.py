@@ -138,6 +138,11 @@ async def test_read_artifact_pagination_and_search(engine, tmp_path):
         assert obs_search.ok is True
         assert "secret_token=12345" in obs_search.summary
 
+        # 2b. Integer search coercion (prevents AttributeError: 'int' object has no attribute 'lower')
+        obs_int_search = await read_artifact(session, assessment.id, step.id, search=12345)
+        assert obs_int_search.ok is True
+        assert "secret_token=12345" in obs_int_search.summary
+
         # 3. Missing step error
         obs_missing = await read_artifact(session, assessment.id, 99999)
         assert obs_missing.ok is False

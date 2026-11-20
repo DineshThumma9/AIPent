@@ -20,6 +20,7 @@ def fold_events_into_evidence_board(events: list[Audit]) -> EvidenceBoard:
     decision_order: list[str] = []
     anon_decisions: list[DecisionRecord] = []
     open_questions: list[str] = []
+    latest_handoff: dict[str, Any] | None = None
 
     for event in events:
         payload = event.payload or {}
@@ -67,6 +68,8 @@ def fold_events_into_evidence_board(events: list[Audit]) -> EvidenceBoard:
                 pass
         elif event.event_type == "handoff.created":
             open_questions.extend(payload.get("open_questions") or [])
+            if payload:
+                latest_handoff = dict(payload)
 
     seen: set[str] = set()
     deduped_questions: list[str] = []
@@ -81,4 +84,5 @@ def fold_events_into_evidence_board(events: list[Audit]) -> EvidenceBoard:
         hypotheses=list(hypotheses.values()),
         decisions=final_decisions,
         open_questions=deduped_questions,
+        last_handoff=latest_handoff,
     )

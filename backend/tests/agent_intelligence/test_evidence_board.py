@@ -95,6 +95,9 @@ def test_fold_events_decisions_and_open_questions():
         assessment_id=1,
         event_type="handoff.created",
         payload={
+            "role": "discovery",
+            "summary": "Discovered exposed git directory",
+            "recommended_actions": ["Download .git/config"],
             "open_questions": [
                 "Does /debug require basic auth?",  # Duplicate question
                 "Can credentials be harvested from .git/config?",
@@ -115,3 +118,32 @@ def test_fold_events_decisions_and_open_questions():
         "Is CORS configured permissively?",
         "Can credentials be harvested from .git/config?",
     ]
+    assert board.last_handoff is not None
+    assert board.last_handoff["role"] == "discovery"
+    assert board.last_handoff["summary"] == "Discovered exposed git directory"
+    assert board.last_handoff["recommended_actions"] == ["Download .git/config"]
+
+
+def test_render_brief_includes_prior_handoff():
+    from app.agents.brief import render_brief
+    from app.domain.models import Assessment
+    from app.agents.contracts import EvidenceBoard
+
+    board = EvidenceBoard(
+        last_handoff={
+            "role": "discovery",
+            "summary": "Juice Shop running on port 3000. Found /ftp endpoint with directory listing.",
+            "recommended_actions": ["curl_request GET /ftp/acquisitions.md"],
+        }
+    )
+    assessment = Assessment(id=1, targets=["127.0.0.1"], ports=[3000])
+    brief = render_brief(
+        assessment=assessment,
+        role="validation",
+        board=board,
+        services=[],
+        candidates=[],
+    )
+    assert "PRIOR SPECIALIST HANDOFF (from discovery)" in brief
+    assert "Juice Shop running on port 3000" in brief
+    assert "curl_request GET /ftp/acquisitions.md" in brief

@@ -13,6 +13,7 @@ import type {
   AssessmentDetail,
   Evidence,
   Finding,
+  PlanStep,
 } from '../lib/schemas'
 import type { LocalMessage } from '../lib/chatStorage'
 import { curlBatchProbes } from '../lib/command'
@@ -207,6 +208,200 @@ function finalReviewFacts(approval: Approval): string[] {
   return facts
 }
 
+type DecisionHandler = (
+  decision: 'approved' | 'rejected',
+  reason?: string,
+  plan?: PlanStep[],
+  feedback?: string,
+) => void
+
+const blankStep = (): PlanStep => ({
+  role: 'discovery',
+  action: 'curl_request',
+  target: '',
+  rationale: '',
+  enabled: true,
+  valid_action: null,
+})
+
+function PlanCard({
+  approval,
+  busy,
+  gateOpen,
+  settled,
+  onDecision,
+}: {
+  approval: Approval
+  busy: boolean
+  gateOpen: boolean
+  settled: boolean
+  onDecision: DecisionHandler
+}) {
+  const detail = approval.detail as Record<string, unknown>
+  const proposed = approvalPlan(approval)
+  const [steps, setSteps] = useState<PlanStep[]>(
+    proposed.length ? proposed : [blankStep()],
+  )
+  const [feedback, setFeedback] = useState('')
+  const available = (detail.available_actions ?? {}) as Record<string, string[]>
+  const objective = typeof detail.objective === 'string' ? detail.objective : ''
+  const pending = approval.decision === 'pending'
+  const canDecide = pending && gateOpen && !settled && !busy
+
+  const update = (index: number, patch: Partial<PlanStep>) =>
+    setSteps((current) =>
+      current.map((step, i) => (i === index ? { ...step, ...patch } : step)),
+    )
+
+  const roleOptions = Array.from(
+    new Set(['recon', 'discovery', 'validation', 'review', ...steps.map((s) => s.role)]),
+  ).filter(Boolean)
+
+  const reason = feedback.trim() || 'Approved from the mission desk'
+
+  return (
+    <article className="gate-card plan-card" aria-label="Review proposed assessment plan">
+      <header className="plan-head">
+        <span className="plan-head-mark" aria-hidden="true">✓</span>
+        <div className="plan-head-text">
+          <p className="gate-kind">Agent planning</p>
+          <h3>Review plan</h3>
+        </div>
+        <span className="plan-count mono">{steps.length} steps</span>
+      </header>
+
+      {objective && <p className="plan-objective">{objective}</p>}
+
+      <datalist id="plan-actions">
+        {Object.values(available)
+          .flat()
+          .map((action) => (
+            <option key={action} value={action} />
+          ))}
+      </datalist>
+
+      <ol className="plan-checklist">
+        {steps.map((step, index) => (
+          <li className="plan-check" key={index}>
+            <span className="plan-num mono">{String(index + 1).padStart(2, '0')}</span>
+            <div className="plan-check-main">
+              <div className="plan-check-line">
+                <select
+                  className="plan-role mono"
+                  aria-label={`Role for step ${index + 1}`}
+                  value={step.role}
+                  onChange={(event) => update(index, { role: event.target.value })}
+                  disabled={!canDecide}
+                >
+                  {roleOptions.map((role) => (
+                    <option key={role} value={role}>
+                      {role}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  className="plan-action mono"
+                  aria-label={`Action for step ${index + 1}`}
+                  value={step.action}
+                  list="plan-actions"
+                  onChange={(event) => update(index, { action: event.target.value })}
+                  disabled={!canDecide}
+                />
+                <input
+                  className="plan-target mono"
+                  aria-label={`Target for step ${index + 1}`}
+                  value={step.target}
+                  onChange={(event) => update(index, { target: event.target.value })}
+                  disabled={!canDecide}
+                />
+                {step.valid_action === false && (
+                  <span className="plan-invalid" title="Action is not in this role's tool registry">!</span>
+                )}
+              </div>
+              <input
+                className="plan-why"
+                aria-label={`Rationale for step ${index + 1}`}
+                value={step.rationale}
+                placeholder="Why this step"
+                onChange={(event) => update(index, { rationale: event.target.value })}
+                disabled={!canDecide}
+              />
+            </div>
+            {canDecide && (
+              <button
+                type="button"
+                className="plan-x"
+                aria-label={`Remove step ${index + 1}`}
+                onClick={() => setSteps((current) => current.filter((_, i) => i !== index))}
+              >
+                ×
+              </button>
+            )}
+          </li>
+        ))}
+      </ol>
+
+      {canDecide && (
+        <button
+          type="button"
+          className="plan-add"
+          onClick={() => setSteps((current) => [...current, blankStep()])}
+        >
+          + Add step
+        </button>
+      )}
+
+      <details className="plan-feedback">
+        <summary>Feedback for the team <span className="mono">optional</span></summary>
+        <label className="sr-only" htmlFor="plan-feedback">
+          Feedback for every agent
+        </label>
+        <textarea
+          id="plan-feedback"
+          value={feedback}
+          onChange={(event) => setFeedback(event.target.value)}
+          placeholder="Focus, skip, or de-prioritise an area…"
+          maxLength={2000}
+          disabled={!canDecide}
+          rows={2}
+        />
+      </details>
+
+      {pending && !gateOpen && (
+        <p className="gate-hint">The plan is not open yet; wait for the run to reach the gate.</p>
+      )}
+
+      <div className="plan-actions">
+        {canDecide && (
+          <>
+            <button
+              type="button"
+              className="btn btn-primary btn-small"
+              onClick={() =>
+                onDecision(
+                  'approved',
+                  reason,
+                  steps.filter((step) => step.action.trim() && step.target.trim()),
+                  feedback,
+                )
+              }
+            >
+              {busy ? 'Submitting…' : 'Approve plan'}
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost btn-small"
+              onClick={() => onDecision('rejected', feedback.trim() || 'Rejected from the mission desk')}
+            >
+              Reject
+            </button>
+          </>
+        )}
+      </div>
+    </article>
+  )
+}
+
 function ApprovalCard({
   approval,
   busy,
@@ -218,7 +413,7 @@ function ApprovalCard({
   busy: boolean
   gateOpen: boolean
   settled: boolean
-  onDecision: (decision: 'approved' | 'rejected', reason?: string) => void
+  onDecision: DecisionHandler
 }) {
   const [reason, setReason] = useState('')
   const pending = approval.decision === 'pending'
@@ -609,7 +804,7 @@ export function MissionConversation({
   settledApprovalId: number | null
   scanning: boolean
   onSend: (text: string) => void
-  onDecision: (decision: 'approved' | 'rejected', reason?: string) => void
+  onDecision: DecisionHandler
   onRun: () => void
   onStop?: () => void
   onScan: () => void
@@ -701,6 +896,38 @@ export function MissionConversation({
         ? 'Ask for a summary or start again'
         : 'Set the goal for this run'
 
+  // One state line replaces the old hint paragraph + progress block. Every
+  // "what is happening now" signal is owned by this line.
+  const activeRole = mission.activeRole
+  const activeView = activeRole
+    ? mission.roles.find((role) => role.name === activeRole)
+    : undefined
+  const working = mission.running && !mission.gateOpen
+  let stateLabel: string
+  let stateDetail: string
+  if (mission.pendingApproval) {
+    stateLabel = `Waiting for your decision · ${actionLabel(mission.pendingApproval.action)}`
+    stateDetail = 'approval gate'
+  } else if (detail.status === 'awaiting_plan') {
+    stateLabel = 'Plan ready for review'
+    stateDetail = 'plan gate'
+  } else if (detail.status === 'reporting') {
+    stateLabel = 'Writing the report'
+    stateDetail = 'reporting'
+  } else if (!mission.running) {
+    stateLabel = `Run closed · ${detail.status.replaceAll('_', ' ')}`
+    stateDetail = ''
+  } else if (activeRole && activeView) {
+    stateLabel = `${ROLE_INFO[activeRole].label} working`
+    stateDetail = activeView.turnCap
+      ? `turn ${activeView.turns}/${activeView.turnCap}${activeView.capReached ? ' · cap reached' : ''}`
+      : `turn ${activeView.turns}`
+  } else {
+    stateLabel = 'Supervisor choosing next role'
+    stateDetail = 'routing'
+  }
+  const showProgress = working && Boolean(activeRole)
+
   return (
     <section className="conversation" aria-label="Mission conversation">
       <header className="conversation-head">
@@ -775,35 +1002,26 @@ export function MissionConversation({
               {scanning ? 'nmap running…' : 'Manual nmap'}
             </button>
           </div>
-          <p className="conversation-hint">
-            {mission.pendingApproval
-              ? 'Approval open below. Nothing runs until you decide.'
-              : mission.running
-                ? 'Roles are working. The next approval appears in the thread.'
-                : mission.runId
-                  ? 'Run closed. Start again to re-open the service surface.'
-                  : 'Recon starts with nmap, then hands the surface to discovery.'}
-          </p>
         </div>
 
-        {mission.running && !mission.gateOpen && (
-          <div className="mission-progress" role="status" aria-live="polite">
-            <div className="mission-progress-head">
-              <span className="mission-progress-label">
+        <div className="mission-progress" role="status" aria-live="polite">
+          <div className="mission-progress-head">
+            <span className="mission-progress-label">
+              {showProgress && (
                 <span className="mission-progress-dot" aria-hidden="true" />
-                {mission.activeRole
-                  ? `${ROLE_INFO[mission.activeRole].label} is working`
-                  : 'Agent is working'}
-              </span>
-              <span className="mission-progress-phase mono">
-                {detail.status.replaceAll('_', ' ')}
-              </span>
-            </div>
+              )}
+              {stateLabel}
+            </span>
+            {stateDetail && (
+              <span className="mission-progress-phase mono">{stateDetail}</span>
+            )}
+          </div>
+          {showProgress && (
             <div className="mission-progress-track" aria-hidden="true">
               <span className="mission-progress-fill" />
             </div>
-          </div>
-        )}
+          )}
+        </div>
       </header>
 
       <div
@@ -823,6 +1041,24 @@ export function MissionConversation({
             case 'handoff':
               return <HandoffTurn key={entry.id} handoff={entry.handoff} />
             case 'approval':
+              if (entry.approval.action === 'initial_plan') {
+                return (
+                  <div className="gate-wrap" key={entry.id}>
+                    <PlanCard
+                      approval={entry.approval}
+                      busy={busy}
+                      gateOpen={
+                        gateOpen && mission.pendingApproval?.id === entry.approval.id
+                      }
+                      settled={
+                        settledApprovalId !== null &&
+                        settledApprovalId === entry.approval.id
+                      }
+                      onDecision={onDecision}
+                    />
+                  </div>
+                )
+              }
               return (
                 <div className="gate-wrap" key={entry.id}>
                   <ApprovalCard

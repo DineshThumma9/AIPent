@@ -13,7 +13,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import urlsplit
 
 import typer
@@ -49,11 +49,99 @@ from app.persistence import AssessmentRepo, FindingRepo, SteeringRepo, StepRepo
 from app.reporting.report import generate_report
 from app.runtime import runner
 
-app = typer.Typer(
+APP_HELP = """[bold cyan]AIPENT[/] — Autonomous AI Penetration Testing Engine
+
+Context-aware, evidence-driven security assessments orchestrated by LangGraph multi-agent loops.
+Supports interactive human approval gates, automated policy approvals, and client-ready Typst reports.
+"""
+
+APP_EPILOG = """[bold cyan]Key Options & Flags (for scan):[/]
+  [bold green]-r, --request, -q, --query[/] <str>  Assessment query, objective, or guidance for the agent (e.g. 'Test /rest/products for SQLi')
+  [bold green]-y, --auto-approve, --yes[/]         Auto-approve all human action gates & requests (unattended mode)
+  [bold green]-p, --ports[/] <str>                 Target ports comma-separated (e.g. '80,443,3000')
+  [bold green]-e, --exclude, --exclusions[/] <str> Endpoints or hosts to exclude from scope (e.g. '/admin,/logout')
+  [bold green]-t, --title[/] <str>                 Custom assessment title (default: 'VAPT Assessment - <target>')
+  [bold green]--timeout[/] <int>                   Maximum run timeout in seconds (default: 900)
+
+[bold cyan]Helpful Examples:[/]
+  [dim]# Run an unattended assessment with all requests auto-approved:[/dim]
+  [green]aipent scan http://127.0.0.1:3000 -y[/]
+
+  [dim]# Pass a specific query / request objective with auto-approval:[/dim]
+  [green]aipent scan http://127.0.0.1:3000 -r "Find SQL injection and XSS on search" -y[/]
+  [green]aipent scan http://127.0.0.1:3000 -q "Test auth bypass vulnerabilities" --auto-approve[/]
+
+  [dim]# Direct shorthand syntax (without explicit 'scan'):[/dim]
+  [green]aipent http://127.0.0.1:3000 -y[/]
+  [green]aipent http://127.0.0.1:3000 -r "Check for default credentials" -y[/]
+
+  [dim]# Scan specific ports with scope exclusions:[/dim]
+  [green]aipent scan 192.168.1.50 -p 80,443,8080 -e "/admin,/logout" -y[/]
+
+  [dim]# Interactive assessment (prompts for operator approval at critical gates):[/dim]
+  [green]aipent scan http://127.0.0.1:3000[/]
+
+  [dim]# Inspect past assessments, findings, and generate reports:[/dim]
+  [green]aipent list[/]
+  [green]aipent status 1[/]
+  [green]aipent steer 1 "Focus on JWT token forgery flaws"[/]
+  [green]aipent report 1[/]
+"""
+
+SCAN_EPILOG = """[bold cyan]Helpful Examples:[/]
+  [dim]# Run against local target with all requests auto-approved (unattended):[/dim]
+  [green]aipent scan http://127.0.0.1:3000 -y[/]
+
+  [dim]# Target a specific vulnerability or query with auto-approval:[/dim]
+  [green]aipent scan http://127.0.0.1:3000 -r "Test for SQL injection on search endpoint" -y[/]
+  [green]aipent scan http://127.0.0.1:3000 -q "Find OWASP Top 10 vulnerabilities" --auto-approve[/]
+
+  [dim]# Scan specific ports and exclude sensitive paths from scope:[/dim]
+  [green]aipent scan 192.168.1.50 -p 80,443,8080 -e "/admin,/logout" -y[/]
+
+  [dim]# Set custom assessment title and extended timeout:[/dim]
+  [green]aipent scan http://127.0.0.1:3000 -t "Juice Shop Q4 Audit" --timeout 1800 -y[/]
+
+  [dim]# Interactive mode (prompts for operator approval before executing any tool):[/dim]
+  [green]aipent scan http://127.0.0.1:3000[/]
+"""
+
+
+def _normalize_args(argv: list[str]) -> list[str]:
+    """Auto-route shorthand targets and flags to `scan`.
+
+    Allows running:
+      aipent http://127.0.0.1:3000 -y
+      aipent -r "find xss" -y http://127.0.0.1:3000
+    without requiring the operator to type `scan`.
+    """
+    known_commands = {"scan", "list", "status", "report", "steer", "help", "--help", "-h"}
+    if argv and argv[0] not in known_commands:
+        return ["scan"] + list(argv)
+    return list(argv)
+
+
+class AIPENTTyper(typer.Typer):
+    """Custom Typer subclass supporting automatic scan routing and rich formatting."""
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        if args and isinstance(args[0], (list, tuple)):
+            normalized = _normalize_args(list(args[0]))
+            return super().__call__(normalized, *args[1:], **kwargs)
+        if len(sys.argv) > 1:
+            known_commands = {"scan", "list", "status", "report", "steer", "help", "--help", "-h"}
+            if sys.argv[1] not in known_commands:
+                sys.argv.insert(1, "scan")
+        return super().__call__(*args, **kwargs)
+
+
+app = AIPENTTyper(
     name="aipent",
-    help="AIPENT — Autonomous AI Penetration Testing Engine",
+    help=APP_HELP,
+    epilog=APP_EPILOG,
     no_args_is_help=True,
     add_completion=False,
+    rich_markup_mode="rich",
 )
 console = Console()
 
@@ -143,7 +231,82 @@ def _clean_target(raw: str) -> tuple[str, list[int]]:
 # ---------------------------------------------------------------------------
 
 
-@app.command("scan", help="Start an authorized security assessment against a target.")
+def _print_plan(plan: list[dict], available: dict | None = None) -> None:
+    """Render the proposed assessment plan as an editable-looking table."""
+    table = Table(show_header=True, header_style="bold cyan", box=box.SIMPLE)
+    table.add_column("#", style="dim", width=3)
+    table.add_column("Role", style="bold", width=12)
+    table.add_column("Action", style="bold cyan", width=20)
+    table.add_column("Target", style="white", width=24)
+    table.add_column("Rationale", style="italic")
+    for index, step in enumerate(plan, start=1):
+        table.add_row(
+            str(index),
+            str(step.get("role", "")),
+            str(step.get("action", "")),
+            str(step.get("target", "")),
+            str(step.get("rationale", ""))[:160],
+        )
+    console.print(table)
+    if available:
+        console.print(
+            "[dim]Valid actions: "
+            + "; ".join(f"{role}={','.join(names)}" for role, names in available.items())
+            + "[/dim]"
+        )
+
+
+def _edit_plan(plan: list[dict], available: dict | None = None) -> tuple[list[dict], str]:
+    """Interactively edit each step and return (steps, feedback)."""
+    edited: list[dict] = []
+    console.print("[bold]Edit plan steps. Blank keeps the current value; '-' removes the step.[/]")
+    for index, step in enumerate(plan, start=1):
+        console.print(f"\n[bold cyan]Step {index}[/]")
+        action = Prompt.ask("  Action", default=str(step.get("action", "")))
+        if action.strip() == "-":
+            continue
+        target = Prompt.ask("  Target", default=str(step.get("target", "")))
+        rationale = Prompt.ask("  Rationale", default=str(step.get("rationale", "")))
+        edited.append(
+            {
+                "role": step.get("role", "recon"),
+                "action": action.strip(),
+                "target": target.strip(),
+                "rationale": rationale.strip(),
+                "enabled": True,
+            }
+        )
+
+    while Prompt.ask("\nAdd another step?", choices=["y", "n"], default="n") == "y":
+        role = Prompt.ask(
+            "  Role",
+            choices=list((available or {}).keys()) or ["recon", "discovery", "validation", "review"],
+            default="discovery",
+        )
+        action = Prompt.ask("  Action")
+        target = Prompt.ask("  Target")
+        rationale = Prompt.ask("  Rationale", default="")
+        edited.append(
+            {
+                "role": role,
+                "action": action.strip(),
+                "target": target.strip(),
+                "rationale": rationale.strip(),
+                "enabled": True,
+            }
+        )
+
+    feedback = Prompt.ask(
+        "Feedback for every agent (optional; press Enter to skip)", default=""
+    )
+    return edited, feedback.strip()
+
+
+@app.command(
+    "scan",
+    help="Start an authorized security assessment against a target.",
+    epilog=SCAN_EPILOG,
+)
 def scan_cmd(
     target: str = typer.Argument(..., help="Target host, IP, or URL (e.g. 127.0.0.1 or http://127.0.0.1:3000)"),
     ports: Optional[str] = typer.Option(
@@ -156,24 +319,35 @@ def scan_cmd(
         None,
         "-t",
         "--title",
-        help="Custom assessment title.",
+        help="Custom assessment title (default: 'VAPT Assessment - <target>').",
     ),
     request: str = typer.Option(
         "",
         "-r",
         "--request",
-        help="Assessment objective or special instructions for the agent.",
+        "-q",
+        "--query",
+        help="Assessment query, objective, or guidance for the agent (e.g. 'Test for SQL injection on /rest/products/search').",
     ),
     auto_approve: bool = typer.Option(
         False,
         "-y",
         "--auto-approve",
-        help="Auto-approve all human action gates without prompting.",
+        "--yes",
+        "--approve-all",
+        help="Auto-approve all human action gates & execution requests without prompting (unattended mode).",
+    ),
+    exclusions: Optional[str] = typer.Option(
+        None,
+        "-e",
+        "--exclude",
+        "--exclusions",
+        help="Comma-separated endpoints, paths, or hosts to exclude from scope (e.g. '/admin,/logout').",
     ),
     timeout: int = typer.Option(
         900,
         "--timeout",
-        help="Maximum run timeout in seconds (default 900).",
+        help="Maximum run timeout in seconds (default: 900).",
     ),
 ):
     """Run an assessment loop from start to finish with live terminal updates."""
@@ -190,6 +364,10 @@ def scan_cmd(
     else:
         final_ports = [3000]
 
+    final_exclusions: list[str] | None = None
+    if exclusions:
+        final_exclusions = [x.strip() for x in exclusions.split(",") if x.strip()]
+
     final_title = title or f"VAPT Assessment - {clean_host}"
 
     async def _execute():
@@ -203,12 +381,14 @@ def scan_cmd(
                 request=request,
                 targets=[clean_host],
                 ports=final_ports,
+                exclusions=final_exclusions,
             )
             aid = assessment.id
 
-        from app.agents.model import role_model_config
+        from app.agents.run_config import build_run_manifest
 
-        role_models = role_model_config()
+        manifest = build_run_manifest(aid)
+        role_models = manifest["models"]
         banner = Text.assemble(
             ("🎯 Target: ", "bold cyan"),
             (clean_host, "bold white"),
@@ -216,14 +396,40 @@ def scan_cmd(
             (str(final_ports), "bold white"),
             ("\n📋 Title:  ", "bold cyan"),
             (final_title, "white"),
-            ("\n🆔 Run ID: ", "bold cyan"),
-            (f"Assessment #{aid}", "bold green"),
-            ("\n⚡ Mode:   ", "bold cyan"),
-            ("Auto-Approve Enabled" if auto_approve else "Interactive Human Gates", "yellow" if auto_approve else "green"),
-            ("\n🤖 Models:", "bold cyan"),
         )
+        if request:
+            banner.append("\n❓ Query:  ", style="bold cyan")
+            banner.append(request, style="bold yellow")
+        if final_exclusions:
+            banner.append("\n🚫 Exclude:", style="bold cyan")
+            banner.append(", ".join(final_exclusions), style="dim red")
+        banner.append("\n🆔 Run ID: ", style="bold cyan")
+        banner.append(f"Assessment #{aid}", style="bold green")
+        banner.append("\n⚡ Mode:   ", style="bold cyan")
+        banner.append(
+            "Auto-Approve Enabled (Unattended)" if auto_approve else "Interactive Human Gates",
+            style="yellow" if auto_approve else "green",
+        )
+        banner.append("\n🤖 Models:", style="bold cyan")
         for role, cfg in role_models.items():
-            banner.append(f"\n   {role:<12} {cfg['provider']} / {cfg['model']}", style="dim")
+            thinking = manifest["thinking"].get(role, "-")
+            banner.append(
+                f"\n   {role:<12} {cfg['provider']} / {cfg['model']} [{thinking}]",
+                style="dim",
+            )
+        budgets = manifest["budgets"]
+        banner.append(
+            "\n📊 Limits: "
+            f"turns={budgets['role_turn_caps']} · max_turns={budgets['max_agent_turns']} · "
+            f"supervisor_calls={budgets['supervisor_calls_per_run']} · "
+            f"recursion={budgets['agent_recursion_limit']}",
+            style="dim",
+        )
+        banner.append(
+            "\n🧰 Tools: "
+            + " · ".join(f"{role}={count}" for role, count in manifest["tool_counts"].items()),
+            style="dim",
+        )
 
         console.print()
         console.print(
@@ -348,6 +554,76 @@ def scan_cmd(
                     action_name = pending.get("action") or pending.get("role") or "Review Delivery"
                     argv = pending.get("argv") or []
                     rationale = pending.get("rationale") or pending.get("message") or ""
+
+                    if gate == "plan":
+                        proposed = list(pending.get("plan") or [])
+                        console.print()
+                        console.print(
+                            Panel(
+                                Text(
+                                    "The supervisor drafted an assessment plan. Every agent will "
+                                    "receive the approved target and rationale before any scan runs.",
+                                    style="white",
+                                ),
+                                title="[bold cyan]Review Proposed Assessment Plan[/]",
+                                border_style="cyan",
+                                box=box.ROUNDED,
+                            )
+                        )
+                        _print_plan(proposed, pending.get("available_actions"))
+                        if pending.get("notes"):
+                            console.print(f"[italic dim]Planner notes:[/] {pending['notes']}\n")
+                        if pending.get("objective"):
+                            console.print(f"[bold]Objective:[/] {pending['objective']}\n")
+
+                        if auto_approve:
+                            plan, feedback, decision, reason = (
+                                proposed, "", "approved", "auto-approved by -y flag"
+                            )
+                        else:
+                            ans = Prompt.ask(
+                                "[bold cyan]Plan[/] ([green]a[/]ccept / [blue]e[/]dit / "
+                                "[yellow]f[/]eedback / [red]r[/]eject)",
+                                choices=["a", "e", "f", "r"],
+                                default="a",
+                            )
+                            if ans == "r":
+                                plan, feedback, decision, reason = (
+                                    proposed, "", "rejected", "Rejected via CLI"
+                                )
+                            elif ans == "e":
+                                plan, feedback = _edit_plan(
+                                    proposed, pending.get("available_actions")
+                                )
+                                decision, reason = "approved", "Plan edited and approved via CLI"
+                            elif ans == "f":
+                                feedback = Prompt.ask("Feedback for every agent", default="")
+                                plan, decision, reason = (
+                                    proposed, "approved", "Plan accepted with operator feedback"
+                                )
+                            else:
+                                plan, feedback, decision, reason = (
+                                    proposed, "", "approved", "Plan accepted via CLI"
+                                )
+
+                        console.print(
+                            f"[green]▶ Resuming: {decision.capitalize()}[/green]\n"
+                        )
+                        await runner.resume_run(
+                            aid,
+                            {
+                                "decision": decision,
+                                "actor": "operator" if not auto_approve else "cli-auto",
+                                "reason": reason,
+                                "approval_id": pending.get("approval_id"),
+                                "plan": plan,
+                                "feedback": feedback,
+                            },
+                        )
+                        progress.start()
+                        progress.update(progress_task, description="Resuming the run…")
+                        continue
+
                     batch = _curl_batch_requests(argv)
     
                     console.print()
@@ -471,7 +747,11 @@ def scan_cmd(
 # ---------------------------------------------------------------------------
 
 
-@app.command("list", help="List all security assessments.")
+@app.command(
+    "list",
+    help="List all security assessments.",
+    epilog="[bold cyan]Helpful Example:[/] [green]aipent list[/]",
+)
 def list_cmd():
     """Display a formatted table of all assessments in the database."""
     async def _execute():
@@ -523,9 +803,13 @@ def list_cmd():
 # ---------------------------------------------------------------------------
 
 
-@app.command("status", help="Show full details, findings, and steps for an assessment.")
+@app.command(
+    "status",
+    help="Show full details, findings, and steps for an assessment.",
+    epilog="[bold cyan]Helpful Example:[/] [green]aipent status 1[/]",
+)
 def status_cmd(
-    assessment_id: int = typer.Argument(..., help="Assessment database ID"),
+    assessment_id: int = typer.Argument(..., help="Assessment database ID (e.g. 1)"),
 ):
     """Inspect assessment findings, steps, and gate status."""
     async def _execute():
@@ -540,9 +824,13 @@ def status_cmd(
 # ---------------------------------------------------------------------------
 
 
-@app.command("report", help="Compile and generate the Typst PDF report for an assessment.")
+@app.command(
+    "report",
+    help="Compile and generate the Typst PDF report for an assessment.",
+    epilog="[bold cyan]Helpful Example:[/] [green]aipent report 1[/]",
+)
 def report_cmd(
-    assessment_id: int = typer.Argument(..., help="Assessment database ID"),
+    assessment_id: int = typer.Argument(..., help="Assessment database ID (e.g. 1)"),
 ):
     """Compile the client-ready PDF report using Typst."""
     async def _execute():
@@ -584,10 +872,14 @@ def report_cmd(
 # ---------------------------------------------------------------------------
 
 
-@app.command("steer", help="Provide an operator steering instruction to the agent.")
+@app.command(
+    "steer",
+    help="Provide an operator steering instruction to the agent.",
+    epilog="[bold cyan]Helpful Examples:[/] \n  [green]aipent steer 1 \"Focus on port 8080\"[/]\n  [green]aipent steer 1 \"Check /rest/products for SQL injection\"[/]",
+)
 def steer_cmd(
-    assessment_id: int = typer.Argument(..., help="Assessment database ID"),
-    instruction: str = typer.Argument(..., help="Guidance or directive for the agent"),
+    assessment_id: int = typer.Argument(..., help="Assessment database ID (e.g. 1)"),
+    instruction: str = typer.Argument(..., help="Guidance or directive for the agent (e.g. 'Focus on port 8080')"),
 ):
     """Inject operator steering into the agent's reasoning loop."""
     async def _execute():
@@ -615,6 +907,38 @@ def steer_cmd(
             )
 
     asyncio.run(_execute())
+
+
+# ---------------------------------------------------------------------------
+# Command: help
+# ---------------------------------------------------------------------------
+
+
+@app.command(
+    "help",
+    help="Show CLI help or detailed documentation for a specific command.",
+    epilog="[bold cyan]Helpful Examples:[/] \n  [green]aipent help[/]\n  [green]aipent help scan[/]",
+)
+def help_cmd(
+    ctx: typer.Context,
+    command: Optional[str] = typer.Argument(
+        None,
+        help="Command to inspect (e.g. 'scan', 'list', 'status', 'report', 'steer')",
+    ),
+):
+    """Display CLI help or command-specific documentation."""
+    if command and ctx.parent:
+        sub = ctx.parent.command.get_command(ctx.parent, command)
+        if sub:
+            console.print(sub.get_help(ctx))
+            return
+        else:
+            console.print(
+                f"[bold red]Unknown command:[/] '{command}'. Available commands: scan, list, status, report, steer"
+            )
+            raise typer.Exit(1)
+    if ctx.parent:
+        console.print(ctx.parent.get_help())
 
 
 # ---------------------------------------------------------------------------
@@ -699,5 +1023,9 @@ async def _print_assessment_summary(aid: int) -> None:
     console.print()
 
 
-if __name__ == "__main__":
+def main() -> None:
     app()
+
+
+if __name__ == "__main__":
+    main()

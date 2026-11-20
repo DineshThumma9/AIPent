@@ -17,6 +17,7 @@ import {
   stopAgent,
 } from './lib/api'
 import type { LocalMessage } from './lib/chatStorage'
+import type { PlanStep } from './lib/schemas'
 import { mergeMessages } from './lib/messages'
 import { applyTheme, readTheme } from './lib/theme'
 import { actionLabel, deriveMission } from './lib/mission'
@@ -269,6 +270,8 @@ export default function App() {
   async function handleDecision(
     decision: 'approved' | 'rejected',
     customReason?: string,
+    plan?: PlanStep[],
+    feedback?: string,
   ) {
     if (!detail || resumeRef.current) return
     const pending = mission?.pendingApproval ?? null
@@ -293,6 +296,8 @@ export default function App() {
         // resolves the review interrupt without an approval id.
         approval_id: pending && pending.id > 0 ? pending.id : undefined,
         step_id: pending?.step_id ?? undefined,
+        plan,
+        feedback,
       })
       if (pending) {
         // The card is settled even if the poll-driven status has not caught up

@@ -18,6 +18,8 @@ def render_brief(
     candidates: list[Finding],
     steering: list[Any] | None = None,
     supervisor_directive: str | None = None,
+    plan: list[dict[str, Any]] | None = None,
+    feedback: str = "",
 ) -> str:
     """Build the brief prompt for a specialist role."""
     targets_str = ", ".join(assessment.targets or ["127.0.0.1"])
@@ -30,6 +32,25 @@ def render_brief(
         f"id={assessment.id} · target={targets_str} · ports={ports_str} · exclusions={exclusions_str}",
         f"request: {request_str!r}",
     ]
+
+    # Operator-approved plan: every role receives the same target and intent.
+    enabled = [step for step in (plan or []) if step.get("enabled") is not False]
+    if enabled:
+        lines = ["\nAPPROVED ASSESSMENT PLAN (operator-reviewed)"]
+        for index, step in enumerate(enabled, start=1):
+            owner = step.get("role") or "any"
+            action = step.get("action") or "investigate"
+            target = step.get("target") or targets_str
+            rationale = step.get("rationale") or ""
+            marker = " [ACTION NOT IN ROLE REGISTRY]" if step.get("valid_action") is False else ""
+            lines.append(
+                f"{index}. [{owner}/{action}] target={target}{marker}\n   why: {rationale}"
+            )
+        lines.append("Use this plan to decide what matters next; do not invent targets or endpoints.")
+        sections.append("\n".join(lines))
+
+    if feedback:
+        sections.append(f"\nOPERATOR FEEDBACK\n{feedback}")
 
     # Evidence board hypotheses
     if board.hypotheses:
@@ -77,6 +98,21 @@ def render_brief(
     # Supervisor directive
     if supervisor_directive:
         sections.append(f"\nSUPERVISOR DIRECTIVE\n{supervisor_directive}")
+
+    # Prior specialist handoff
+    if getattr(board, "last_handoff", None):
+        lh = board.last_handoff
+        from_role = lh.get("role") or "prior specialist"
+        summary = lh.get("summary") or ""
+        recs = lh.get("recommended_actions") or []
+        lines = [f"\nPRIOR SPECIALIST HANDOFF (from {from_role})"]
+        if summary:
+            lines.append(f"Summary: {summary}")
+        if recs:
+            lines.append("Recommended actions:")
+            for r in recs[:5]:
+                lines.append(f"- {r}")
+        sections.append("\n".join(lines))
 
     # Operator steering
     if steering:

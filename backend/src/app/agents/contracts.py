@@ -12,6 +12,23 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator,model_validator
 
 
+class PlanStep(BaseModel):
+    """One operator-reviewable step of the initial assessment plan."""
+
+    role: str = "recon"
+    action: str = Field(min_length=1, max_length=80)
+    target: str = Field(min_length=1, max_length=300)
+    rationale: str = Field(default="", max_length=1000)
+    enabled: bool = True
+
+
+class PlanProposal(BaseModel):
+    """Structured output from the supervisor's initial planning turn."""
+
+    steps: list[PlanStep] = Field(default_factory=list, max_length=16)
+    notes: str = Field(default="", max_length=1000)
+
+
 class ActionRequest(BaseModel):
     """One prepared tool call, before approval/execution."""
 
@@ -224,6 +241,7 @@ class EvidenceBoard(BaseModel):
     decisions: list[DecisionRecord] = Field(default_factory=list)
     open_questions: list[str] = Field(default_factory=list)
     coverage: dict[str, Any] = Field(default_factory=dict)
+    last_handoff: dict[str, Any] | None = None
 
 
 class SteeringNote(BaseModel):

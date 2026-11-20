@@ -48,6 +48,8 @@ DEFAULT_ACTION_POLICIES: dict[str, ActionPolicy] = {
     "sqlmap_scan": ActionPolicy(risk="high", approve=True),
     "hashcat_crack": ActionPolicy(risk="high", approve=True),
     "hash_identify": ActionPolicy(risk="low", approve=False),
+    # The initial assessment plan is always reviewed before any scan runs.
+    "initial_plan": ActionPolicy(risk="low", approve=True),
 }
 
 

@@ -125,7 +125,9 @@ export function applyEvent(
             // gate_open is derived by the backend from this status. Keep the
             // local copy in step so a reconnect-less status change does not
             // leave an approval gate closed forever.
-            gate_open: event.data.status === 'awaiting_approval',
+            gate_open:
+              event.data.status === 'awaiting_approval' ||
+              event.data.status === 'awaiting_plan',
           }
         : detail
 
@@ -158,7 +160,9 @@ export function applyEvent(
         // opens it once the status event confirms the run is waiting.
         gate_open:
           approval.decision === 'pending'
-            ? detail.gate_open || detail.status === 'awaiting_approval'
+            ? detail.gate_open ||
+              detail.status === 'awaiting_approval' ||
+              detail.status === 'awaiting_plan'
             : false,
       }
     }

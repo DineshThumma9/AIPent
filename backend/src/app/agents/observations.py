@@ -6,9 +6,10 @@ Transforms executed Steps, Evidence, and Findings into compact Observations.
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
+import re
 from typing import Any
+import urllib.parse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -67,6 +68,133 @@ def _curl_batch_facts(entry: dict[str, Any]) -> dict[str, Any]:
         "body_excerpt": excerpt,
         "error": str(error)[:300] if error else None,
     }
+
+
+def _extract_curl_entities(
+    request_url: str,
+    headers: dict[str, Any],
+    body: Any,
+) -> tuple[list[str], list[str], list[str]]:
+    """Extract candidate routes, file links, and JSON keys from curl responses."""
+    extracted_routes: set[str] = set()
+    extracted_files: set[str] = set()
+    json_keys: list[str] = []
+
+    if not isinstance(body, str):
+        if isinstance(body, (dict, list)):
+            body_str = json.dumps(body)
+        else:
+            body_str = str(body) if body is not None else ""
+    else:
+        body_str = body
+
+    url_lower = (request_url or "").lower()
+    url_path = ""
+    try:
+        url_path = urllib.parse.urlparse(request_url or "").path
+    except Exception:
+        url_path = ""
+
+    ct = ""
+    if isinstance(headers, dict):
+        for k, v in headers.items():
+            if str(k).lower() == "content-type":
+                ct = str(v).lower()
+                break
+
+    is_js = ".js" in url_lower or "javascript" in ct
+    is_html = (
+        "html" in ct
+        or "<html" in body_str[:500].lower()
+        or "<!doctype html" in body_str[:500].lower()
+    )
+    is_dir_listing = is_html and any(
+        ind in body_str[:2000].lower()
+        for ind in [
+            "index of",
+            "listing directory",
+            'id="indexlist"',
+            'id="directory"',
+            '<table id="indexlist"',
+        ]
+    )
+
+    # 1. Parse JSON if possible
+    parsed_json = None
+    if "json" in ct or body_str.strip().startswith(("{", "[")):
+        try:
+            parsed_json = (
+                json.loads(body_str) if isinstance(body_str, str) else body_str
+            )
+        except Exception:
+            parsed_json = None
+
+    if isinstance(parsed_json, dict):
+        json_keys = list(parsed_json.keys())[:50]
+        if "paths" in parsed_json and isinstance(parsed_json["paths"], dict):
+            for p in parsed_json["paths"].keys():
+                if str(p).startswith("/"):
+                    extracted_routes.add(str(p))
+    elif isinstance(parsed_json, list) and parsed_json and isinstance(parsed_json[0], dict):
+        json_keys = list(parsed_json[0].keys())[:50]
+
+    # 2. Extract routes from JS, JSON, or HTML
+    route_matches = re.findall(
+        r"""["'`]((?:https?://[^"'`\s]+)?/(?:rest|api|auth|oauth|admin|ftp|file|redirect|profile|promotion|assets|v\d+)[a-zA-Z0-9_\-/\.:]*)["'`]""",
+        body_str,
+    )
+    for rm in route_matches:
+        r_str = rm.strip()
+        if r_str.startswith(("http://", "https://")):
+            try:
+                r_str = urllib.parse.urlparse(r_str).path
+            except Exception:
+                pass
+        cleaned_route = r_str.rstrip(".,;:'\")")
+        if len(cleaned_route) > 2 and cleaned_route.startswith("/"):
+            extracted_routes.add(cleaned_route)
+
+    # 3. Extract files/links from directory listings or HTML
+    if is_dir_listing or "/ftp" in url_lower:
+        href_matches = re.findall(
+            r"""<a\s+[^>]*href=["']([^"']+)["']""", body_str, flags=re.IGNORECASE
+        )
+        for href in href_matches:
+            h = href.strip()
+            if not h or h.startswith(("?", "#", "javascript:", "mailto:", "http://", "https://")):
+                continue
+            if h in (".", "..", "./", "../", "/"):
+                continue
+            if h.lower() in ("parent directory", "parent directory/"):
+                continue
+            if url_path and h.strip("/") == url_path.strip("/"):
+                continue
+            if h.startswith("./"):
+                h = h[2:]
+            extracted_files.add(h)
+    elif is_html:
+        # On normal HTML, extract scripts and linked files
+        script_matches = re.findall(
+            r"""<script\s+[^>]*src=["']([^"']+)["']""", body_str, flags=re.IGNORECASE
+        )
+        for s in script_matches:
+            s_clean = s.strip()
+            if not s_clean.startswith(("http://", "https://", "//")):
+                extracted_files.add(s_clean)
+        # Also linked download files
+        file_hrefs = re.findall(
+            r"""<a\s+[^>]*href=["']([^"']+\.(?:md|txt|bak|zip|pdf|kdbx|json|yml|yaml|pyc|log|sql|conf|db|tar|gz))["']""",
+            body_str,
+            flags=re.IGNORECASE,
+        )
+        for f in file_hrefs:
+            extracted_files.add(f.strip())
+
+    return (
+        sorted(list(extracted_routes))[:100],
+        sorted(list(extracted_files))[:100],
+        json_keys,
+    )
 
 
 async def _async_observation_from_step(session: AsyncSession, step: Step) -> Observation:
@@ -297,6 +425,19 @@ def _build_pure_observation(
                 for entry in (p_data.get("results") or [])
                 if isinstance(entry, dict)
             ]
+            batch_routes: set[str] = set()
+            batch_files: set[str] = set()
+            for entry in (p_data.get("results") or []):
+                if isinstance(entry, dict):
+                    res_obj = entry.get("result") if isinstance(entry.get("result"), dict) else {}
+                    resp_obj = res_obj.get("response") if isinstance(res_obj.get("response"), dict) else {}
+                    b_url = str(entry.get("request", {}).get("url") or res_obj.get("request", {}).get("url") or "")
+                    b_hdrs = resp_obj.get("headers") or {}
+                    b_body = resp_obj.get("body") or res_obj.get("body") or ""
+                    r_routes, r_files, _ = _extract_curl_entities(b_url, b_hdrs, b_body)
+                    batch_routes.update(r_routes)
+                    batch_files.update(r_files)
+
             parts: list[str] = []
             for item in results:
                 label = f"#{item['index']}" if item.get("index") is not None else "#"
@@ -332,6 +473,13 @@ def _build_pure_observation(
                 next_hint = "Compare the successful responses. Batch only independent probes; follow dependent auth flows with single requests."
             else:
                 next_hint = "Compare each result against expected_observation and would_falsify."
+
+            facts_dict: dict[str, Any] = {"batch": True, "results": results}
+            if batch_routes:
+                facts_dict["extracted_routes"] = sorted(list(batch_routes))[:100]
+            if batch_files:
+                facts_dict["extracted_files"] = sorted(list(batch_files))[:100]
+
             return Observation(
                 ok=True,
                 status="succeeded",
@@ -343,7 +491,7 @@ def _build_pure_observation(
                 findings_updated=updated_ids,
                 evidence_ids=evidence_ids,
                 artifact=artifact_info,
-                facts={"batch": True, "results": results},
+                facts=facts_dict,
                 errors=[item["error"] for item in results if item.get("error")],
                 next_hint=next_hint,
             )
@@ -399,13 +547,45 @@ def _build_pure_observation(
         except (TypeError, ValueError):
             json_items = None
 
+        extracted_routes, extracted_files, json_keys = _extract_curl_entities(
+            request_url=request_url,
+            headers=headers,
+            body=body_full,
+        )
+
         status_part = f"HTTP {http_status}" if http_status is not None else "HTTP request succeeded"
         if json_items is not None:
             status_part += f" ({json_items} items)"
         body_part = f" - excerpt: {body_excerpt!r}" if body_excerpt else ""
         summary_str = f"{status_part}{body_part}"
 
-        if http_status in (400, 422):
+        extra_parts: list[str] = []
+        if extracted_routes:
+            sample_r = ", ".join(extracted_routes[:8])
+            if len(extracted_routes) > 8:
+                sample_r += f", ... (+{len(extracted_routes) - 8} more)"
+            extra_parts.append(f"extracted {len(extracted_routes)} route(s): [{sample_r}]")
+        if extracted_files:
+            sample_f = ", ".join(extracted_files[:8])
+            if len(extracted_files) > 8:
+                sample_f += f", ... (+{len(extracted_files) - 8} more)"
+            extra_parts.append(f"extracted {len(extracted_files)} file(s): [{sample_f}]")
+        if extra_parts:
+            summary_str = f"{summary_str} | {' | '.join(extra_parts)}"
+
+        if extracted_routes:
+            sample_routes_hint = ", ".join(extracted_routes[:5])
+            next_hint = (
+                f"Discovered {len(extracted_routes)} client/API routes in response (e.g. {sample_routes_hint}). "
+                "Probe these discovered routes with curl_request rather than guessing paths."
+            )
+        elif extracted_files:
+            sample_files_hint = ", ".join(extracted_files[:5])
+            next_hint = (
+                f"Discovered {len(extracted_files)} file link(s) (e.g. {sample_files_hint}). "
+                "Inspect or retrieve relevant files with curl_request."
+            )
+        elif http_status in (400, 422):
             next_hint = "HTTP 4xx: Server rejected request syntax or payload structure. Inspect response body for validation errors, adjust JSON fields/headers, and retry."
         elif http_status in (401, 403):
             next_hint = f"HTTP {http_status}: Authentication or authorization required. Analyze headers, test for bypass, or inspect public paths."
@@ -424,6 +604,20 @@ def _build_pure_observation(
         else:
             next_hint = "Compare observed HTTP status and response against expected_observation and would_falsify."
 
+        facts: dict[str, Any] = {
+            "status_code": http_status,
+            "headers": headers,
+            "body_preview": body_excerpt,
+            "json_items": json_items,
+            "request_url": request_url,
+        }
+        if extracted_routes:
+            facts["extracted_routes"] = extracted_routes
+        if extracted_files:
+            facts["extracted_files"] = extracted_files
+        if json_keys:
+            facts["keys"] = json_keys
+
         return Observation(
             ok=True,
             status="succeeded",
@@ -435,13 +629,7 @@ def _build_pure_observation(
             findings_updated=updated_ids,
             evidence_ids=evidence_ids,
             artifact=artifact_info,
-            facts={
-                "status_code": http_status,
-                "headers": headers,
-                "body_preview": body_excerpt,
-                "json_items": json_items,
-                "request_url": request_url,
-            },
+            facts=facts,
             errors=[],
             next_hint=next_hint,
         )

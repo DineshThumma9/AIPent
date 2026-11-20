@@ -200,3 +200,168 @@ async def test_curl_observation_reports_json_row_count(engine, tmp_path):
         assert obs.facts["json_items"] == 46
         assert "46 items" in obs.summary
         assert "record_finding" in (obs.next_hint or "")
+
+
+@pytest.mark.asyncio
+async def test_curl_observation_extracts_routes_from_javascript(engine, tmp_path):
+    async with get_async_session_ctx() as session:
+        assessment = Assessment(title="Lab JS", targets=["127.0.0.1"], ports=[3000])
+        session.add(assessment)
+        await session.commit()
+        await session.refresh(assessment)
+
+        js_content = """
+        // Application routes
+        const loginUrl = "/rest/user/login";
+        const captchaEndpoint = "/rest/captcha";
+        const feedbackApi = "/api/Feedbacks";
+        fetch("/rest/image-captcha/");
+        """
+        path = tmp_path / "main.js.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "ok": True,
+                    "code": 200,
+                    "request": {"url": "http://127.0.0.1:3000/main.js"},
+                    "response": {
+                        "status_code": 200,
+                        "headers": {"content-type": "application/javascript"},
+                        "body": js_content,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        step = Step(
+            assessment_id=assessment.id,
+            seq=1,
+            action="curl_request",
+            target="127.0.0.1",
+            status=StepStatus.SUCCEEDED.value,
+            output_path=str(path),
+        )
+        session.add(step)
+        await session.commit()
+        await session.refresh(step)
+
+        obs = await observation_from_step(session, step)
+        assert obs.facts is not None
+        routes = obs.facts.get("extracted_routes") or []
+        assert "/rest/captcha" in routes
+        assert "/api/Feedbacks" in routes
+        assert "/rest/user/login" in routes
+        assert "/rest/image-captcha/" in routes
+        assert "extracted 4 route(s)" in obs.summary
+        assert "Probe these discovered routes" in (obs.next_hint or "")
+
+
+@pytest.mark.asyncio
+async def test_curl_observation_extracts_files_from_directory_listing(engine, tmp_path):
+    async with get_async_session_ctx() as session:
+        assessment = Assessment(title="Lab Dir", targets=["127.0.0.1"], ports=[3000])
+        session.add(assessment)
+        await session.commit()
+        await session.refresh(assessment)
+
+        html_ftp = """
+        <!DOCTYPE html><html><head><title>listing directory /ftp</title></head><body>
+        <a href=".">.</a>
+        <a href="ftp">ftp</a>
+        <a href="ftp/acquisitions.md">acquisitions.md</a>
+        <a href="ftp/eastere.gg">eastere.gg</a>
+        <a href="ftp/package.json.bak">package.json.bak</a>
+        </body></html>
+        """
+        path = tmp_path / "ftp.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "ok": True,
+                    "code": 200,
+                    "request": {"url": "http://127.0.0.1:3000/ftp"},
+                    "response": {
+                        "status_code": 200,
+                        "headers": {"content-type": "text/html"},
+                        "body": html_ftp,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        step = Step(
+            assessment_id=assessment.id,
+            seq=1,
+            action="curl_request",
+            target="127.0.0.1",
+            status=StepStatus.SUCCEEDED.value,
+            output_path=str(path),
+        )
+        session.add(step)
+        await session.commit()
+        await session.refresh(step)
+
+        obs = await observation_from_step(session, step)
+        assert obs.facts is not None
+        files = obs.facts.get("extracted_files") or []
+        assert "ftp/acquisitions.md" in files
+        assert "ftp/eastere.gg" in files
+        assert "ftp/package.json.bak" in files
+        assert "." not in files
+        assert "extracted 3 file(s)" in obs.summary
+
+
+@pytest.mark.asyncio
+async def test_curl_observation_extracts_keys_and_routes_from_large_json(engine, tmp_path):
+    async with get_async_session_ctx() as session:
+        assessment = Assessment(title="Lab JSON", targets=["127.0.0.1"], ports=[3000])
+        session.add(assessment)
+        await session.commit()
+        await session.refresh(assessment)
+
+        swagger_json = {
+            "swagger": "2.0",
+            "info": {"title": "API", "version": "1.0"},
+            "paths": {
+                "/api/Feedbacks": {"post": {}},
+                "/rest/captcha": {"get": {}},
+                "/api/Users": {"get": {}},
+            },
+        }
+        path = tmp_path / "swagger.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "ok": True,
+                    "code": 200,
+                    "request": {"url": "http://127.0.0.1:3000/api-docs"},
+                    "response": {
+                        "status_code": 200,
+                        "headers": {"content-type": "application/json"},
+                        "body": json.dumps(swagger_json),
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        step = Step(
+            assessment_id=assessment.id,
+            seq=1,
+            action="curl_request",
+            target="127.0.0.1",
+            status=StepStatus.SUCCEEDED.value,
+            output_path=str(path),
+        )
+        session.add(step)
+        await session.commit()
+        await session.refresh(step)
+
+        obs = await observation_from_step(session, step)
+        assert obs.facts is not None
+        keys = obs.facts.get("keys") or []
+        routes = obs.facts.get("extracted_routes") or []
+        assert "swagger" in keys
+        assert "paths" in keys
+        assert "/api/Feedbacks" in routes
+        assert "/rest/captcha" in routes
+        assert "/api/Users" in routes

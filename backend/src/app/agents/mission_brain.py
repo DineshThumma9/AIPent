@@ -15,10 +15,11 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.audit_repo import audit
-from app.agents.prompts import ROLE_PROMPTS
+from app.agents.prompts import PLAN_PROMPT, ROLE_PROMPTS
 if TYPE_CHECKING:
     from app.agents.state import AssessmentState
-from app.agents.contracts import FailureSignal, RouteDecision
+from app.agents.contracts import FailureSignal, PlanProposal, PlanStep, RouteDecision
+from app.agents.tool_specs import ROLE_TOOLS
 from app.core.config import settings
 from app.core.db import get_async_session_ctx
 from app.core.log import get_logger
@@ -42,6 +43,10 @@ class MissionDigest(BaseModel):
     assessment_id: int
     run_id: str
     status: str = "running"
+    objective: str = ""
+    plan: list[dict[str, Any]] = Field(default_factory=list)
+    plan_source: str = ""
+    feedback: str = ""
     targets: list[str] = Field(default_factory=list)
     ports: list[int] = Field(default_factory=list)
     exclusions: list[str] = Field(default_factory=list)
@@ -137,6 +142,10 @@ async def build_mission_digest(
         assessment_id=assessment_id,
         run_id=run_id,
         status="running",
+        objective=(assessment.request if assessment else "") or "",
+        plan=[s for s in state.get("plan", []) if s.get("enabled") is not False],
+        plan_source=state.get("plan_source", "") or "",
+        feedback=state.get("plan_feedback", "") or "",
         targets=targets,
         ports=ports,
         exclusions=exclusions,
@@ -312,6 +321,214 @@ def _extract_route_decision(raw_obj: Any) -> RouteDecision | None:
                 pass
 
     return None
+
+
+PLAN_ROLES = ("recon", "discovery", "validation", "review")
+
+
+def available_plan_actions() -> dict[str, list[str]]:
+    """Action names each role may use, as advertised to the planner and UI."""
+    actions: dict[str, list[str]] = {}
+    for role in PLAN_ROLES:
+        names: list[str] = []
+        for spec in ROLE_TOOLS.get(role, []):
+            for value in (getattr(spec, "name", None), getattr(spec, "action", None)):
+                if value and value not in names:
+                    names.append(value)
+        if role == "review":
+            names.append("final_review")
+        actions[role] = names
+    return actions
+
+
+def normalize_plan_steps(raw: Any) -> list[dict[str, Any]]:
+    """Coerce a model/operator plan into bounded, serialisable step dicts."""
+    if isinstance(raw, dict):
+        raw = raw.get("steps") or raw.get("plan") or []
+    if not isinstance(raw, list):
+        return []
+
+    allowed = available_plan_actions()
+    steps: list[dict[str, Any]] = []
+    for item in raw[:16]:
+        if isinstance(item, PlanStep):
+            item = item.model_dump()
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "recon").strip().lower()
+        if role not in PLAN_ROLES:
+            role = "recon"
+        action = str(item.get("action") or "").strip()
+        target = str(item.get("target") or "").strip()
+        if not action or not target:
+            continue
+        rationale = str(item.get("rationale") or "").strip()[:1000]
+        steps.append(
+            {
+                "role": role,
+                "action": action[:80],
+                "target": target[:300],
+                "rationale": rationale,
+                "enabled": item.get("enabled") is not False,
+                "valid_action": action in allowed.get(role, []),
+            }
+        )
+    return steps
+
+
+def _template_plan(
+    objective: str, targets: list[str], ports: list[int]
+) -> list[dict[str, Any]]:
+    """Deterministic methodology fallback when the planner model is unavailable."""
+    host = (targets or ["127.0.0.1"])[0]
+    port = ports[0] if ports else None
+    where = f"{host}:{port}" if port else host
+    text = (objective or "").lower()
+
+    steps: list[dict[str, Any]] = [
+        {
+            "role": "recon",
+            "action": "recon_services",
+            "target": host,
+            "rationale": f"Confirm the authorized surface on {where} and identify service/version banners before probing anything else.",
+        },
+        {
+            "role": "recon" if "whatweb" in available_plan_actions()["recon"] else "discovery",
+            "action": "whatweb" if "whatweb" in available_plan_actions()["recon"] else "curl_request",
+            "target": host,
+            "rationale": f"Fingerprint the technology behind {where} so later probes match the actual stack.",
+        },
+        {
+            "role": "discovery",
+            "action": "dirb_scan",
+            "target": host,
+            "rationale": f"Enumerate common paths on {where}; use only discovered endpoints in later steps.",
+        },
+    ]
+
+    if any(word in text for word in ("access control", "idor", "forged", "authorization", "auth bypass", "broken access")):
+        steps.append(
+            {
+                "role": "discovery",
+                "action": "curl_request",
+                "target": host,
+                "rationale": "Probe discovered authenticated surfaces and record identifiers/parameters that could be varied between users.",
+            }
+        )
+        steps.append(
+            {
+                "role": "validation",
+                "action": "curl_request",
+                "target": host,
+                "rationale": "Verify suspected access-control behavior across two contexts; treat a CAPTCHA/auth precondition failure as inconclusive, not proof.",
+            }
+        )
+    elif any(word in text for word in ("sql", "sqli", "injection")):
+        steps.append(
+            {
+                "role": "discovery",
+                "action": "curl_request",
+                "target": host,
+                "rationale": "Locate parameters that reflect or alter server-side behavior on already discovered endpoints.",
+            }
+        )
+        steps.append(
+            {
+                "role": "validation",
+                "action": "sqlmap_scan",
+                "target": host,
+                "rationale": "Run one bounded sqlmap probe on an exact discovered endpoint/parameter; do not conclude 'not injectable' without it.",
+            }
+        )
+    else:
+        steps.append(
+            {
+                "role": "discovery",
+                "action": "curl_request",
+                "target": host,
+                "rationale": "Probe the most relevant discovered endpoints and record observations with evidence for correlation.",
+            }
+        )
+        steps.append(
+            {
+                "role": "validation",
+                "action": "curl_request",
+                "target": host,
+                "rationale": "Confirm or refute the hypothesis with a discriminating non-destructive probe on an observed endpoint.",
+            }
+        )
+
+    steps.append(
+        {
+            "role": "review",
+            "action": "final_review",
+            "target": host,
+            "rationale": "Assemble verified evidence, separate observed facts from inferences, and prepare the final report.",
+        }
+    )
+    return normalize_plan_steps(steps)
+
+
+async def generate_initial_plan(
+    objective: str,
+    targets: list[str],
+    ports: list[int] | None = None,
+    exclusions: list[str] | None = None,
+    feedback: str | None = None,
+    chat_model: Any | None = None,
+) -> tuple[list[dict[str, Any]], str, str]:
+    """Produce the initial, generic plan for analyst review.
+
+    Returns ``(steps, source, notes)``. The model is advisory; Python always
+    normalises the actions so operators cannot be handed invalid tools.
+    """
+    ports = ports or []
+    exclusions = exclusions or []
+    fallback = _template_plan(objective, targets, ports)
+    actions = available_plan_actions()
+    actions_text = "\n".join(
+        f"  {role}: {', '.join(names)}" for role, names in actions.items()
+    )
+    user_content = (
+        f"OBJECTIVE:\n{objective or 'Assess the authorized target within scope.'}\n\n"
+        f"TARGETS: {targets or ['127.0.0.1']}\n"
+        f"PORTS: {ports or ['tool default']}\n"
+        f"EXCLUSIONS: {exclusions or ['none']}\n"
+        f"OPERATOR FEEDBACK: {feedback or 'none'}\n\n"
+        f"AVAILABLE ACTIONS (role: exact action names):\n{actions_text}\n"
+    )
+
+    model = chat_model
+    if model is None:
+        try:
+            from app.agents.model import build_role_model
+
+            model = build_role_model("supervisor")
+        except Exception as exc:  # noqa: BLE001 - degrade to deterministic plan
+            log.warning("planner model build failed: %s", exc)
+            return fallback, "template", "Planner model unavailable; used the standard methodology template."
+
+    try:
+        structured = model.with_structured_output(PlanProposal)
+        proposal = await structured.ainvoke(
+            [SystemMessage(content=PLAN_PROMPT), HumanMessage(content=user_content)],
+            config={"run_name": "supervisor-initial-plan", "tags": ["planning"]},
+        )
+        if isinstance(proposal, dict):
+            proposal = PlanProposal.model_validate(proposal)
+        steps = normalize_plan_steps(getattr(proposal, "steps", []))
+        if steps:
+            notes = str(getattr(proposal, "notes", "") or "")
+            if feedback:
+                notes = f"Operator feedback: {feedback}. {notes}".strip()
+            return steps, "llm", notes[:1000]
+    except Exception as exc:  # noqa: BLE001 - degrade to deterministic plan
+        log.warning("initial plan generation failed: %s", exc)
+
+    notes = "Generated from the standard methodology template."
+    if feedback:
+        notes = f"Operator feedback: {feedback}. {notes}"
+    return fallback, "template", notes[:1000]
 
 
 async def run_supervisor_agent(

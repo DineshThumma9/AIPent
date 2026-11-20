@@ -20,6 +20,7 @@ from app.agents.nodes import (
     intake_node,
     make_execute_node,
     model_node,
+    plan_node,
     prepare_node,
     report_node,
     report_writer_node,
@@ -46,6 +47,7 @@ def build_assessment_graph_v2(
     builder = StateGraph(AssessmentState)
 
     builder.add_node("intake", intake_node)
+    builder.add_node("plan", plan_node)
     builder.add_node("supervisor", supervisor_node)
     builder.add_node("model", model_node)
     builder.add_node("prepare", prepare_node)
@@ -141,14 +143,10 @@ async def prepare_run(
             get_logger("agent.graph").debug("challenge baseline unavailable: %s", exc)
 
     audit_repo = AuditRepo(session)
-    from app.agents.model import role_model_config
-    from app.core.log import get_logger
+    from app.agents.run_config import build_run_manifest, log_run_manifest
 
-    role_models = role_model_config()
-    run_log = get_logger("agent.run")
-    run_log.info("run %s model config (provider/model per role):", assessment_id)
-    for role, cfg in role_models.items():
-        run_log.info("  %-12s %-12s %s", role, cfg["provider"], cfg["model"])
+    manifest = build_run_manifest(assessment_id)
+    log_run_manifest(manifest)
 
     await audit_repo.add(
         assessment_id=assessment_id,
@@ -156,7 +154,8 @@ async def prepare_run(
         payload={
             "actor": actor,
             "mode": "three_role_loop",
-            "models": role_models,
+            "models": manifest["models"],
+            "config": manifest,
         },
         actor=actor,
     )

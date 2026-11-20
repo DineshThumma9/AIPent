@@ -46,9 +46,18 @@ async def load_assessment_detail(
             (pending_approval.detail or {}).get("requires_approval", True) is not False
         )
     gate_open = (
-        assessment.status == AssessmentStatus.AWAITING_APPROVAL.value
+        assessment.status
+        in (AssessmentStatus.AWAITING_APPROVAL.value, AssessmentStatus.AWAITING_PLAN.value)
         and requires_approval
     )
+
+    run_config: dict = {}
+    for row in audit:
+        if row.event_type == "run.requested":
+            config = (row.payload or {}).get("config")
+            if isinstance(config, dict):
+                run_config = config
+                break
 
     from app.agents.reasoning import build_evidence_board
 
@@ -94,5 +103,6 @@ async def load_assessment_detail(
         gate_open=gate_open,
         active_role=active_role,
         run_id=run_id,
+        run_config=run_config,
         reasoning=board,
     )

@@ -62,7 +62,7 @@ async def intake_node(state: AssessmentState) -> Command:
             "failure_signal": None,
             "supervisor_calls": 0,
             "observations": [],
-            "next_node": "supervisor",
+            "next_node": "plan",
         },
-        goto="supervisor",
+        goto="plan",
     )

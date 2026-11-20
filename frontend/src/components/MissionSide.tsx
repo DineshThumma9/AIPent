@@ -10,6 +10,19 @@ import {
 import { SeverityMark, StatusMark } from './StatusMark'
 import { ReasoningPanel } from './ReasoningPanel'
 
+type PlanSummaryStep = {
+  role?: string
+  action?: string
+  target?: string
+  rationale?: string
+}
+
+function approvedPlanSteps(detail: AssessmentDetail): PlanSummaryStep[] {
+  const row = detail.audit.find((event) => event.event_type === 'plan.approved')
+  const raw = row?.payload?.plan
+  return Array.isArray(raw) ? (raw as PlanSummaryStep[]) : []
+}
+
 function ScopeSide({ detail }: { detail: AssessmentDetail }) {
   return (
     <section className="side-panel" aria-labelledby="scope-title">
@@ -51,11 +64,70 @@ function ScopeSide({ detail }: { detail: AssessmentDetail }) {
           </dd>
         </div>
       </dl>
+
+      {Object.keys(detail.run_config?.models ?? {}).length > 0 && (
+        <details className="side-details">
+          <summary>Run configuration</summary>
+          <ul className="runtime-models">
+            {Object.entries(
+              detail.run_config.models as Record<string, { provider?: string; model?: string }>,
+            ).map(([role, cfg]) => (
+              <li key={role}>
+                <span className="mono runtime-role">{role}</span>
+                <span className="mono runtime-model">
+                  {cfg.provider} / {cfg.model}
+                </span>
+              </li>
+            ))}
+          </ul>
+          <dl className="scope-facts">
+            {Object.entries(
+              (detail.run_config.budgets ?? {}) as Record<string, unknown>,
+            ).map(([key, value]) => (
+              <div key={key}>
+                <dt>{key.replaceAll('_', ' ')}</dt>
+                <dd className="mono">
+                  {typeof value === 'object' ? JSON.stringify(value) : String(value)}
+                </dd>
+              </div>
+            ))}
+            <div>
+              <dt>tools by role</dt>
+              <dd className="mono">
+                {Object.entries(
+                  (detail.run_config.tool_counts ?? {}) as Record<string, number>,
+                )
+                  .map(([role, count]) => `${role}:${count}`)
+                  .join(' · ')}
+              </dd>
+            </div>
+            <div>
+              <dt>call limits</dt>
+              <dd className="mono">
+                {Object.entries(
+                  (detail.run_config.tool_limits ?? {}) as Record<string, Record<string, number>>,
+                )
+                  .map(
+                    ([role, limits]) =>
+                      `${role}: tool ${limits.tool_thread_limit}/${limits.tool_run_limit}`,
+                  )
+                  .join(' · ')}
+              </dd>
+            </div>
+          </dl>
+        </details>
+      )}
     </section>
   )
 }
 
-function RoleLane({ mission }: { mission: MissionView }) {
+function RoleLane({
+  mission,
+  plan,
+}: {
+  mission: MissionView
+  plan: PlanSummaryStep[]
+}) {
   return (
     <section className="side-panel" aria-labelledby="roles-title">
       <div className="side-head">
@@ -89,9 +161,10 @@ function RoleLane({ mission }: { mission: MissionView }) {
                   <span className="role-state mono">{state}</span>
                 </div>
                 <p className="role-mission">{role.mission}</p>
-                {role.turns > 0 && (
+                {(role.turns > 0 || role.turnCap > 0) && (
                   <p className="role-turns mono">
-                    {role.turns} turn{role.turns === 1 ? '' : 's'}
+                    {role.turns}/{role.turnCap || '?'} turns
+                    {role.capReached ? ' · cap reached' : ''}
                   </p>
                 )}
                 {role.handoff?.summary && (
@@ -102,6 +175,24 @@ function RoleLane({ mission }: { mission: MissionView }) {
           )
         })}
       </ol>
+
+      {plan.length > 0 && (
+        <details className="side-details">
+          <summary>Approved plan · {plan.length} steps</summary>
+          <ol className="plan-list">
+            {plan.map((step, index) => (
+              <li key={`${step.action}-${index}`}>
+                <span className="plan-action mono">
+                  {step.role ? `${step.role} / ` : ''}
+                  {step.action}
+                </span>
+                <span className="plan-target mono">{step.target}</span>
+                {step.rationale && <p className="plan-rationale">{step.rationale}</p>}
+              </li>
+            ))}
+          </ol>
+        </details>
+      )}
     </section>
   )
 }
@@ -355,7 +446,7 @@ export function MissionSide({
   return (
     <aside className="mission-side" aria-label="Mission record">
       <ScopeSide detail={detail} />
-      <RoleLane mission={mission} />
+      <RoleLane mission={mission} plan={approvedPlanSteps(detail)} />
       <FindingsSide mission={mission} />
       <ReasoningPanel board={mission.reasoning} />
       <GatesSide detail={detail} />

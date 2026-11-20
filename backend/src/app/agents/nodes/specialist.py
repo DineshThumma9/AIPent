@@ -111,17 +111,31 @@ async def brief_node(state: AssessmentState) -> Command:
         candidates=context.candidates,
         steering=context.steering_notes,
         supervisor_directive=directive,
+        plan=state.get("plan"),
+        feedback=state.get("plan_feedback", "") or "",
     )
 
+    role_key = f"{role}_messages" if role in ("recon", "discovery", "validation") else None
+    existing_role_msgs = list(state.get(role_key, [])) if role_key else []
+
+    if existing_role_msgs:
+        role_msgs = [*existing_role_msgs, HumanMessage(content=f"MISSION UPDATE & DIRECTIVE:\n{digest}")]
+    else:
+        role_msgs = [HumanMessage(content=digest)]
+
+    update_dict: dict[str, Any] = {
+        "messages": role_msgs,
+        "pending_action": None,
+        "approval_decision": None,
+        "supervisor_directive": None,
+        "nudges": 0,
+        "no_progress": 0,
+    }
+    if role_key:
+        update_dict[role_key] = role_msgs
+
     return Command(
-        update={
-            "messages": [HumanMessage(content=digest)],
-            "pending_action": None,
-            "approval_decision": None,
-            "supervisor_directive": None,
-            "nudges": 0,
-            "no_progress": 0,
-        },
+        update=update_dict,
         goto="model",
     )
 
@@ -129,8 +143,11 @@ async def brief_node(state: AssessmentState) -> Command:
 async def model_node(state: AssessmentState) -> Command:
     """Invoke role model and route tool calls or handoff."""
     role = state["role"]
+    assessment_id = state["assessment_id"]
     cap = min(ROLE_TURN_CAPS.get(role, 8), settings.max_agent_turns)
     turns = dict(state.get("turns", {}))
+
+    role_key = f"{role}_messages" if role in ("recon", "discovery", "validation") else None
 
     if turns.get(role, 0) >= cap:
         signal = FailureSignal(
@@ -139,11 +156,27 @@ async def model_node(state: AssessmentState) -> Command:
             summary=f"{role} reached its model-call budget ({cap} turns) without a handoff.",
             attempts=turns.get(role, 0),
         )
+        async with get_async_session_ctx() as session:
+            await AuditRepo(session).record_event(
+                assessment_id=assessment_id,
+                event_type="role.budget_exhausted",
+                payload={
+                    "run_id": state.get("run_id"),
+                    "role": role,
+                    "cap": cap,
+                    "attempts": turns.get(role, 0),
+                    "kind": "budget_exhausted",
+                },
+            )
+            await session.commit()
+        update_dict: dict[str, Any] = {
+            "last_message": signal.summary,
+            "failure_signal": signal.model_dump(),
+        }
+        if role_key:
+            update_dict[role_key] = state.get("messages", [])
         return Command(
-            update={
-                "last_message": signal.summary,
-                "failure_signal": signal.model_dump(),
-            },
+            update=update_dict,
             goto="supervisor",
         )
 
@@ -157,11 +190,14 @@ async def model_node(state: AssessmentState) -> Command:
             ),
             attempts=turns.get(role, 0),
         )
+        update_dict = {
+            "last_message": signal.summary,
+            "failure_signal": signal.model_dump(),
+        }
+        if role_key:
+            update_dict[role_key] = state.get("messages", [])
         return Command(
-            update={
-                "last_message": signal.summary,
-                "failure_signal": signal.model_dump(),
-            },
+            update=update_dict,
             goto="supervisor",
         )
 
@@ -174,7 +210,6 @@ async def model_node(state: AssessmentState) -> Command:
         else:
             messages = [SystemMessage(content=ROLE_PROMPTS[role]), *messages]
 
-    assessment_id = state["assessment_id"]
     async with get_async_session_ctx() as session:
         steering_repo = SteeringRepo(session)
         mid_turn_notes = await steering_repo.take_pending(assessment_id, state.get("run_id"))
@@ -224,6 +259,18 @@ async def model_node(state: AssessmentState) -> Command:
             await asyncio.sleep(1.5 * attempt)
     messages.append(ai)
     turns[role] = turns.get(role, 0) + 1
+    async with get_async_session_ctx() as session:
+        await AuditRepo(session).record_event(
+            assessment_id=assessment_id,
+            event_type="role.turn",
+            payload={
+                "run_id": state.get("run_id"),
+                "role": role,
+                "turn": turns[role],
+                "cap": cap,
+            },
+        )
+        await session.commit()
 
     tool_calls = list(getattr(ai, "tool_calls", []) or [])
     if tool_calls:
@@ -281,13 +328,17 @@ async def model_node(state: AssessmentState) -> Command:
             )
 
     name = first["name"]
+    update_dict = {"messages": messages, "turns": turns}
+    if role_key:
+        update_dict[role_key] = messages
+
     if is_direct_tool(role, name) or name == "handoff":
         return Command(
-            update={"messages": messages, "turns": turns},
+            update=update_dict,
             goto="direct",
         )
     return Command(
-        update={"messages": messages, "turns": turns},
+        update=update_dict,
         goto="prepare",
     )
 
@@ -865,24 +916,31 @@ async def handoff_node(state: AssessmentState) -> Command:
                 "finding_ids": handoff.finding_ids,
                 "step_ids": handoff.step_ids,
                 "open_questions": handoff.open_questions,
+                "recommended_actions": handoff.recommended_actions,
             },
         )
         await session.commit()
 
+    role_key = f"{role}_messages" if role in ("recon", "discovery", "validation") else None
+    final_messages = [
+        *state["messages"],
+        ToolMessage(
+            tool_call_id=call["id"],
+            name="handoff",
+            status="success",
+            content=handoff.model_dump_json(),
+        ),
+    ]
+    update_dict: dict[str, Any] = {
+        "last_handoff": handoff.model_dump(),
+        "messages": final_messages,
+        "last_message": handoff.summary,
+        "finished": True,
+    }
+    if role_key:
+        update_dict[role_key] = final_messages
+
     return Command(
-        update={
-            "last_handoff": handoff.model_dump(),
-            "messages": [
-                *state["messages"],
-                ToolMessage(
-                    tool_call_id=call["id"],
-                    name="handoff",
-                    status="success",
-                    content=handoff.model_dump_json(),
-                ),
-            ],
-            "last_message": handoff.summary,
-            "finished": True,
-        },
+        update=update_dict,
         goto="supervisor",
     )

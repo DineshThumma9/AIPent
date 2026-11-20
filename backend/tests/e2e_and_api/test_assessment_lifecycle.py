@@ -305,9 +305,34 @@ async def test_full_multi_role_assessment_lifecycle(engine, monkeypatch, tmp_pat
 
     init = initial_state(aid, run_id="e2e-run-1")
 
-    # Step 1: Recon runs and hands off to Discovery; Discovery requests zap_baseline -> PAUSES at approve gate
+    # Step 1: The supervisor proposes an editable plan -> PAUSES at plan gate
     await graph.ainvoke(init, config=config)
 
+    state = await graph.aget_state(config)
+    assert state.next == ("plan",)
+    proposed = state.tasks[0].interrupts[0].value
+    assert proposed["gate"] == "plan"
+    assert proposed["plan"]
+
+    # Approve the plan (with a sample operator edit) so orchestration can start.
+    edited_plan = [
+        {**step, "rationale": f"{step['rationale']} (operator reviewed)"}
+        for step in proposed["plan"]
+    ]
+    await graph.ainvoke(
+        Command(
+            resume={
+                "decision": "approved",
+                "actor": "analyst",
+                "reason": "Approved initial plan",
+                "plan": edited_plan,
+                "feedback": "Stay within the authorized lab target.",
+            }
+        ),
+        config=config,
+    )
+
+    # Recon runs and hands off to Discovery; Discovery requests zap_baseline -> PAUSES at approve gate
     state = await graph.aget_state(config)
     assert state.next == ("approve",)
     pending_interrupt = state.tasks[0].interrupts[0].value
@@ -406,6 +431,11 @@ async def test_prepare_run_auditing_and_juiceshop_baseline(engine, monkeypatch):
         assert audit_ev is not None
         assert "models" in audit_ev.payload
         assert set(audit_ev.payload["models"]) >= {"recon", "discovery", "validation", "supervisor"}
+        # Run-start visibility: budgets, per-role tools and thinking levels.
+        config = audit_ev.payload["config"]
+        assert "max_agent_turns" in config["budgets"]
+        assert "curl_request" in config["tools"]["validation"]
+        assert set(config["thinking"]) >= {"supervisor", "recon", "discovery", "validation"}
 
 
 @pytest.mark.asyncio

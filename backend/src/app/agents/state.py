@@ -31,9 +31,19 @@ class AssessmentState(TypedDict, total=False):
     ports: list[int]
     exclusions: list[str]
 
+    # Operator-reviewed initial plan (shared by every agent)
+    plan: list[dict]
+    plan_source: str
+    plan_approved: bool
+    plan_feedback: str
+    run_config: dict
+
     # Loop control
     role: str                      # recon | discovery | validation | review
     messages: list[AnyMessage]     # current turn messages
+    recon_messages: list[AnyMessage]
+    discovery_messages: list[AnyMessage]
+    validation_messages: list[AnyMessage]
     pending_action: dict | None
     approval_decision: dict | None
     last_handoff: dict | None
@@ -70,8 +80,16 @@ def initial_state(assessment_id: int, run_id: str | None = None) -> AssessmentSt
         "targets": [],
         "ports": [],
         "exclusions": [],
+        "plan": [],
+        "plan_source": "",
+        "plan_approved": False,
+        "plan_feedback": "",
+        "run_config": {},
         "role": "recon",
         "messages": [],
+        "recon_messages": [],
+        "discovery_messages": [],
+        "validation_messages": [],
         "pending_action": None,
         "approval_decision": None,
         "last_handoff": None,

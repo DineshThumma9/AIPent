@@ -139,35 +139,42 @@ def make_execute_node(executor: Callable[..., Any] | None = None):
             )
             await session.commit()
 
+        role = state.get("role") or step.role
+        role_key = f"{role}_messages" if role in ("recon", "discovery", "validation") else None
+        updated_messages = [
+            *state["messages"],
+            ToolMessage(
+                tool_call_id=pending.tool_call_id,
+                name=pending.tool_name or pending.action,
+                status="success" if obs.ok else "error",
+                content=obs.model_dump_json(),
+            ),
+        ]
+        update_dict: dict[str, Any] = {
+            "messages": updated_messages,
+            "pending_action": None,
+            "approval_decision": None,
+            "observations": [obs.model_dump()],
+            "steps": [
+                {
+                    "step_id": obs.step_id,
+                    "action": obs.action,
+                    "target": obs.target,
+                    "status": obs.status,
+                }
+            ],
+            "last_message": obs.summary,
+            "no_progress": next_no_progress(
+                state.get("no_progress", 0),
+                obs,
+                state.get("observations", []),
+            ),
+        }
+        if role_key:
+            update_dict[role_key] = updated_messages
+
         return Command(
-            update={
-                "messages": [
-                    *state["messages"],
-                    ToolMessage(
-                        tool_call_id=pending.tool_call_id,
-                        name=pending.tool_name or pending.action,
-                        status="success" if obs.ok else "error",
-                        content=obs.model_dump_json(),
-                    ),
-                ],
-                "pending_action": None,
-                "approval_decision": None,
-                "observations": [obs.model_dump()],
-                "steps": [
-                    {
-                        "step_id": obs.step_id,
-                        "action": obs.action,
-                        "target": obs.target,
-                        "status": obs.status,
-                    }
-                ],
-                "last_message": obs.summary,
-                "no_progress": next_no_progress(
-                    state.get("no_progress", 0),
-                    obs,
-                    state.get("observations", []),
-                ),
-            },
+            update=update_dict,
             goto="model",
         )
 
@@ -206,19 +213,25 @@ async def direct_node(state: AssessmentState) -> Command:
         )
         await session.commit()
 
+    role_key = f"{role}_messages" if role in ("recon", "discovery", "validation") else None
+    updated_messages = [
+        *state["messages"],
+        ToolMessage(
+            tool_call_id=tool_call["id"],
+            name=tool_call["name"],
+            status="success" if obs.ok else "error",
+            content=obs.model_dump_json(),
+        ),
+    ]
+    update_dict = {
+        "messages": updated_messages,
+        "observations": [obs.model_dump()],
+        "last_message": obs.summary,
+    }
+    if role_key:
+        update_dict[role_key] = updated_messages
+
     return Command(
-        update={
-            "messages": [
-                *state["messages"],
-                ToolMessage(
-                    tool_call_id=tool_call["id"],
-                    name=tool_call["name"],
-                    status="success" if obs.ok else "error",
-                    content=obs.model_dump_json(),
-                ),
-            ],
-            "observations": [obs.model_dump()],
-            "last_message": obs.summary,
-        },
+        update=update_dict,
         goto="model",
     )

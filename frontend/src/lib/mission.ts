@@ -49,6 +49,8 @@ export type RoleView = {
   mission: string
   status: RoleStatus
   turns: number
+  turnCap: number
+  capReached: boolean
   handoff: HandoffView | null
 }
 
@@ -58,6 +60,7 @@ export type MissionView = {
   running: boolean
   gateOpen: boolean
   activeRole: RoleName | null
+  turnCaps: Partial<Record<RoleName, number>>
   reasoning: EvidenceBoard
   roles: RoleView[]
   handoffs: HandoffView[]
@@ -141,6 +144,7 @@ function asRecords(value: unknown): Record<string, unknown>[] {
 export function actionLabel(action: string): string {
   const labels: Record<string, string> = {
     final_review: 'Final findings review',
+    initial_plan: 'Assessment plan',
     recon_services: 'Service and port scan',
     nmap_scan: 'Nmap scan',
     nmap_nse: 'Nmap NSE script scan',
@@ -178,11 +182,16 @@ export function approvalPlan(approval: Approval): PlanStep[] {
     const action = asText(record.action)
     const target = asText(record.target)
     if (!action || !target) return []
+    const actionRole = asText(record.role)
+    const validAction = record.valid_action
     return [
       {
+        role: actionRole && ROLE_ORDER.includes(actionRole as RoleName) ? actionRole : '',
         action,
         target,
         rationale: asText(record.rationale) ?? '',
+        enabled: record.enabled !== false,
+        valid_action: typeof validAction === 'boolean' ? validAction : null,
       },
     ]
   })
@@ -326,11 +335,15 @@ export function deriveMission(detail: AssessmentDetail): MissionView {
   }
 
   const turns: Partial<Record<RoleName, number>> = {}
+  const turnCaps: Partial<Record<RoleName, number>> = {}
   for (const event of events) {
     if (event.event_type !== 'role.turn') continue
     const role = asRole(event.payload.role)
     const turn = asNumber(event.payload.turn)
-    if (role && turn !== null) turns[role] = turn
+    const cap = asNumber(event.payload.cap)
+    if (!role) continue
+    if (turn !== null) turns[role] = turn
+    if (cap !== null) turnCaps[role] = cap
   }
 
   const lastStarted = startedRoles.at(-1) ?? null
@@ -341,7 +354,9 @@ export function deriveMission(detail: AssessmentDetail): MissionView {
   const running =
     ACTIVE_STATUSES.has(detail.status) || pendingApproval !== null
   const activeRole =
-    running && !finalReview ? pendingRole ?? lastStarted : null
+    running && !finalReview
+      ? asRole(detail.active_role) ?? pendingRole ?? lastStarted
+      : null
   const lastIndex = lastStarted ? ROLE_ORDER.indexOf(lastStarted) : -1
 
   const roles = ROLE_ORDER.map((name, index): RoleView => {
@@ -368,6 +383,8 @@ export function deriveMission(detail: AssessmentDetail): MissionView {
       mission: ROLE_INFO[name].mission,
       status,
       turns: turns[name] ?? 0,
+      turnCap: turnCaps[name] ?? 0,
+      capReached: turnCaps[name] !== undefined && (turns[name] ?? 0) >= (turnCaps[name] ?? 0),
       handoff,
     }
   })
@@ -393,7 +410,9 @@ export function deriveMission(detail: AssessmentDetail): MissionView {
   // Approve/Reject buttons open as soon as the status stream says the run is
   // waiting, without requiring a REST reload.
   const awaitingApproval =
-    detail.status === 'awaiting_approval' || detail.gate_open
+    detail.status === 'awaiting_approval' ||
+    detail.status === 'awaiting_plan' ||
+    detail.gate_open
   const requiresApproval =
     (pendingApproval?.detail.requires_approval ?? true) !== false
   const gateOpen = Boolean(
@@ -406,6 +425,7 @@ export function deriveMission(detail: AssessmentDetail): MissionView {
     running,
     gateOpen,
     activeRole,
+    turnCaps,
     reasoning: detail.reasoning ?? {
       hypotheses: [],
       decisions: [],
@@ -491,11 +511,40 @@ export function buildThread(
 
     if (event.event_type === 'role.budget_exhausted') {
       const role = asRole(event.payload.role)
+      const cap = asNumber(event.payload.cap)
       entries.push({
         kind: 'note',
         id: `budget-${event.id}`,
         at: event.ts,
-        text: `${roleLabel(role)} reached its turn cap and handed to review.`,
+        text: `${roleLabel(role)} hit its turn cap${cap ? ` (${cap})` : ''} — supervisor is choosing the next role.`,
+        error: false,
+      })
+      continue
+    }
+
+    if (event.event_type === 'supervisor.route_rejected') {
+      const proposed = asText(event.payload.proposed_role) ?? 'a role'
+      const fallback = asText(event.payload.fallback_role) ?? 'another role'
+      const why = (asText(event.payload.rejection_reason) ?? 'guard rule').replaceAll('_', ' ')
+      entries.push({
+        kind: 'note',
+        id: `route-rejected-${event.id}`,
+        at: event.ts,
+        text: `Supervisor redirected ${proposed} → ${fallback} (${why}).`,
+        error: false,
+      })
+      continue
+    }
+
+    if (event.event_type === 'supervisor.recovered') {
+      const kind = (asText(event.payload.failure_kind) ?? 'failure').replaceAll('_', ' ')
+      const role = asText(event.payload.recovered_role) ?? 'next role'
+      const attempts = asNumber(event.payload.attempts)
+      entries.push({
+        kind: 'note',
+        id: `recovered-${event.id}`,
+        at: event.ts,
+        text: `Recovered from ${kind}${attempts ? ` after ${attempts} attempts` : ''} → ${role}.`,
         error: false,
       })
       continue

@@ -133,6 +133,17 @@ async def supervisor_node(state: AssessmentState) -> Command:
                 "directive": decision.directive,
             },
         )
+        if decision.next_role != "review":
+            await audit_repo.record_event(
+                assessment_id=assessment_id,
+                event_type="role.started",
+                payload={
+                    "run_id": run_id,
+                    "role": decision.next_role,
+                    "from_role": state.get("role"),
+                    "why": decision.why,
+                },
+            )
         await session.commit()
 
     if decision.next_role == "review":

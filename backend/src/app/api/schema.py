@@ -107,6 +107,9 @@ class DecisionIn(BaseModel):
     # Bind the decision to the gate card the analyst saw.
     approval_id: int | None = None
     step_id: int | None = None
+    # Plan gate: operator edits and feedback travel with the decision.
+    plan: list[dict[str, Any]] | None = None
+    feedback: str | None = Field(default=None, max_length=2000)
 
 
 class MessageOut(BaseModel):
@@ -139,9 +142,12 @@ class ChatAccepted(BaseModel):
 
 
 class PlanStepOut(BaseModel):
+    role: str = "recon"
     action: str
     target: str
-    rationale: str
+    rationale: str = ""
+    enabled: bool = True
+    valid_action: bool | None = None
 
 
 class AgentView(BaseModel):
@@ -153,6 +159,7 @@ class AgentView(BaseModel):
     next: list[str] = Field(default_factory=list)
     plan: list[PlanStepOut] = Field(default_factory=list)
     plan_source: str = ""
+    run_config: dict[str, Any] = Field(default_factory=dict)
     pending: dict[str, Any] | None = None
     steps: int = 0
     last_message: str | None = None
@@ -194,4 +201,5 @@ class AssessmentDetail(BaseModel):
     gate_open: bool = False
     active_role: str | None = None
     run_id: str | None = None
+    run_config: dict[str, Any] = Field(default_factory=dict)
     reasoning: EvidenceBoard = Field(default_factory=EvidenceBoard)

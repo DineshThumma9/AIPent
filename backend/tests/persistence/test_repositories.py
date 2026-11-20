@@ -25,7 +25,7 @@ from app.domain.models import (
 from app.persistence.assessment_repo import AssessmentRepo
 from app.persistence.audit_repo import AuditRepo
 from app.persistence.finding_repo import FindingRepo
-from app.persistence.step_repo import StepRepo
+from app.persistence.step_repo import StepRepo, _step_matches
 
 
 @pytest.mark.asyncio
@@ -382,3 +382,64 @@ async def test_assessment_repo_crud_and_messages(engine):
         by_client_id = await repo.get_message_by_client_id(created.id, "client-msg-1")
         assert by_client_id is not None
         assert by_client_id.id == msg.id
+
+
+def test_step_matches_curl_request_payload_and_headers():
+    row = Step(
+        target="127.0.0.1",
+        action="curl_request",
+        argv=[
+            "mcp",
+            "curl_request",
+            json.dumps({
+                "url": "http://127.0.0.1:3000/api/feedbacks",
+                "method": "POST",
+                "headers": {"content-type": "application/x-www-form-urlencoded"},
+                "body": "userId=999&comment=first test",
+                "follow_redirects": True,
+            }),
+        ],
+    )
+
+    # 1. Same method & path, but different body (e.g. JSON with captcha) -> NOT a duplicate
+    probe_diff_body = {
+        "method": "POST",
+        "path": "/api/feedbacks",
+        "headers": {"content-type": "application/json"},
+        "body": json.dumps({"userId": 999, "comment": "first test", "captchaId": 123}),
+    }
+    assert _step_matches(row, "127.0.0.1", probe_diff_body) is False
+
+    # 2. Same method & path, same body, but different headers -> NOT a duplicate
+    probe_diff_headers = {
+        "method": "POST",
+        "path": "/api/feedbacks",
+        "headers": {"content-type": "application/x-www-form-urlencoded", "authorization": "Bearer token"},
+        "body": "userId=999&comment=first test",
+    }
+    assert _step_matches(row, "127.0.0.1", probe_diff_headers) is False
+
+    # 3. Exact match with case-insensitive method and headers -> duplicate
+    probe_duplicate = {
+        "method": "post",
+        "path": "/api/feedbacks",
+        "headers": {"Content-Type": "application/x-www-form-urlencoded"},
+        "body": "userId=999&comment=first test",
+    }
+    assert _step_matches(row, "127.0.0.1", probe_duplicate) is True
+
+    # 4. Different method (GET vs POST) -> NOT a duplicate
+    probe_get = {
+        "method": "GET",
+        "path": "/api/feedbacks",
+    }
+    assert _step_matches(row, "127.0.0.1", probe_get) is False
+
+    # 5. Different path -> NOT a duplicate
+    probe_diff_path = {
+        "method": "POST",
+        "path": "/api/feedbacks?query=1",
+        "headers": {"content-type": "application/x-www-form-urlencoded"},
+        "body": "userId=999&comment=first test",
+    }
+    assert _step_matches(row, "127.0.0.1", probe_diff_path) is False

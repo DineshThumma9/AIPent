@@ -201,12 +201,16 @@ export const AssessmentDetailSchema = AssessmentSchema.extend({
     .transform((value) => value ?? false),
   active_role: z.string().nullable().default(null),
   run_id: z.string().nullable().default(null),
+  run_config: z.record(z.string(), z.unknown()).default({}),
 })
 
 export const PlanStepSchema = z.object({
+  role: z.string().default(''),
   action: z.string(),
   target: z.string(),
-  rationale: z.string(),
+  rationale: z.string().default(''),
+  enabled: z.boolean().default(true),
+  valid_action: z.boolean().nullish(),
 })
 
 export const AgentViewSchema = z.object({
@@ -218,6 +222,7 @@ export const AgentViewSchema = z.object({
   next: stringList(),
   plan: listOf(PlanStepSchema),
   plan_source: z.string(),
+  run_config: z.record(z.string(), z.unknown()).default({}),
   pending: z.record(z.string(), z.unknown()).nullable(),
   steps: z.number().int(),
   last_message: z.string().nullable(),
@@ -242,6 +247,8 @@ export const DecisionInputSchema = z.object({
   // backend can reject stale approval cards (approval.argv must match step.argv).
   approval_id: z.number().int().optional(),
   step_id: z.number().int().optional(),
+  plan: z.array(PlanStepSchema).optional(),
+  feedback: z.string().max(2000).optional(),
 })
 
 export const AssessmentInputSchema = z.object({

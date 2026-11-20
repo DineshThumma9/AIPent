@@ -10,6 +10,7 @@ from app.agents.model import build_role_model
 from app.agents.mission_brain import run_supervisor_agent
 
 from app.agents.nodes.intake import intake_node
+from app.agents.nodes.planning import plan_node
 from app.agents.nodes.supervisor import _failure_from_state, supervisor_node
 from app.agents.nodes.specialist import (
     _last_tool_call,
@@ -29,8 +30,9 @@ from app.agents.nodes.reporting import (
 )
 
 __all__ = [
-    # Core 10 graph nodes
+    # Core graph nodes
     "intake_node",
+    "plan_node",
     "supervisor_node",
     "model_node",
     "prepare_node",

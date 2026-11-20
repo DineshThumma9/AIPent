@@ -117,9 +117,25 @@ async def test_gate_analyst_approves_action_executes(engine, monkeypatch, tmp_pa
     init["role"] = "discovery"
     init["run_id"] = "run-gate-appr"
 
-    # Run until paused at approval gate
+    # The supervisor proposes a plan first; approve it to reach the action gate.
     await graph.ainvoke(init, config)
+    state = await graph.aget_state(config)
+    assert state.next == ("plan",)
+    proposed = state.tasks[0].interrupts[0].value
+    assert proposed["gate"] == "plan"
+    await graph.ainvoke(
+        Command(
+            resume={
+                "decision": "approved",
+                "actor": "analyst",
+                "reason": "Approved initial plan",
+                "plan": proposed["plan"],
+            }
+        ),
+        config=config,
+    )
 
+    # Run until paused at approval gate
     state = await graph.aget_state(config)
     assert state.next == ("approve",)
     pending_interrupt = state.tasks[0].interrupts[0].value
@@ -252,6 +268,21 @@ async def test_gate_analyst_rejects_action_skipped(engine, monkeypatch, tmp_path
     init["run_id"] = "run-gate-rej"
 
     await graph.ainvoke(init, config)
+    state = await graph.aget_state(config)
+    assert state.next == ("plan",)
+    proposed = state.tasks[0].interrupts[0].value
+    assert proposed["gate"] == "plan"
+    await graph.ainvoke(
+        Command(
+            resume={
+                "decision": "approved",
+                "actor": "analyst",
+                "reason": "Approved initial plan",
+                "plan": proposed["plan"],
+            }
+        ),
+        config=config,
+    )
 
     state = await graph.aget_state(config)
     assert state.next == ("approve",)
