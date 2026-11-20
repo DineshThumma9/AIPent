@@ -14,11 +14,9 @@ from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemM
 from langgraph.graph import END
 from langgraph.types import Command, interrupt
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlmodel import select
 
 from app.actions.catalogue import check_scope
 from app.actions.executor import execute_action
-from app.agents.control import audit
 from app.agents.graph.state import AssessmentState
 from app.agents.loop.brief import render_brief
 from app.agents.prompts import ROLE_PROMPTS
@@ -62,6 +60,9 @@ from app.domain.models import (
     StepStatus,
     utcnow,
 )
+from app.persistence.assessment_repo import AssessmentRepo
+from app.persistence.audit_repo import AuditRepo
+from app.persistence.context_loader import MissionContext, load_mission_context
 from app.persistence.finding_repo import FindingRepo
 from app.persistence.steering_repo import SteeringRepo
 from app.persistence.step_repo import StepRepo
@@ -129,7 +130,7 @@ async def intake_node(state: AssessmentState) -> Command:
     assessment_id = state["assessment_id"]
     logger.info("intake_node: initializing assessment=%s run=%s", assessment_id, state.get("run_id"))
     async with get_async_session_ctx() as session:
-        assessment = await session.get(Assessment, assessment_id)
+        assessment = await AssessmentRepo(session).get(assessment_id)
         if assessment is None:
             raise LookupError(f"assessment {assessment_id} not found")
 
@@ -139,11 +140,10 @@ async def intake_node(state: AssessmentState) -> Command:
 
         from app.agents.model import role_model_config
 
-        audit(
-            session,
-            assessment_id,
-            "agent.started",
-            {
+        await AuditRepo(session).record_event(
+            assessment_id=assessment_id,
+            event_type="agent.started",
+            payload={
                 "run_id": state["run_id"],
                 "loop": "v2",
                 "targets": targets,
@@ -194,19 +194,19 @@ async def supervisor_node(state: AssessmentState) -> Command:
     run_id = state["run_id"]
     failure = _failure_from_state(state)
 
-    digest = await build_mission_digest(
-        assessment_id=assessment_id,
-        run_id=run_id,
-        state=state,
-        failure=failure,
-    )
-
     async with get_async_session_ctx() as session:
-        audit(
-            session,
-            assessment_id,
-            "supervisor.digest",
-            {
+        context = await load_mission_context(session, assessment_id, run_id=run_id)
+        digest = await build_mission_digest(
+            assessment_id=assessment_id,
+            run_id=run_id,
+            state=state,
+            failure=failure,
+            context=context,
+        )
+        await AuditRepo(session).record_event(
+            assessment_id=assessment_id,
+            event_type="supervisor.digest",
+            payload={
                 "run_id": run_id,
                 "failure": failure.model_dump() if failure else None,
                 "services_count": len(digest.services),
@@ -215,6 +215,7 @@ async def supervisor_node(state: AssessmentState) -> Command:
         )
         await session.commit()
 
+    supervisor_exc: Exception | None = None
     try:
         proposed = await run_supervisor_agent(
             digest=digest,
@@ -222,15 +223,8 @@ async def supervisor_node(state: AssessmentState) -> Command:
             max_tool_calls=settings.supervisor_tool_calls,
         )
     except Exception as exc:
+        supervisor_exc = exc
         proposed = deterministic_safe_route(state, digest)
-        async with get_async_session_ctx() as session:
-            audit(
-                session,
-                assessment_id,
-                "supervisor.unavailable",
-                {"run_id": run_id, "error": str(exc)},
-            )
-            await session.commit()
 
     decision, rejection = validate_route(proposed, state, digest)
     logger.info(
@@ -241,11 +235,17 @@ async def supervisor_node(state: AssessmentState) -> Command:
     )
 
     async with get_async_session_ctx() as session:
-        audit(
-            session,
-            assessment_id,
-            "supervisor.route_proposed",
-            {
+        audit_repo = AuditRepo(session)
+        if supervisor_exc is not None:
+            await audit_repo.record_event(
+                assessment_id=assessment_id,
+                event_type="supervisor.unavailable",
+                payload={"run_id": run_id, "error": str(supervisor_exc)},
+            )
+        await audit_repo.record_event(
+            assessment_id=assessment_id,
+            event_type="supervisor.route_proposed",
+            payload={
                 "run_id": run_id,
                 "proposed_role": proposed.next_role,
                 "why": proposed.why,
@@ -255,11 +255,10 @@ async def supervisor_node(state: AssessmentState) -> Command:
             },
         )
         if failure:
-            audit(
-                session,
-                assessment_id,
-                "supervisor.recovered",
-                {
+            await audit_repo.record_event(
+                assessment_id=assessment_id,
+                event_type="supervisor.recovered",
+                payload={
                     "run_id": run_id,
                     "failure_kind": failure.kind,
                     "recovered_role": decision.next_role,
@@ -267,22 +266,20 @@ async def supervisor_node(state: AssessmentState) -> Command:
                 },
             )
         if rejection:
-            audit(
-                session,
-                assessment_id,
-                "supervisor.route_rejected",
-                {
+            await audit_repo.record_event(
+                assessment_id=assessment_id,
+                event_type="supervisor.route_rejected",
+                payload={
                     "run_id": run_id,
                     "proposed_role": proposed.next_role,
                     "rejection_reason": rejection,
                     "fallback_role": decision.next_role,
                 },
             )
-        audit(
-            session,
-            assessment_id,
-            "supervisor.route",
-            {
+        await audit_repo.record_event(
+            assessment_id=assessment_id,
+            event_type="supervisor.route",
+            payload={
                 "run_id": run_id,
                 "accepted_role": decision.next_role,
                 "why": decision.why,
@@ -341,24 +338,16 @@ async def brief_node(state: AssessmentState) -> Command:
     logger.info("brief_node: generated brief for role=%s directive=%r", role, directive)
 
     async with get_async_session_ctx() as session:
-        assessment = await session.get(Assessment, assessment_id)
-        if assessment is None:
-            raise LookupError(f"assessment {assessment_id} not found")
-
-        finding_repo = FindingRepo(session)
-        board = await build_evidence_board(session, assessment_id)
-        services = await finding_repo.get_services(assessment_id)
-        candidates = await finding_repo.get_candidates(assessment_id)
-        steering_repo = SteeringRepo(session)
-        steering_notes = await steering_repo.take_pending(assessment_id, state.get("run_id"))
+        context = await load_mission_context(session, assessment_id, state.get("run_id"))
+        await session.commit()
 
     digest = render_brief(
-        assessment=assessment,
+        assessment=context.assessment,
         role=role,
-        board=board,
-        services=services,
-        candidates=candidates,
-        steering=steering_notes,
+        board=context.evidence_board,
+        services=context.services,
+        candidates=context.candidates,
+        steering=context.steering_notes,
         supervisor_directive=directive,
     )
 
@@ -784,6 +773,24 @@ async def prepare_node(state: AssessmentState) -> Command:
             auto_approve=not policy.requires_approval,
         )
 
+        if not result.get("error") and not result.get("duplicate_of_step"):
+            await AuditRepo(session).record_decision(
+                assessment_id=assessment_id,
+                run_id=state["run_id"],
+                role=role,
+                step_id=result["step_id"],
+                action=action_name,
+                target=target,
+                observation="",
+                outcome="prepared",
+                confidence=0.6,
+                hypothesis_id=getattr(args, "hypothesis_id", None),
+                evidence_ids=getattr(args, "evidence_ids", []),
+                expected_observation=getattr(args, "expected_observation", None),
+                would_falsify=getattr(args, "would_falsify", None),
+            )
+        await session.commit()
+
     if result.get("error"):
         obs = error_observation(spec.action or spec.name, target, result["error"])
         return Command(
@@ -844,29 +851,6 @@ async def prepare_node(state: AssessmentState) -> Command:
         would_falsify=getattr(args, "would_falsify", None),
     )
 
-    async with get_async_session_ctx() as session:
-        audit(
-            session,
-            assessment_id,
-            "decision.recorded",
-            {
-                "id": f"D-{pending.step_id}",
-                "run_id": state["run_id"],
-                "role": role,
-                "action": pending.action,
-                "target": pending.target,
-                "hypothesis_id": pending.hypothesis_id,
-                "evidence_ids": pending.evidence_ids,
-                "observation": "",
-                "expected_observation": pending.expected_observation,
-                "would_falsify": pending.would_falsify,
-                "confidence": 0.6,
-                "outcome": "prepared",
-                "created_at": utcnow().isoformat(),
-            },
-        )
-        await session.commit()
-
     return Command(
         update={"pending_action": pending.model_dump()},
         goto="approve",
@@ -881,9 +865,16 @@ async def approve_node(state: AssessmentState) -> Command:
     pending = ActionRequest.model_validate(pending_raw)
     assessment_id = state["assessment_id"]
 
+    needs_human_approval = False
+    interrupt_payload: dict[str, Any] = {}
+
     async with get_async_session_ctx() as session:
+        step_repo = StepRepo(session)
+        audit_repo = AuditRepo(session)
+        assessment_repo = AssessmentRepo(session)
+
+        step = await step_repo.get_by_id(pending.step_id)
         approval = await session.get(Approval, pending.approval_id)
-        step = await session.get(Step, pending.step_id)
         if approval is None or step is None:
             obs = error_observation(pending.action, pending.target, "Step or approval record missing")
             return Command(
@@ -904,16 +895,17 @@ async def approve_node(state: AssessmentState) -> Command:
 
         if approval.decision == Decision.PENDING.value:
             if not pending.requires_approval:
-                approval.decision = Decision.APPROVED.value
-                approval.actor = "system"
-                approval.reason = pending.policy_reason or "auto-approved by policy"
-                approval.decided_at = utcnow()
-                approval.outcome = "auto-approved"
-                audit(
-                    session,
-                    assessment_id,
-                    "approval.auto_approved",
-                    {
+                await step_repo.resolve_approval(
+                    approval_id=approval.id,
+                    decision=Decision.APPROVED.value,
+                    actor="system",
+                    reason=pending.policy_reason or "auto-approved by policy",
+                    outcome="auto-approved",
+                )
+                await audit_repo.record_event(
+                    assessment_id=assessment_id,
+                    event_type="approval.auto_approved",
+                    payload={
                         "approval_id": approval.id,
                         "step_id": step.id,
                         "action": pending.action,
@@ -923,17 +915,9 @@ async def approve_node(state: AssessmentState) -> Command:
                 await session.commit()
                 approved = True
             else:
-                assessment = await session.get(Assessment, assessment_id)
-                if assessment:
-                    assessment.status = AssessmentStatus.AWAITING_APPROVAL.value
-                    await session.commit()
-
-                logger.info(
-                    "approve_node: step=%s action=%s requires human approval -> pausing at gate",
-                    step.id,
-                    step.action,
-                )
-                decision = interrupt({
+                needs_human_approval = True
+                await assessment_repo.set_status(assessment_id, AssessmentStatus.AWAITING_APPROVAL.value)
+                interrupt_payload = {
                     "gate": "action",
                     "approval_id": approval.id,
                     "step_id": step.id,
@@ -947,66 +931,80 @@ async def approve_node(state: AssessmentState) -> Command:
                     "evidence_ids": pending.evidence_ids,
                     "expected_observation": pending.expected_observation,
                     "would_falsify": pending.would_falsify,
-                })
-
-                decision_dict = decision if isinstance(decision, dict) else {}
-                approved = str(decision_dict.get("decision", "rejected")).lower() == "approved"
-                rejection_reason = decision_dict.get("reason") or "rejected by analyst"
-                approval.decision = (
-                    Decision.APPROVED.value if approved else Decision.REJECTED.value
-                )
-                approval.actor = decision_dict.get("actor") or "analyst"
-                approval.reason = decision_dict.get("reason") or None
-                approval.decided_at = utcnow()
-                approval.outcome = "action " + ("approved" if approved else "rejected")
-                logger.info(
-                    "approve_node: operator decision received for step=%s decision=%s actor=%s",
-                    step.id,
-                    "APPROVED" if approved else "REJECTED",
-                    approval.actor,
-                )
-                event_name = "approval.approved" if approved else "approval.rejected"
-                audit(
-                    session,
-                    assessment_id,
-                    event_name,
-                    {
-                        "approval_id": approval.id,
-                        "step_id": step.id,
-                        "reason": approval.reason,
-                        "actor": approval.actor,
-                    },
-                )
-                if not approved:
-                    step.status = StepStatus.REJECTED.value
-                    step.error = rejection_reason[:500]
-                    step.ended_at = utcnow()
-                    audit(
-                        session,
-                        assessment_id,
-                        "decision.recorded",
-                        {
-                            "id": f"D-{pending.step_id}",
-                            "run_id": state["run_id"],
-                            "role": state.get("role"),
-                            "action": pending.action,
-                            "target": pending.target,
-                            "hypothesis_id": pending.hypothesis_id,
-                            "evidence_ids": pending.evidence_ids,
-                            "observation": f"Rejected by operator: {rejection_reason[:200]}",
-                            "expected_observation": pending.expected_observation,
-                            "would_falsify": pending.would_falsify,
-                            "confidence": 0.0,
-                            "outcome": "rejected",
-                            "created_at": utcnow().isoformat(),
-                        },
-                    )
-                assessment = await session.get(Assessment, assessment_id)
-                if assessment:
-                    assessment.status = AssessmentStatus.RUNNING.value
-                await session.commit()
+                }
         else:
             approved = approval.decision == Decision.APPROVED.value
+
+    if needs_human_approval:
+        logger.info(
+            "approve_node: step=%s action=%s requires human approval -> pausing at gate",
+            interrupt_payload["step_id"],
+            interrupt_payload["action"],
+        )
+        decision = interrupt(interrupt_payload)
+        decision_dict = decision if isinstance(decision, dict) else {}
+        approved = str(decision_dict.get("decision", "rejected")).lower() == "approved"
+        rejection_reason = decision_dict.get("reason") or "rejected by analyst"
+        actor = decision_dict.get("actor") or "analyst"
+
+        async with get_async_session_ctx() as session:
+            step_repo = StepRepo(session)
+            audit_repo = AuditRepo(session)
+            assessment_repo = AssessmentRepo(session)
+
+            if approved:
+                await step_repo.resolve_approval(
+                    approval_id=interrupt_payload["approval_id"],
+                    decision=Decision.APPROVED.value,
+                    actor=actor,
+                    reason=decision_dict.get("reason"),
+                    outcome="action approved",
+                )
+                await audit_repo.record_event(
+                    assessment_id=assessment_id,
+                    event_type="approval.approved",
+                    payload={
+                        "approval_id": interrupt_payload["approval_id"],
+                        "step_id": interrupt_payload["step_id"],
+                        "reason": decision_dict.get("reason"),
+                        "actor": actor,
+                    },
+                )
+            else:
+                await step_repo.reject_step(
+                    step_id=interrupt_payload["step_id"],
+                    error=rejection_reason,
+                    reason=rejection_reason,
+                    actor=actor,
+                )
+                await audit_repo.record_event(
+                    assessment_id=assessment_id,
+                    event_type="approval.rejected",
+                    payload={
+                        "approval_id": interrupt_payload["approval_id"],
+                        "step_id": interrupt_payload["step_id"],
+                        "reason": rejection_reason,
+                        "actor": actor,
+                    },
+                )
+                await audit_repo.record_decision(
+                    assessment_id=assessment_id,
+                    run_id=state["run_id"],
+                    role=state.get("role") or "agent",
+                    step_id=interrupt_payload["step_id"],
+                    action=pending.action,
+                    target=pending.target,
+                    observation=f"Rejected by operator: {rejection_reason[:200]}",
+                    outcome="rejected",
+                    confidence=0.0,
+                    hypothesis_id=pending.hypothesis_id,
+                    evidence_ids=pending.evidence_ids,
+                    expected_observation=pending.expected_observation,
+                    would_falsify=pending.would_falsify,
+                )
+
+            await assessment_repo.set_status(assessment_id, AssessmentStatus.RUNNING.value)
+            await session.commit()
 
     if not approved:
         obs = rejection_observation(pending, rejection_reason if 'rejection_reason' in locals() else "rejected by analyst")
@@ -1037,12 +1035,6 @@ async def approve_node(state: AssessmentState) -> Command:
             goto="model",
         )
 
-    async with get_async_session_ctx() as session:
-        assessment = await session.get(Assessment, assessment_id)
-        if assessment is not None:
-            assessment.status = AssessmentStatus.RUNNING.value
-            await session.commit()
-
     return Command(
         update={"approval_decision": {"decision": "approved"}},
         goto="execute",
@@ -1057,8 +1049,11 @@ def make_execute_node(executor: Callable[..., Any] | None = None):
         assessment_id = state["assessment_id"]
 
         async with get_async_session_ctx() as session:
-            step = await session.get(Step, pending.step_id)
-            approval = await session.get(Approval, pending.approval_id)
+            step_repo = StepRepo(session)
+            audit_repo = AuditRepo(session)
+
+            step = await step_repo.get_by_id(pending.step_id)
+            approval = await step_repo.get_approval_for_step(pending.step_id)
             if step is None or approval is None:
                 obs = error_observation(pending.action, pending.target, "Step or approval record missing")
                 return Command(
@@ -1096,8 +1091,10 @@ def make_execute_node(executor: Callable[..., Any] | None = None):
                 )
 
             if list(approval.argv or []) != list(step.argv or []):
-                step.status = StepStatus.REJECTED.value
-                step.error = "approval.argv does not match step.argv"
+                await step_repo.reject_step(
+                    step_id=step.id,
+                    error="approval.argv does not match step.argv",
+                )
                 await session.commit()
                 obs = error_observation(pending.action, pending.target, "argv mismatch between approval and step")
                 return Command(
@@ -1129,11 +1126,10 @@ def make_execute_node(executor: Callable[..., Any] | None = None):
             await session.refresh(executed)
             logger.info("execute_node: finished step=%s status=%s exit_code=%s", step.id, executed.status, executed.exit_code)
             obs = await observation_from_step(session, executed)
-            audit(
-                session,
-                assessment_id,
-                "observation.recorded",
-                {
+            await audit_repo.record_event(
+                assessment_id=assessment_id,
+                event_type="observation.recorded",
+                payload={
                     "run_id": state["run_id"],
                     "step_id": obs.step_id,
                     "action": obs.action,
@@ -1142,25 +1138,20 @@ def make_execute_node(executor: Callable[..., Any] | None = None):
                     "findings_count": len(obs.findings_created),
                 },
             )
-            audit(
-                session,
-                assessment_id,
-                "decision.recorded",
-                {
-                    "id": f"D-{pending.step_id}",
-                    "run_id": state["run_id"],
-                    "role": state.get("role") or step.role,
-                    "action": pending.action,
-                    "target": pending.target,
-                    "hypothesis_id": pending.hypothesis_id,
-                    "evidence_ids": pending.evidence_ids,
-                    "observation": (obs.summary or "")[:300],
-                    "expected_observation": pending.expected_observation,
-                    "would_falsify": pending.would_falsify,
-                    "confidence": 0.8 if obs.ok else 0.3,
-                    "outcome": obs.status,
-                    "created_at": utcnow().isoformat(),
-                },
+            await audit_repo.record_decision(
+                assessment_id=assessment_id,
+                run_id=state["run_id"],
+                role=state.get("role") or step.role,
+                step_id=pending.step_id,
+                action=pending.action,
+                target=pending.target,
+                observation=(obs.summary or "")[:300],
+                expected_observation=pending.expected_observation,
+                would_falsify=pending.would_falsify,
+                confidence=0.8 if obs.ok else 0.3,
+                outcome=obs.status,
+                hypothesis_id=pending.hypothesis_id,
+                evidence_ids=pending.evidence_ids,
             )
             await session.commit()
 
@@ -1219,11 +1210,10 @@ async def direct_node(state: AssessmentState) -> Command:
 
     async with get_async_session_ctx() as session:
         obs = await run_direct(session, spec, args_raw, state)
-        audit(
-            session,
-            assessment_id,
-            "observation.recorded",
-            {
+        await AuditRepo(session).record_event(
+            assessment_id=assessment_id,
+            event_type="observation.recorded",
+            payload={
                 "run_id": state["run_id"],
                 "action": obs.action,
                 "ok": obs.ok,
@@ -1295,11 +1285,10 @@ async def handoff_node(state: AssessmentState) -> Command:
         )
 
     async with get_async_session_ctx() as session:
-        audit(
-            session,
-            assessment_id,
-            "handoff.created",
-            {
+        await AuditRepo(session).record_event(
+            assessment_id=assessment_id,
+            event_type="handoff.created",
+            payload={
                 "run_id": run_id,
                 "role": role,
                 "summary": handoff.summary,
@@ -1338,25 +1327,18 @@ async def review_node(state: AssessmentState) -> Command:
     assessment_id = state["assessment_id"]
 
     async with get_async_session_ctx() as session:
-        assessment = await session.get(Assessment, assessment_id)
-        board = await build_evidence_board(session, assessment_id)
-        findings = await FindingRepo(session).get_all(assessment_id, limit=10000)
+        assessment_repo = AssessmentRepo(session)
+        step_repo = StepRepo(session)
+        finding_repo = FindingRepo(session)
+        audit_repo = AuditRepo(session)
+
+        board = await audit_repo.get_evidence_board(assessment_id)
+        findings = await finding_repo.get_all(assessment_id, limit=10000)
         summary = summarize(findings)
-        # The desk renders approval cards from this table. Without a row the
-        # final review gate has no UI, the run waits forever, and no report is
-        # written. Reuse an existing pending row so a replay cannot stack gates.
-        result = await session.execute(
-            select(Approval)
-            .where(
-                Approval.assessment_id == assessment_id,
-                Approval.action == "final_review",
-                Approval.decision == Decision.PENDING.value,
-            )
-            .order_by(Approval.id)
-        )
-        approval = result.scalars().first()
+
+        approval = await step_repo.get_pending_approval_by_action(assessment_id, "final_review")
         if approval is None:
-            approval = await StepRepo(session).create_approval(
+            approval = await step_repo.create_approval(
                 assessment_id=assessment_id,
                 action="final_review",
                 argv=[],
@@ -1369,9 +1351,7 @@ async def review_node(state: AssessmentState) -> Command:
                 },
             )
         approval_id = approval.id
-        if assessment:
-            assessment.status = AssessmentStatus.AWAITING_APPROVAL.value
-            await session.commit()
+        await assessment_repo.set_status(assessment_id, AssessmentStatus.AWAITING_APPROVAL.value)
 
     decision = interrupt({
         "gate": "review",
@@ -1385,31 +1365,21 @@ async def review_node(state: AssessmentState) -> Command:
     approved = str(decision_dict.get("decision", "approved")).lower() == "approved"
 
     async with get_async_session_ctx() as session:
-        assessment = await session.get(Assessment, assessment_id)
-        # Close the card so the thread shows the verdict and cannot be clicked
-        # again. Resume validation only binds action gates, so the row is
-        # display state here rather than the approval mechanism.
-        result = await session.execute(
-            select(Approval)
-            .where(
-                Approval.assessment_id == assessment_id,
-                Approval.action == "final_review",
-                Approval.decision == Decision.PENDING.value,
-            )
-            .order_by(Approval.id)
-        )
-        pending = result.scalars().first()
+        step_repo = StepRepo(session)
+        assessment_repo = AssessmentRepo(session)
+
+        pending = await step_repo.get_pending_approval_by_action(assessment_id, "final_review")
         if pending is not None:
-            pending.decision = (
-                Decision.APPROVED.value if approved else Decision.REJECTED.value
+            await step_repo.resolve_approval(
+                approval_id=pending.id,
+                decision=Decision.APPROVED.value if approved else Decision.REJECTED.value,
+                actor=str(decision_dict.get("actor") or "operator"),
+                reason=str(decision_dict.get("reason") or "") or None,
+                outcome="review " + ("accepted" if approved else "rejected"),
             )
-            pending.actor = str(decision_dict.get("actor") or "operator")
-            pending.reason = str(decision_dict.get("reason") or "") or None
-            pending.decided_at = utcnow()
-            pending.outcome = "review " + ("accepted" if approved else "rejected")
-        if assessment:
-            assessment.status = AssessmentStatus.RUNNING.value if approved else AssessmentStatus.CANCELLED.value
-            await session.commit()
+
+        new_status = AssessmentStatus.RUNNING.value if approved else AssessmentStatus.CANCELLED.value
+        await assessment_repo.set_status(assessment_id, new_status)
 
     if not approved:
         return Command(
@@ -1428,41 +1398,36 @@ async def report_writer_node(state: AssessmentState) -> Command:
     narrative_data = None
     logger.info("report_writer_node: compiling report narrative for assessment=%s...", assessment_id)
     async with get_async_session_ctx() as session:
+        audit_repo = AuditRepo(session)
         try:
             context = await build_narrative_context(session, assessment_id)
             narrative, err = await write_narrative_result(context)
             if narrative is not None:
                 narrative_data = narrative.model_dump()
-                session.add(
-                    Audit(
-                        assessment_id=assessment_id,
-                        event_type="report.narrative_generated",
-                        payload={
-                            "findings_count": len(narrative.findings),
-                            "executive_summary_len": len(narrative.executive_summary),
-                        },
-                    )
+                await audit_repo.record_event(
+                    assessment_id=assessment_id,
+                    event_type="report.narrative_generated",
+                    payload={
+                        "findings_count": len(narrative.findings),
+                        "executive_summary_len": len(narrative.executive_summary),
+                    },
                 )
             else:
-                session.add(
-                    Audit(
-                        assessment_id=assessment_id,
-                        event_type="report.narrative_fallback",
-                        payload={
-                            "reason": "validation_failed_or_model_error",
-                            "error": err or "unknown",
-                        },
-                    )
+                await audit_repo.record_event(
+                    assessment_id=assessment_id,
+                    event_type="report.narrative_fallback",
+                    payload={
+                        "reason": "validation_failed_or_model_error",
+                        "error": err or "unknown",
+                    },
                 )
             await session.commit()
         except Exception as exc:
             logger.exception("report_writer_node unexpected exception: %s", exc)
-            session.add(
-                Audit(
-                    assessment_id=assessment_id,
-                    event_type="report.narrative_fallback",
-                    payload={"reason": "exception", "error": str(exc)},
-                )
+            await audit_repo.record_event(
+                assessment_id=assessment_id,
+                event_type="report.narrative_fallback",
+                payload={"reason": "exception", "error": str(exc)},
             )
             await session.commit()
 
@@ -1477,13 +1442,14 @@ async def report_node(state: AssessmentState) -> Command:
     assessment_id = state["assessment_id"]
     narrative = state.get("report_narrative")
     async with get_async_session_ctx() as session:
-        assessment = await session.get(Assessment, assessment_id)
-        if assessment:
-            assessment.status = AssessmentStatus.COMPLETED.value
-            assessment.finished_at = utcnow()
-            await session.commit()
+        assessment_repo = AssessmentRepo(session)
+        await assessment_repo.set_status(
+            assessment_id,
+            AssessmentStatus.COMPLETED.value,
+            finished_at=utcnow(),
+        )
         report_path = await generate_report(session, assessment_id, narrative=narrative)
-        assessment = await session.get(Assessment, assessment_id)
+        assessment = await assessment_repo.get(assessment_id)
         if assessment:
             assessment.report_path = str(report_path)
             await session.commit()

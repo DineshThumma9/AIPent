@@ -416,6 +416,42 @@ class StepRepo(BaseRepo):
         )
         return result.scalars().first()
 
+    async def get_pending_approval_by_action(
+        self, assessment_id: int, action: str
+    ) -> Approval | None:
+        """Find an existing pending approval for this assessment and action."""
+        result = await self.session.execute(
+            select(Approval)
+            .where(
+                Approval.assessment_id == assessment_id,
+                Approval.action == action,
+                Approval.decision == Decision.PENDING.value,
+            )
+            .order_by(Approval.id)
+        )
+        return result.scalars().first()
+
+    async def resolve_approval(
+        self,
+        approval_id: int,
+        decision: str,
+        actor: str = "operator",
+        reason: str | None = None,
+        outcome: str | None = None,
+    ) -> Approval | None:
+        """Resolve a pending approval with decision, actor, reason, and outcome."""
+        approval = await self.session.get(Approval, approval_id)
+        if approval is not None:
+            approval.decision = decision
+            approval.actor = actor
+            approval.reason = reason
+            approval.decided_at = utcnow()
+            if outcome is not None:
+                approval.outcome = outcome
+            self.session.add(approval)
+            await self.session.flush()
+        return approval
+
     async def create_approval(
         self,
         assessment_id: int,
@@ -505,15 +541,20 @@ class StepRepo(BaseRepo):
         return step, approval
 
     async def reject_step(
-        self, step_id: int, reason: str = "rejected by analyst"
+        self,
+        step_id: int,
+        reason: str = "rejected by analyst",
+        error: str | None = None,
+        actor: str = "analyst",
     ) -> Step:
         """Mark a planned step and its approval as rejected."""
         step = await self.session.get(Step, step_id)
         if step is None:
             raise LookupError(f"step {step_id} not found")
 
+        err = error or reason
         step.status = StepStatus.REJECTED.value
-        step.error = reason[:500] if reason else "rejected"
+        step.error = err[:500] if err else "rejected"
         step.ended_at = utcnow()
         self.session.add(step)
 
@@ -523,6 +564,7 @@ class StepRepo(BaseRepo):
         approval = result.scalars().first()
         if approval:
             approval.decision = Decision.REJECTED.value
+            approval.actor = actor
             approval.reason = reason
             approval.decided_at = utcnow()
             approval.outcome = "action rejected"

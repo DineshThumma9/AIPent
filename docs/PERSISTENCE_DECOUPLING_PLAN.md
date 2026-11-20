@@ -257,16 +257,12 @@ git commit -m "refactor(agents): eliminate direct database sessions from mission
 - Eliminates: All 17 ad-hoc `async with get_async_session_ctx()` blocks and inline `select()` queries across `intake_node`, `supervisor_node`, `brief_node`, `prepare_node`, `approve_node`, `make_execute_node`, and `review_node`.
 - Establishes: Single session context provided per turn or injected via node factories / state context.
 
-- [ ] **Step 1: Refactor `prepare_node` to use `step_repo.create_planned_step` and `audit_repo.record_event`**
-- [ ] **Step 2: Refactor `approve_node` to use `step_repo.record_approval` or `reject_step`**
-- [ ] **Step 3: Refactor `make_execute_node` to use `step_repo.complete_step` and pure `observation_from_step`**
-- [ ] **Step 4: Refactor `brief_node`, `supervisor_node`, and `review_node` to consume preloaded context**
-- [ ] **Step 5: Run tests and verify zero regressions**
-
-Run: `cd backend && uv run pytest tests/test_loop_nodes.py tests/test_loop_graph.py -v`  
-Expected: PASS (all tests pass)
-
-- [ ] **Step 6: Commit**
+- [x] **Step 1: Refactor `prepare_node` to use `step_repo.create_planned_step` and `audit_repo.record_event`**
+- [x] **Step 2: Refactor `approve_node` to use `step_repo.record_approval` or `reject_step`**
+- [x] **Step 3: Refactor `make_execute_node` to use `step_repo.complete_step` and pure `observation_from_step`**
+- [x] **Step 4: Refactor `brief_node`, `supervisor_node`, and `review_node` to consume preloaded context**
+- [x] **Step 5: Run tests and verify zero regressions**
+- [x] **Step 6: Commit**
 
 ```bash
 git add backend/src/app/agents/loop/nodes.py
