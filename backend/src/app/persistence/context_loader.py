@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.loop.contracts import EvidenceBoard
 from app.agents.loop.reasoning import build_evidence_board
-from app.domain.models import Assessment, Finding
+from app.domain.models import Assessment, Finding, Step
 from app.persistence.finding_repo import FindingRepo
+from app.persistence.step_repo import StepRepo
 from app.persistence.steering_repo import SteeringRepo
 
 
@@ -20,6 +21,7 @@ class MissionContext:
     candidates: list[Finding]
     evidence_board: EvidenceBoard
     steering_notes: list[Any]
+    recent_steps: list[Step] = field(default_factory=list)
 
 
 async def load_mission_context(
@@ -40,10 +42,14 @@ async def load_mission_context(
     steering_repo = SteeringRepo(session)
     steering_notes = await steering_repo.take_pending(assessment_id, run_id)
 
+    step_repo = StepRepo(session)
+    recent_steps = await step_repo.get_recent(assessment_id, limit=8)
+
     return MissionContext(
         assessment=assessment,
         services=services,
         candidates=candidates,
         evidence_board=board,
         steering_notes=steering_notes,
+        recent_steps=recent_steps,
     )

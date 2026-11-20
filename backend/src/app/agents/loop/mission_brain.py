@@ -12,19 +12,18 @@ from typing import TYPE_CHECKING, Any
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlmodel import select
 
 from app.agents.control import audit
 from app.agents.prompts import ROLE_PROMPTS
 if TYPE_CHECKING:
     from app.agents.graph.state import AssessmentState
 from app.agents.loop.contracts import FailureSignal, RouteDecision
-from app.agents.loop.reasoning import build_evidence_board
 from app.agents.loop.tool_specs import bindable_tools
 from app.core.config import settings
 from app.core.db import get_async_session_ctx
 from app.core.log import get_logger
 from app.domain.models import Assessment, Audit, Finding, Step
+from app.persistence.context_loader import MissionContext, load_mission_context
 from app.persistence.finding_repo import FindingRepo
 
 log = get_logger("agent.mission")
@@ -76,53 +75,62 @@ def _retry_allowed(state: AssessmentState, digest: MissionDigest) -> bool:
     return state.get("nudges", 0) < settings.max_role_retries
 
 
+def step_digest(
+    steps: list[Step],
+    observations: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Pure domain function mapping steps to recent step digests."""
+    obs_map = {
+        o.get("step_id"): o
+        for o in (observations or [])
+        if isinstance(o, dict) and o.get("step_id") is not None
+    }
+    recent_steps = []
+    for s in reversed(steps):
+        entry: dict[str, Any] = {
+            "id": s.id,
+            "action": s.action,
+            "target": s.target,
+            "status": s.status,
+            "error": s.error,
+        }
+        obs = obs_map.get(s.id)
+        if obs:
+            if obs.get("summary"):
+                entry["summary"] = obs["summary"][:300]
+            facts = obs.get("facts") or {}
+            if "status_code" in facts and facts["status_code"] is not None:
+                entry["status_code"] = facts["status_code"]
+        recent_steps.append(entry)
+    return recent_steps
+
+
 async def build_mission_digest(
     assessment_id: int,
     run_id: str,
     state: AssessmentState,
     failure: FailureSignal | None = None,
+    context: MissionContext | None = None,
+    session: AsyncSession | None = None,
 ) -> MissionDigest:
-    """Construct a bounded MissionDigest from DB and State."""
-    async with get_async_session_ctx() as session:
-        assessment = await session.get(Assessment, assessment_id)
-        targets = assessment.targets if assessment else []
-        ports = assessment.ports if assessment else []
-        exclusions = assessment.exclusions if assessment else []
+    """Construct a bounded MissionDigest from Context or Session and State."""
+    if context is None:
+        if session is not None:
+            context = await load_mission_context(session, assessment_id, run_id=run_id)
+        else:
+            async with get_async_session_ctx() as sess:
+                context = await load_mission_context(sess, assessment_id, run_id=run_id)
 
-        finding_repo = FindingRepo(session)
-        service_rows = await finding_repo.get_services(assessment_id)
-        candidate_rows = await finding_repo.get_candidates(assessment_id)
-        board = await build_evidence_board(session, assessment_id)
+    assessment = context.assessment
+    targets = assessment.targets if assessment else []
+    ports = assessment.ports if assessment else []
+    exclusions = assessment.exclusions if assessment else []
 
-        step_res = await session.execute(
-            select(Step)
-            .where(Step.assessment_id == assessment_id)
-            .order_by(Step.id.desc())
-            .limit(8)
-        )
-        obs_map = {
-            o.get("step_id"): o
-            for o in state.get("observations", [])
-            if isinstance(o, dict) and o.get("step_id") is not None
-        }
-        recent_steps = []
-        for s in reversed(list(step_res.scalars().all())):
-            entry: dict[str, Any] = {
-                "id": s.id,
-                "action": s.action,
-                "target": s.target,
-                "status": s.status,
-                "error": s.error,
-            }
-            obs = obs_map.get(s.id)
-            if obs:
-                if obs.get("summary"):
-                    entry["summary"] = obs["summary"][:300]
-                facts = obs.get("facts") or {}
-                if "status_code" in facts and facts["status_code"] is not None:
-                    entry["status_code"] = facts["status_code"]
-            recent_steps.append(entry)
+    service_rows = context.services
+    candidate_rows = context.candidates
+    board = context.evidence_board
 
+    recent_steps = step_digest(context.recent_steps, state.get("observations", []))
     recent_handoffs = [state["last_handoff"]] if state.get("last_handoff") else []
 
     return MissionDigest(

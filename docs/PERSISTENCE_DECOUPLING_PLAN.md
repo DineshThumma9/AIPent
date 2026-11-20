@@ -233,20 +233,10 @@ git commit -m "refactor(agents): consolidate role, hypothesis, and evidence boar
 - `step_digest`: Accepts `steps: list[Step]` instead of opening `async with get_async_session_ctx()`.
 - `refresh_risk`: Move database fetch and update into `AssessmentRepo.refresh_risk_score(assessment_id)`. `domain/risk.py` provides pure `summarize(findings)`.
 
-- [ ] **Step 1: Refactor `build_mission_digest` and `step_digest` in `mission_brain.py`**
-
-Remove `get_async_session_ctx` from `mission_brain.py`. Pass preloaded `MissionContext` or step list.
-
-- [ ] **Step 2: Move DB query from `domain/risk.py` to `AssessmentRepo`**
-
-In `AssessmentRepo`, add `async def update_risk_summary(self, assessment_id: int) -> dict`. In `domain/risk.py`, make `refresh_risk` delegate to `AssessmentRepo` or keep `summarize()` as a pure function.
-
-- [ ] **Step 3: Run tests and verify clean pass**
-
-Run: `cd backend && uv run pytest tests/test_supervisor_reasoning.py tests/test_risk.py -v`  
-Expected: PASS
-
-- [ ] **Step 4: Commit**
+- [x] **Step 1: Refactor `build_mission_digest` and `step_digest` in `mission_brain.py`**
+- [x] **Step 2: Move DB query from `domain/risk.py` to `AssessmentRepo`**
+- [x] **Step 3: Run tests and verify clean pass**
+- [x] **Step 4: Commit**
 
 ```bash
 git add backend/src/app/agents/loop/mission_brain.py backend/src/app/domain/risk.py backend/src/app/persistence/assessment_repo.py

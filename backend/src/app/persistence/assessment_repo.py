@@ -106,3 +106,19 @@ class AssessmentRepo(BaseRepo):
             )
         )
         await self.session.commit()
+
+    async def refresh_risk_score(self, assessment_id: int) -> dict[str, Any]:
+        """Recalculate and persist risk score based on findings."""
+        from app.domain.models import Finding
+        from app.domain.risk import summarize
+
+        assessment = await self.session.get(Assessment, assessment_id)
+        result = await self.session.execute(
+            select(Finding).where(Finding.assessment_id == assessment_id)
+        )
+        findings = list(result.scalars().all())
+        summary = summarize(findings)
+        if assessment is not None:
+            assessment.risk_score = summary["score"]
+            await self.session.commit()
+        return summary
