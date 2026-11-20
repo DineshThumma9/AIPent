@@ -43,6 +43,7 @@ from app.actions.catalogue import (
     _web_port,
     check_scope,
     get_action,
+    is_local_exempt,
     mcp_tool_call,
     resolve_argv,
     transport_target,
@@ -190,7 +191,7 @@ async def execute_action(
     transport = (
         "mcp"
         if (
-            action != "hashcat_crack"
+            not is_local_exempt(action)
             and settings.mcp_enabled
             and settings.mcp_transport == "gateway"
         )
@@ -245,7 +246,7 @@ async def execute_action(
             if tool_error:
                 raise RuntimeError(tool_error)
             step.exit_code = 0
-        elif settings.mcp_enabled and settings.mcp_transport == "gateway":
+        elif transport == "mcp":
             result = await _run_gateway(action, assessment, target, step)
             text = result.text
             step.exit_code = 0
@@ -292,6 +293,26 @@ async def execute_action(
             step.exit_code = process.returncode
             step.output_path = str(artifact)
             step.output_sha256 = hashlib.sha256(artifact.read_bytes()).hexdigest()
+
+        if step.output_path:
+            is_web_action = action in ("curl_request", "zap_spider", "ffuf_scan", "nikto_scan")
+            target_url = ""
+            if action == "curl_request" and isinstance(params, dict):
+                target_url = str(params.get("url") or "")
+            elif isinstance(target, str):
+                target_url = target
+            try:
+                from app.parsers import create_sidecar_manifest
+
+                if is_web_action or any(
+                    str(step.output_path).lower().endswith(ext)
+                    for ext in (".html", ".htm", ".js", ".json")
+                ):
+                    await asyncio.to_thread(
+                        create_sidecar_manifest, step.output_path, url=target_url
+                    )
+            except Exception:
+                pass
 
         drafts = spec.parse(text, target, _web_port(assessment))
         added, merged = await _save_findings(session, assessment_id, step, drafts)

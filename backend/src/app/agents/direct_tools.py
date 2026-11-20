@@ -6,6 +6,7 @@ scanners or require human approval.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ from app.agents.contracts import Observation
 from app.agents.reasoning import record_hypothesis, update_hypothesis
 from app.agents.tool_specs import ToolSpec
 from app.core.config import settings
+from app.parsers import read_sidecar_manifest
 from app.persistence.audit_repo import AuditRepo
 from app.persistence.finding_repo import FindingRepo
 from app.persistence.step_repo import StepRepo
@@ -35,6 +37,7 @@ async def read_artifact(
     max_chars: int = 4000,
     search: str | None = None,
     offset: int = 0,
+    view: str | None = None,
     **kwargs: Any,
 ) -> Observation:
     step = await StepRepo(session).get_by_id(step_id)
@@ -72,21 +75,94 @@ async def read_artifact(
                 errors=["path traversal blocked"],
             )
 
+        manifest = read_sidecar_manifest(path)
+        view_mode = (view or kwargs.get("view") or "").lower().strip()
+
+        # 1. Manifest view mode
+        if view_mode in ("manifest", "forms", "routes"):
+            if not manifest:
+                return Observation(
+                    ok=True,
+                    status="succeeded",
+                    action="read_artifact",
+                    target=step.target,
+                    step_id=step.id,
+                    summary=f"No sidecar manifest available for step {step_id} ({path.name}).",
+                    facts={},
+                )
+
+            if view_mode == "routes":
+                content_out = json.dumps(manifest.get("routes", []), indent=2)
+            elif view_mode == "forms":
+                content_out = json.dumps(manifest.get("forms", []), indent=2)
+            else:
+                content_out = json.dumps(manifest, indent=2)
+
+            return Observation(
+                ok=True,
+                status="succeeded",
+                action="read_artifact",
+                target=step.target,
+                step_id=step.id,
+                summary=f"Manifest ({view_mode}) for step {step_id} ({path.name}):\n{content_out[:max_chars]}",
+                facts={"manifest": manifest},
+            )
+
         content = path.read_text(encoding="utf-8", errors="replace")
         max_chars = min(max(max_chars, 100), 8000)
         offset = max(0, int(offset or 0))
 
+        # 2. Search mode (Grep-style multi-match)
         if search is not None and str(search).strip():
-            search_str = str(search).lower()
-            idx = content.lower().find(search_str, offset)
-            if idx != -1:
-                start = max(0, idx - 200)
-                end = min(len(content), start + max_chars)
-                excerpt = content[start:end]
+            search_str = str(search).lower().strip()
+            lines = content.splitlines()
+
+            # For normal line-based files: line grep with context
+            if len(lines) > 1 and max(len(l) for l in lines) < 2500:
+                matching_indices = [
+                    idx for idx, line in enumerate(lines) if search_str in line.lower()
+                ]
+
+                if not matching_indices:
+                    excerpt = f"Search term {search!r} not found in artifact."
+                else:
+                    parts: list[str] = [
+                        f"Found {len(matching_indices)} match(es) for {search!r}:"
+                    ]
+                    shown = 0
+                    for m_idx in matching_indices[:8]:
+                        start_ctx = max(0, m_idx - 1)
+                        end_ctx = min(len(lines), m_idx + 2)
+                        block_lines = [
+                            f"  {ln + 1:4d}: {lines[ln]}" for ln in range(start_ctx, end_ctx)
+                        ]
+                        parts.append(f"[Match {shown + 1} at line {m_idx + 1}]:\n" + "\n".join(block_lines))
+                        shown += 1
+                        if sum(len(p) for p in parts) >= max_chars - 200:
+                            break
+
+                    if len(matching_indices) > shown:
+                        parts.append(f"... (+{len(matching_indices) - shown} more matches truncated)")
+                    excerpt = "\n\n".join(parts)[:max_chars]
             else:
-                excerpt = f"Search term {search!r} not found in artifact."
+                # For single-line minified files (or huge lines)
+                first_idx = content.lower().find(search_str, offset)
+                if first_idx != -1:
+                    start = max(0, first_idx - 200)
+                    end = min(len(content), start + max_chars)
+                    excerpt = content[start:end]
+                else:
+                    excerpt = f"Search term {search!r} not found in artifact."
         else:
-            excerpt = content[offset : offset + max_chars]
+            manifest_banner = ""
+            if manifest and offset == 0:
+                routes_cnt = len(manifest.get("routes", []))
+                forms_cnt = len(manifest.get("forms", []))
+                files_cnt = len(manifest.get("files", []))
+                manifest_banner = f"[Manifest: {routes_cnt} route(s), {forms_cnt} form(s), {files_cnt} file(s)]\n"
+
+            raw_slice = content[offset : offset + max_chars]
+            excerpt = f"{manifest_banner}{raw_slice}"
 
         return Observation(
             ok=True,
@@ -95,6 +171,7 @@ async def read_artifact(
             target=step.target,
             step_id=step.id,
             summary=f"Read {len(excerpt)} chars from artifact for step {step_id} (offset {offset}, total {len(content)} chars):\n{excerpt}",
+            facts={},
         )
     except Exception as exc:
         return Observation(

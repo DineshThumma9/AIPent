@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+import re
 from typing import Any
 from urllib.parse import urlsplit
 
 from app.adapters.base import EvidenceDraft, FindingDraft
 from app.domain.models import FindingStatus, Origin, Severity
 
-DEFAULT_WORDLIST = "/usr/share/wordlists/dirb/common.txt"
+_REPO_WORDLIST = Path(__file__).resolve().parents[3] / "data" / "wordlists" / "common.txt"
+DEFAULT_WORDLIST = (
+    str(_REPO_WORDLIST)
+    if _REPO_WORDLIST.exists()
+    else "/usr/share/wordlists/dirb/common.txt"
+)
 
 SENSITIVE_KEYWORDS = (
     "admin",
@@ -52,10 +59,43 @@ def argv(
     auto_calibrate: bool = True,
 ) -> list[str]:
     """Build ffuf command-line arguments."""
-    scheme = "https" if port in (443, 8443) else "http"
-    base_url = f"{scheme}://{target}:{port}"
+    if "://" in target:
+        parsed = urlsplit(target)
+        scheme = parsed.scheme or "http"
+        host = parsed.hostname or target
+        port = parsed.port or port
+    elif ":" in target:
+        host, _, target_port = target.partition(":")
+        try:
+            port = int(target_port)
+        except ValueError:
+            pass
+        scheme = "https" if port in (443, 8443) else "http"
+    else:
+        host = target
+        scheme = "https" if port in (443, 8443) else "http"
+    base_url = f"{scheme}://{host}:{port}"
     target_url = normalize_fuzz_url(base_url, path)
-    wl = wordlist or DEFAULT_WORDLIST
+
+    wl = DEFAULT_WORDLIST
+    if wordlist:
+        if Path(wordlist).exists():
+            wl = wordlist
+        elif "," in wordlist or "\n" in wordlist or " " in wordlist:
+            # Inline wordlist provided by LLM (e.g. comma-separated endpoints)
+            entries = [
+                w.strip().lstrip("/")
+                for w in re.split(r"[, \n]+", wordlist)
+                if w.strip()
+            ]
+            if entries:
+                inline_path = Path(output_path).parent / f"wordlist_{abs(hash(wordlist)) % 10000}.txt"
+                try:
+                    inline_path.parent.mkdir(parents=True, exist_ok=True)
+                    inline_path.write_text("\n".join(entries) + "\n", encoding="utf-8")
+                    wl = str(inline_path)
+                except Exception:
+                    wl = DEFAULT_WORDLIST
 
     args = [
         "ffuf",

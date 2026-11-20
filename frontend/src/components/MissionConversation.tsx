@@ -215,10 +215,11 @@ type DecisionHandler = (
   feedback?: string,
 ) => void
 
-const blankStep = (): PlanStep => ({
+const blankStep = (target: string = ''): PlanStep => ({
+  id: crypto.randomUUID(),
   role: 'discovery',
-  action: 'curl_request',
-  target: '',
+  action: '',
+  target: target,
   rationale: '',
   enabled: true,
   valid_action: null,
@@ -239,11 +240,20 @@ function PlanCard({
 }) {
   const detail = approval.detail as Record<string, unknown>
   const proposed = approvalPlan(approval)
-  const [steps, setSteps] = useState<PlanStep[]>(
-    proposed.length ? proposed : [blankStep()],
+  const defaultTarget =
+    typeof detail.target === 'string' && detail.target
+      ? detail.target
+      : Array.isArray(detail.targets) && detail.targets[0]
+        ? String(detail.targets[0])
+        : approvalTarget(approval) || ''
+  const [steps, setSteps] = useState<PlanStep[]>(() =>
+    (proposed.length ? proposed : [blankStep(defaultTarget)]).map((step) => ({
+      ...step,
+      target: step.target || defaultTarget,
+      id: step.id || crypto.randomUUID(),
+    })),
   )
   const [feedback, setFeedback] = useState('')
-  const available = (detail.available_actions ?? {}) as Record<string, string[]>
   const objective = typeof detail.objective === 'string' ? detail.objective : ''
   const pending = approval.decision === 'pending'
   const canDecide = pending && gateOpen && !settled && !busy
@@ -253,9 +263,11 @@ function PlanCard({
       current.map((step, i) => (i === index ? { ...step, ...patch } : step)),
     )
 
-  const roleOptions = Array.from(
-    new Set(['recon', 'discovery', 'validation', 'review', ...steps.map((s) => s.role)]),
-  ).filter(Boolean)
+  const sizeStep = (element: HTMLTextAreaElement | null) => {
+    if (!element) return
+    element.style.height = 'auto'
+    element.style.height = `${element.scrollHeight}px`
+  }
 
   const reason = feedback.trim() || 'Approved from the mission desk'
 
@@ -272,71 +284,68 @@ function PlanCard({
 
       {objective && <p className="plan-objective">{objective}</p>}
 
-      <datalist id="plan-actions">
-        {Object.values(available)
-          .flat()
-          .map((action) => (
-            <option key={action} value={action} />
-          ))}
-      </datalist>
-
       <ol className="plan-checklist">
         {steps.map((step, index) => (
-          <li className="plan-check" key={index}>
-            <span className="plan-num mono">{String(index + 1).padStart(2, '0')}</span>
-            <div className="plan-check-main">
-              <div className="plan-check-line">
-                <select
-                  className="plan-role mono"
-                  aria-label={`Role for step ${index + 1}`}
-                  value={step.role}
-                  onChange={(event) => update(index, { role: event.target.value })}
-                  disabled={!canDecide}
+          <li className="plan-step" key={step.id}>
+            <div className="plan-step-gutter">
+              <span className="plan-step-num mono">{String(index + 1).padStart(2, '0')}</span>
+              {canDecide && (
+                <button
+                  type="button"
+                  className="plan-x"
+                  aria-label={`Remove step ${index + 1}`}
+                  onClick={() => setSteps((current) => current.filter((_, i) => i !== index))}
                 >
-                  {roleOptions.map((role) => (
-                    <option key={role} value={role}>
-                      {role}
-                    </option>
-                  ))}
-                </select>
+                  ×
+                </button>
+              )}
+            </div>
+
+            <div className="plan-step-main">
+              <textarea
+                className="plan-step-text"
+                aria-label={`Step ${index + 1}`}
+                rows={1}
+                ref={sizeStep}
+                value={step.rationale}
+                placeholder="What this step should accomplish"
+                onChange={(event) => {
+                  sizeStep(event.currentTarget)
+                  update(index, { rationale: event.target.value })
+                }}
+                disabled={!canDecide}
+              />
+              <div className="plan-step-sub">
                 <input
-                  className="plan-action mono"
-                  aria-label={`Action for step ${index + 1}`}
+                  className="plan-step-tool mono"
+                  aria-label={`Tool for step ${index + 1}`}
                   value={step.action}
-                  list="plan-actions"
+                  placeholder="tool (optional)"
                   onChange={(event) => update(index, { action: event.target.value })}
                   disabled={!canDecide}
                 />
                 <input
-                  className="plan-target mono"
+                  className="plan-step-target mono"
                   aria-label={`Target for step ${index + 1}`}
                   value={step.target}
+                  placeholder="target (optional)"
                   onChange={(event) => update(index, { target: event.target.value })}
                   disabled={!canDecide}
                 />
                 {step.valid_action === false && (
-                  <span className="plan-invalid" title="Action is not in this role's tool registry">!</span>
+                  <span className="plan-step-warn" title="Tool is not in this agent's registry">!</span>
                 )}
               </div>
-              <input
-                className="plan-why"
-                aria-label={`Rationale for step ${index + 1}`}
-                value={step.rationale}
-                placeholder="Why this step"
-                onChange={(event) => update(index, { rationale: event.target.value })}
-                disabled={!canDecide}
-              />
             </div>
-            {canDecide && (
-              <button
-                type="button"
-                className="plan-x"
-                aria-label={`Remove step ${index + 1}`}
-                onClick={() => setSteps((current) => current.filter((_, i) => i !== index))}
-              >
-                ×
-              </button>
-            )}
+
+            <input
+              className="plan-step-agent mono"
+              aria-label={`Agent for step ${index + 1}`}
+              value={step.role}
+              placeholder="agent"
+              onChange={(event) => update(index, { role: event.target.value })}
+              disabled={!canDecide}
+            />
           </li>
         ))}
       </ol>
@@ -345,7 +354,7 @@ function PlanCard({
         <button
           type="button"
           className="plan-add"
-          onClick={() => setSteps((current) => [...current, blankStep()])}
+          onClick={() => setSteps((current) => [...current, blankStep(defaultTarget)])}
         >
           + Add step
         </button>
@@ -381,7 +390,12 @@ function PlanCard({
                 onDecision(
                   'approved',
                   reason,
-                  steps.filter((step) => step.action.trim() && step.target.trim()),
+                  steps
+                    .filter((step) => step.rationale.trim())
+                    .map((step) => ({
+                      ...step,
+                      target: step.target.trim() || defaultTarget,
+                    })),
                   feedback,
                 )
               }

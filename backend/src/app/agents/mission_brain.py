@@ -360,9 +360,15 @@ def normalize_plan_steps(raw: Any) -> list[dict[str, Any]]:
             role = "recon"
         action = str(item.get("action") or "").strip()
         target = str(item.get("target") or "").strip()
+        rationale = str(item.get("rationale") or "").strip()[:1000]
+
+        if not action and rationale:
+            action = "curl_request" if role in ("discovery", "validation") else "nmap_scan"
+        if not target and rationale:
+            target = "in-scope target"
+
         if not action or not target:
             continue
-        rationale = str(item.get("rationale") or "").strip()[:1000]
         steps.append(
             {
                 "role": role,

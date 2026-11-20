@@ -22,6 +22,11 @@ from app.agents.mission_brain import ROLE_TURN_CAPS
 from app.agents.model import build_role_model
 from app.agents.observations import error_observation, rejection_observation
 from app.agents.prompts import ROLE_PROMPTS
+from app.agents.state import (
+    close_dangling_tool_calls,
+    get_role_messages,
+    update_role_messages,
+)
 from app.agents.tool_specs import bindable_tools, is_direct_tool, lookup_tool
 from app.core.config import settings
 from app.core.db import get_async_session_ctx
@@ -92,6 +97,121 @@ def next_no_progress(
     return 0
 
 
+def extract_text_handoff(content: Any, role: str) -> dict[str, Any] | None:
+    """Detect and parse text-based handoff responses from LLMs into a synthetic tool call."""
+    if not isinstance(content, str) or not content.strip():
+        return None
+
+    import re
+    import uuid
+
+    text = content.strip()
+    lower = text.lower()
+    if "handoff" not in lower and "next_role" not in lower:
+        return None
+
+    next_role_default = "discovery" if role == "recon" else ("validation" if role == "discovery" else "review")
+
+    # 1. Look for ```json { ... } ``` or ``` { ... } ``` block
+    json_blocks = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    for block in json_blocks:
+        try:
+            data = json.loads(block)
+            if isinstance(data, dict):
+                args = data.get("args") if "args" in data and isinstance(data["args"], dict) else data
+                if "next_role" in args or data.get("name") == "handoff":
+                    next_r = str(args.get("next_role") or next_role_default).lower()
+                    if next_r in ("recon", "discovery", "validation", "review"):
+                        return {
+                            "id": f"call_handoff_{uuid.uuid4().hex[:8]}",
+                            "name": "handoff",
+                            "args": {
+                                "summary": str(args.get("summary") or args.get("why") or f"Handoff from {role} to {next_r}"),
+                                "next_role": next_r,
+                                "why": str(args.get("why") or args.get("summary") or f"Proceeding to {next_r}"),
+                                "confidence": float(args.get("confidence") if args.get("confidence") is not None else 0.8),
+                                "stop_reason": str(args.get("stop_reason") or ("surface_mapped" if role == "recon" else "hypotheses_tested")),
+                                "finding_ids": list(args.get("finding_ids") or []),
+                                "step_ids": list(args.get("step_ids") or []),
+                                "open_questions": list(args.get("open_questions") or []),
+                                "recommended_actions": list(args.get("recommended_actions") or []),
+                            },
+                        }
+        except Exception:
+            pass
+
+    # 2. Look for bare JSON object with next_role
+    bare_matches = re.findall(r"(\{[^{}]*\"next_role\"[^{}]*\})", text, re.DOTALL)
+    for block in bare_matches:
+        try:
+            data = json.loads(block)
+            if isinstance(data, dict) and "next_role" in data:
+                next_r = str(data.get("next_role") or next_role_default).lower()
+                if next_r in ("recon", "discovery", "validation", "review"):
+                    return {
+                        "id": f"call_handoff_{uuid.uuid4().hex[:8]}",
+                        "name": "handoff",
+                        "args": {
+                            "summary": str(data.get("summary") or data.get("why") or f"Handoff from {role} to {next_r}"),
+                            "next_role": next_r,
+                            "why": str(data.get("why") or data.get("summary") or f"Proceeding to {next_r}"),
+                            "confidence": float(data.get("confidence") if data.get("confidence") is not None else 0.8),
+                            "stop_reason": str(data.get("stop_reason") or ("surface_mapped" if role == "recon" else "hypotheses_tested")),
+                            "finding_ids": list(data.get("finding_ids") or []),
+                            "step_ids": list(data.get("step_ids") or []),
+                            "open_questions": list(data.get("open_questions") or []),
+                            "recommended_actions": list(data.get("recommended_actions") or []),
+                        },
+                    }
+        except Exception:
+            pass
+
+    # 3. Look for handoff(next_role="...", why="...") pattern
+    call_match = re.search(r"handoff\s*\(\s*next_role\s*=\s*['\"]([^'\"]+)['\"](?:\s*,\s*why\s*=\s*['\"]([^'\"]+)['\"])?", text, re.IGNORECASE)
+    if call_match:
+        next_r = call_match.group(1).lower()
+        if next_r in ("recon", "discovery", "validation", "review"):
+            why = call_match.group(2) or f"Handoff from {role} to {next_r}"
+            return {
+                "id": f"call_handoff_{uuid.uuid4().hex[:8]}",
+                "name": "handoff",
+                "args": {
+                    "summary": why,
+                    "next_role": next_r,
+                    "why": why,
+                    "confidence": 0.8,
+                    "stop_reason": "surface_mapped" if role == "recon" else "hypotheses_tested",
+                    "finding_ids": [],
+                    "step_ids": [],
+                    "open_questions": [],
+                    "recommended_actions": [],
+                },
+            }
+
+    # 4. Look for bold **handoff** or similar keywords
+    keyword_match = re.search(r"\bhandoff\b.*?to\s+([a-zA-Z]+)", text, re.IGNORECASE)
+    if keyword_match:
+        target_role = keyword_match.group(1).lower()
+        if target_role in ("recon", "discovery", "validation", "review"):
+            return {
+                "id": f"call_handoff_{uuid.uuid4().hex[:8]}",
+                "name": "handoff",
+                "args": {
+                    "summary": f"Handoff from {role} to {target_role}",
+                    "next_role": target_role,
+                    "why": text[:500],
+                    "confidence": 0.8,
+                    "stop_reason": "surface_mapped" if role == "recon" else "hypotheses_tested",
+                    "finding_ids": [],
+                    "step_ids": [],
+                    "open_questions": [],
+                    "recommended_actions": [],
+                },
+            }
+
+    return None
+
+
 async def brief_node(state: AssessmentState) -> Command:
     """Build specialist context from DB and transition to model."""
     assessment_id = state["assessment_id"]
@@ -115,8 +235,7 @@ async def brief_node(state: AssessmentState) -> Command:
         feedback=state.get("plan_feedback", "") or "",
     )
 
-    role_key = f"{role}_messages" if role in ("recon", "discovery", "validation") else None
-    existing_role_msgs = list(state.get(role_key, [])) if role_key else []
+    existing_role_msgs = close_dangling_tool_calls(get_role_messages(state, role))
 
     if existing_role_msgs:
         role_msgs = [*existing_role_msgs, HumanMessage(content=f"MISSION UPDATE & DIRECTIVE:\n{digest}")]
@@ -124,15 +243,13 @@ async def brief_node(state: AssessmentState) -> Command:
         role_msgs = [HumanMessage(content=digest)]
 
     update_dict: dict[str, Any] = {
-        "messages": role_msgs,
+        **update_role_messages(state, role_msgs, role),
         "pending_action": None,
         "approval_decision": None,
         "supervisor_directive": None,
         "nudges": 0,
         "no_progress": 0,
     }
-    if role_key:
-        update_dict[role_key] = role_msgs
 
     return Command(
         update=update_dict,
@@ -146,8 +263,6 @@ async def model_node(state: AssessmentState) -> Command:
     assessment_id = state["assessment_id"]
     cap = min(ROLE_TURN_CAPS.get(role, 8), settings.max_agent_turns)
     turns = dict(state.get("turns", {}))
-
-    role_key = f"{role}_messages" if role in ("recon", "discovery", "validation") else None
 
     if turns.get(role, 0) >= cap:
         signal = FailureSignal(
@@ -170,11 +285,10 @@ async def model_node(state: AssessmentState) -> Command:
             )
             await session.commit()
         update_dict: dict[str, Any] = {
+            **update_role_messages(state, get_role_messages(state, role), role),
             "last_message": signal.summary,
             "failure_signal": signal.model_dump(),
         }
-        if role_key:
-            update_dict[role_key] = state.get("messages", [])
         return Command(
             update=update_dict,
             goto="supervisor",
@@ -191,11 +305,10 @@ async def model_node(state: AssessmentState) -> Command:
             attempts=turns.get(role, 0),
         )
         update_dict = {
+            **update_role_messages(state, get_role_messages(state, role), role),
             "last_message": signal.summary,
             "failure_signal": signal.model_dump(),
         }
-        if role_key:
-            update_dict[role_key] = state.get("messages", [])
         return Command(
             update=update_dict,
             goto="supervisor",
@@ -203,7 +316,7 @@ async def model_node(state: AssessmentState) -> Command:
 
     role_model_fn = getattr(sys.modules.get("app.agents.nodes"), "build_role_model", build_role_model)
     model = role_model_fn(role).bind_tools(bindable_tools(role))
-    messages = list(state.get("messages", []))
+    messages = close_dangling_tool_calls(get_role_messages(state, role))
     if role in ROLE_PROMPTS:
         if messages and isinstance(messages[0], SystemMessage):
             messages[0] = SystemMessage(content=ROLE_PROMPTS[role])
@@ -248,7 +361,7 @@ async def model_node(state: AssessmentState) -> Command:
                 )
                 return Command(
                     update={
-                        "messages": messages,
+                        **update_role_messages(state, messages, role),
                         "turns": turns,
                         "last_message": signal.summary,
                         "failure_signal": signal.model_dump(),
@@ -273,6 +386,16 @@ async def model_node(state: AssessmentState) -> Command:
         await session.commit()
 
     tool_calls = list(getattr(ai, "tool_calls", []) or [])
+    if not tool_calls and getattr(ai, "content", None):
+        recovered = extract_text_handoff(ai.content, role)
+        if recovered:
+            logger.info("model_node: role=%s recovered text handoff: %s", role, recovered)
+            tool_calls = [recovered]
+            try:
+                ai.tool_calls = [recovered]
+            except Exception:
+                pass
+
     if tool_calls:
         for tc in tool_calls:
             logger.info("model_node: role=%s generated tool_call=%s args=%s", role, tc.get("name"), tc.get("args"))
@@ -288,7 +411,7 @@ async def model_node(state: AssessmentState) -> Command:
             )
             return Command(
                 update={
-                    "messages": [*messages, nudge_msg],
+                    **update_role_messages(state, [*messages, nudge_msg], role),
                     "turns": turns,
                     "nudges": state.get("nudges", 0) + 1,
                 },
@@ -302,7 +425,7 @@ async def model_node(state: AssessmentState) -> Command:
         )
         return Command(
             update={
-                "messages": messages,
+                **update_role_messages(state, messages, role),
                 "turns": turns,
                 "last_message": signal.summary,
                 "failure_signal": signal.model_dump(),
@@ -328,9 +451,10 @@ async def model_node(state: AssessmentState) -> Command:
             )
 
     name = first["name"]
-    update_dict = {"messages": messages, "turns": turns}
-    if role_key:
-        update_dict[role_key] = messages
+    update_dict = {
+        **update_role_messages(state, messages, role),
+        "turns": turns,
+    }
 
     if is_direct_tool(role, name) or name == "handoff":
         return Command(
@@ -354,26 +478,29 @@ def _last_tool_call(messages: list[AnyMessage]) -> dict[str, Any]:
 
 async def prepare_node(state: AssessmentState) -> Command:
     """Validate tool schema, create planned Step/Approval, and build ActionRequest."""
-    tool_call = _last_tool_call(state["messages"])
     role = state["role"]
     assessment_id = state["assessment_id"]
+    current_msgs = get_role_messages(state, role)
+    tool_call = _last_tool_call(current_msgs)
 
     try:
         spec = lookup_tool(role, tool_call["name"])
     except KeyError as exc:
         obs = error_observation(tool_call["name"], "unknown", str(exc))
         return Command(
-            update={
-                "messages": [
-                    *state["messages"],
+            update=update_role_messages(
+                state,
+                [
+                    *current_msgs,
                     ToolMessage(
                         tool_call_id=tool_call["id"],
                         name=tool_call["name"],
                         status="error",
                         content=obs.model_dump_json(),
                     ),
-                ]
-            },
+                ],
+                role,
+            ),
             goto="model",
         )
 
@@ -390,17 +517,19 @@ async def prepare_node(state: AssessmentState) -> Command:
     except Exception as exc:
         obs = error_observation(tool_call["name"], getattr(args_raw, "target", "unknown"), f"Schema validation error: {exc}")
         return Command(
-            update={
-                "messages": [
-                    *state["messages"],
+            update=update_role_messages(
+                state,
+                [
+                    *current_msgs,
                     ToolMessage(
                         tool_call_id=tool_call["id"],
                         name=tool_call["name"],
                         status="error",
                         content=obs.model_dump_json(),
                     ),
-                ]
-            },
+                ],
+                role,
+            ),
             goto="model",
         )
 
@@ -417,17 +546,19 @@ async def prepare_node(state: AssessmentState) -> Command:
         except Exception as exc:
             obs = error_observation(spec.action or spec.name, target, str(exc))
             return Command(
-                update={
-                    "messages": [
-                        *state["messages"],
+                update=update_role_messages(
+                    state,
+                    [
+                        *current_msgs,
                         ToolMessage(
                             tool_call_id=tool_call["id"],
                             name=tool_call["name"],
                             status="error",
                             content=obs.model_dump_json(),
                         ),
-                    ]
-                },
+                    ],
+                    role,
+                ),
                 goto="model",
             )
 
@@ -466,50 +597,56 @@ async def prepare_node(state: AssessmentState) -> Command:
                 if source_step is None or source_step.assessment_id != assessment_id:
                     obs = error_observation(action_name, target, f"source_step_id {source_step_id} not found")
                     return Command(
-                        update={
-                            "messages": [
-                                *state["messages"],
+                        update=update_role_messages(
+                            state,
+                            [
+                                *current_msgs,
                                 ToolMessage(
                                     tool_call_id=tool_call["id"],
                                     name=tool_call["name"],
                                     status="error",
                                     content=obs.model_dump_json(),
                                 ),
-                            ]
-                        },
+                            ],
+                            role,
+                        ),
                         goto="model",
                     )
                 if not source_step.output_path or not Path(source_step.output_path).exists():
                     obs = error_observation(action_name, target, f"source_step_id {source_step_id} has no artifact file")
                     return Command(
-                        update={
-                            "messages": [
-                                *state["messages"],
+                        update=update_role_messages(
+                            state,
+                            [
+                                *current_msgs,
                                 ToolMessage(
                                     tool_call_id=tool_call["id"],
                                     name=tool_call["name"],
                                     status="error",
                                     content=obs.model_dump_json(),
                                 ),
-                            ]
-                        },
+                            ],
+                            role,
+                        ),
                         goto="model",
                     )
                 text = Path(source_step.output_path).read_text(errors="replace")
                 if hash_val.lower() not in text.lower():
                     obs = error_observation(action_name, target, "hash_value does not appear in that artifact")
                     return Command(
-                        update={
-                            "messages": [
-                                *state["messages"],
+                        update=update_role_messages(
+                            state,
+                            [
+                                *current_msgs,
                                 ToolMessage(
                                     tool_call_id=tool_call["id"],
                                     name=tool_call["name"],
                                     status="error",
                                     content=obs.model_dump_json(),
                                 ),
-                            ]
-                        },
+                            ],
+                            role,
+                        ),
                         goto="model",
                     )
                 input_path = base / f"hashcat-input-{source_step_id}.txt"
@@ -520,50 +657,56 @@ async def prepare_node(state: AssessmentState) -> Command:
                 if not input_path.is_relative_to(base):
                     obs = error_observation(action_name, target, "hash_file must stay inside the assessment artifact directory")
                     return Command(
-                        update={
-                            "messages": [
-                                *state["messages"],
+                        update=update_role_messages(
+                            state,
+                            [
+                                *current_msgs,
                                 ToolMessage(
                                     tool_call_id=tool_call["id"],
                                     name=tool_call["name"],
                                     status="error",
                                     content=obs.model_dump_json(),
                                 ),
-                            ]
-                        },
+                            ],
+                            role,
+                        ),
                         goto="model",
                     )
                 if not input_path.exists():
                     obs = error_observation(action_name, target, f"hash_file {hash_file} does not exist")
                     return Command(
-                        update={
-                            "messages": [
-                                *state["messages"],
+                        update=update_role_messages(
+                            state,
+                            [
+                                *current_msgs,
                                 ToolMessage(
                                     tool_call_id=tool_call["id"],
                                     name=tool_call["name"],
                                     status="error",
                                     content=obs.model_dump_json(),
                                 ),
-                            ]
-                        },
+                            ],
+                            role,
+                        ),
                         goto="model",
                     )
                 params["input_path"] = str(input_path)
             else:
                 obs = error_observation(action_name, target, "hashcat_crack needs source_step_id + hash_value or hash_file")
                 return Command(
-                    update={
-                        "messages": [
-                            *state["messages"],
+                    update=update_role_messages(
+                        state,
+                        [
+                            *current_msgs,
                             ToolMessage(
                                 tool_call_id=tool_call["id"],
                                 name=tool_call["name"],
                                 status="error",
                                 content=obs.model_dump_json(),
                             ),
-                        ]
-                    },
+                        ],
+                        role,
+                    ),
                     goto="model",
                 )
 
@@ -608,17 +751,19 @@ async def prepare_node(state: AssessmentState) -> Command:
     if result.get("error"):
         obs = error_observation(spec.action or spec.name, target, result["error"])
         return Command(
-            update={
-                "messages": [
-                    *state["messages"],
+            update=update_role_messages(
+                state,
+                [
+                    *current_msgs,
                     ToolMessage(
                         tool_call_id=tool_call["id"],
                         name=tool_call["name"],
                         status="error",
                         content=obs.model_dump_json(),
                     ),
-                ]
-            },
+                ],
+                role,
+            ),
             goto="model",
         )
 
@@ -633,17 +778,19 @@ async def prepare_node(state: AssessmentState) -> Command:
             next_hint="Analyze previous observation or hand off.",
         )
         return Command(
-            update={
-                "messages": [
-                    *state["messages"],
+            update=update_role_messages(
+                state,
+                [
+                    *current_msgs,
                     ToolMessage(
                         tool_call_id=tool_call["id"],
                         name=tool_call["name"],
                         status="success",
                         content=obs.model_dump_json(),
                     ),
-                ]
-            },
+                ],
+                role,
+            ),
             goto="model",
         )
 
@@ -689,21 +836,28 @@ async def approve_node(state: AssessmentState) -> Command:
         audit_repo = AuditRepo(session)
         assessment_repo = AssessmentRepo(session)
 
+        role = state.get("role") or "agent"
+        current_msgs = get_role_messages(state, role)
+
         step = await step_repo.get_by_id(pending.step_id)
         approval = await session.get(Approval, pending.approval_id)
         if approval is None or step is None:
             obs = error_observation(pending.action, pending.target, "Step or approval record missing")
             return Command(
                 update={
-                    "messages": [
-                        *state["messages"],
-                        ToolMessage(
-                            tool_call_id=pending.tool_call_id,
-                            name=pending.tool_name or pending.action,
-                            status="error",
-                            content=obs.model_dump_json(),
-                        ),
-                    ],
+                    **update_role_messages(
+                        state,
+                        [
+                            *current_msgs,
+                            ToolMessage(
+                                tool_call_id=pending.tool_call_id,
+                                name=pending.tool_name or pending.action,
+                                status="error",
+                                content=obs.model_dump_json(),
+                            ),
+                        ],
+                        role,
+                    ),
                     "pending_action": None,
                 },
                 goto="model",
@@ -752,16 +906,18 @@ async def approve_node(state: AssessmentState) -> Command:
             approved = approval.decision == Decision.APPROVED.value
 
     if needs_human_approval:
-        logger.info(
-            "approve_node: step=%s action=%s requires human approval -> pausing at gate",
-            interrupt_payload["step_id"],
-            interrupt_payload["action"],
-        )
         decision = interrupt(interrupt_payload)
         decision_dict = decision if isinstance(decision, dict) else {}
         approved = str(decision_dict.get("decision", "rejected")).lower() == "approved"
         rejection_reason = decision_dict.get("reason") or "rejected by analyst"
         actor = decision_dict.get("actor") or "analyst"
+        logger.info(
+            "approve_node: step=%s action=%s gate resolved with decision=%s by %s",
+            interrupt_payload["step_id"],
+            interrupt_payload["action"],
+            "approved" if approved else "rejected",
+            actor,
+        )
 
         async with get_async_session_ctx() as session:
             step_repo = StepRepo(session)
@@ -823,18 +979,24 @@ async def approve_node(state: AssessmentState) -> Command:
             await session.commit()
 
     if not approved:
+        role = state.get("role") or "agent"
+        current_msgs = get_role_messages(state, role)
         obs = rejection_observation(pending, rejection_reason if 'rejection_reason' in locals() else "rejected by analyst")
         return Command(
             update={
-                "messages": [
-                    *state["messages"],
-                    ToolMessage(
-                        tool_call_id=pending.tool_call_id,
-                        name=pending.tool_name or pending.action,
-                        status="error",
-                        content=obs.model_dump_json(),
-                    ),
-                ],
+                **update_role_messages(
+                    state,
+                    [
+                        *current_msgs,
+                        ToolMessage(
+                            tool_call_id=pending.tool_call_id,
+                            name=pending.tool_name or pending.action,
+                            status="error",
+                            content=obs.model_dump_json(),
+                        ),
+                    ],
+                    role,
+                ),
                 "pending_action": None,
                 "approval_decision": {"decision": "rejected"},
                 "observations": [obs.model_dump()],
@@ -859,10 +1021,11 @@ async def approve_node(state: AssessmentState) -> Command:
 
 async def handoff_node(state: AssessmentState) -> Command:
     """Validate specialist handoff and route to supervisor."""
-    call = _last_tool_call(state["messages"])
+    role = state["role"]
     assessment_id = state["assessment_id"]
     run_id = state["run_id"]
-    role = state["role"]
+    current_msgs = get_role_messages(state, role)
+    call = _last_tool_call(current_msgs)
 
     args_raw = call.get("args") or {}
     if isinstance(args_raw, str):
@@ -883,19 +1046,23 @@ async def handoff_node(state: AssessmentState) -> Command:
     except Exception as exc:
         return Command(
             update={
-                "messages": [
-                    *state["messages"],
-                    ToolMessage(
-                        tool_call_id=call["id"],
-                        name="handoff",
-                        status="error",
-                        content=json.dumps({
-                            "ok": False,
-                            "status": "error",
-                            "summary": f"Invalid handoff: {exc}",
-                        }),
-                    ),
-                ],
+                **update_role_messages(
+                    state,
+                    [
+                        *current_msgs,
+                        ToolMessage(
+                            tool_call_id=call["id"],
+                            name="handoff",
+                            status="error",
+                            content=json.dumps({
+                                "ok": False,
+                                "status": "error",
+                                "summary": f"Invalid handoff: {exc}",
+                            }),
+                        ),
+                    ],
+                    role,
+                ),
                 "nudges": state.get("nudges", 0) + 1,
             },
             goto="model",
@@ -921,9 +1088,8 @@ async def handoff_node(state: AssessmentState) -> Command:
         )
         await session.commit()
 
-    role_key = f"{role}_messages" if role in ("recon", "discovery", "validation") else None
     final_messages = [
-        *state["messages"],
+        *current_msgs,
         ToolMessage(
             tool_call_id=call["id"],
             name="handoff",
@@ -932,13 +1098,11 @@ async def handoff_node(state: AssessmentState) -> Command:
         ),
     ]
     update_dict: dict[str, Any] = {
+        **update_role_messages(state, final_messages, role),
         "last_handoff": handoff.model_dump(),
-        "messages": final_messages,
         "last_message": handoff.summary,
         "finished": True,
     }
-    if role_key:
-        update_dict[role_key] = final_messages
 
     return Command(
         update=update_dict,

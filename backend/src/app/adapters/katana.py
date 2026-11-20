@@ -33,8 +33,22 @@ def argv(
     depth: int = 3,
 ) -> list[str]:
     """Build katana command-line arguments."""
-    scheme = "https" if port in (443, 8443) else "http"
-    url = f"{scheme}://{target}:{port}"
+    if "://" in target:
+        parsed = urlsplit(target)
+        scheme = parsed.scheme or "http"
+        host = parsed.hostname or target
+        port = parsed.port or port
+    elif ":" in target:
+        host, _, target_port = target.partition(":")
+        try:
+            port = int(target_port)
+        except ValueError:
+            pass
+        scheme = "https" if port in (443, 8443) else "http"
+    else:
+        host = target
+        scheme = "https" if port in (443, 8443) else "http"
+    url = f"{scheme}://{host}:{port}"
 
     return [
         "katana",

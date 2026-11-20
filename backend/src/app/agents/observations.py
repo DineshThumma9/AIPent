@@ -592,7 +592,14 @@ def _build_pure_observation(
         elif http_status in (400, 422):
             next_hint = "HTTP 4xx: Server rejected request syntax or payload structure. Inspect response body for validation errors, adjust JSON fields/headers, and retry."
         elif http_status in (401, 403):
-            next_hint = f"HTTP {http_status}: Authentication or authorization required. Analyze headers, test for bypass, or inspect public paths."
+            if any(term in request_url.lower() for term in ("login", "auth", "token", "session")):
+                next_hint = (
+                    f"HTTP {http_status} on login/auth: Credentials rejected. Do not brute-force or guess credentials repeatedly. "
+                    "Test for authentication bypass (e.g. SQL injection on login: {\"email\": \"' or 1=1--\", \"password\": \"x\"}), "
+                    "or test user registration (/api/Users) to create an account."
+                )
+            else:
+                next_hint = f"HTTP {http_status}: Authentication or authorization required. Analyze headers, test for token bypass, or inspect public paths."
         elif http_status == 404:
             next_hint = "HTTP 404: path does not exist. Do not retry variants; use ffuf results or read the API documentation artifact."
         elif http_status == 500 and "Unexpected path" in body_excerpt:

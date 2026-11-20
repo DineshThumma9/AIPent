@@ -205,6 +205,7 @@ export const AssessmentDetailSchema = AssessmentSchema.extend({
 })
 
 export const PlanStepSchema = z.object({
+  id: z.string().optional(),
   role: z.string().default(''),
   action: z.string(),
   target: z.string(),

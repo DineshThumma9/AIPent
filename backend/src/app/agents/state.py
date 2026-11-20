@@ -12,9 +12,13 @@ runner view, frontend mission.ts and the audit trail keep working.
 
 from typing import Annotated, Any
 from typing_extensions import TypedDict
-from langchain_core.messages import AnyMessage
+from langchain_core.messages import AIMessage, AnyMessage, ToolMessage
+import json
+import logging
 import operator
 import uuid
+
+logger = logging.getLogger("agent.state")
 
 
 def keep_last(n: int):
@@ -108,3 +112,78 @@ def initial_state(assessment_id: int, run_id: str | None = None) -> AssessmentSt
         "report_narrative": None,
         "report_path": "",
     }
+
+
+def get_role_key(role: str | None) -> str | None:
+    if role in ("recon", "discovery", "validation"):
+        return f"{role}_messages"
+    return None
+
+
+def get_role_messages(state: AssessmentState, role: str | None = None) -> list[AnyMessage]:
+    """Retrieve message history for the role, falling back to working messages."""
+    r = role or state.get("role")
+    role_key = get_role_key(r)
+    if role_key and state.get(role_key) is not None:
+        return list(state[role_key])
+    return list(state.get("messages", []))
+
+
+def update_role_messages(
+    state: AssessmentState,
+    messages: list[AnyMessage],
+    role: str | None = None,
+) -> dict[str, Any]:
+    """Atomic update ensuring the role-specific channel and working messages remain 100% in sync."""
+    r = role or state.get("role")
+    role_key = get_role_key(r)
+    update: dict[str, Any] = {"messages": messages}
+    if role_key:
+        update[role_key] = messages
+    return update
+
+
+def close_dangling_tool_calls(messages: list[AnyMessage]) -> list[AnyMessage]:
+    """Ensure protocol invariant: any AIMessage with tool_calls must have corresponding ToolMessages.
+
+    Synthesizes error ToolMessages for unresponded tool calls caused by turn interruptions,
+    restarts, or errors, preventing provider API 400 Bad Request rejection on resume.
+    """
+    if not messages:
+        return []
+
+    cleaned = list(messages)
+    answered_ids: set[str] = set()
+    for msg in cleaned:
+        if isinstance(msg, ToolMessage) and getattr(msg, "tool_call_id", None):
+            answered_ids.add(str(msg.tool_call_id))
+
+    result: list[AnyMessage] = []
+    for msg in cleaned:
+        result.append(msg)
+        if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+            for tc in msg.tool_calls:
+                tc_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
+                if tc_id and str(tc_id) not in answered_ids:
+                    tool_name = (
+                        tc.get("name", "tool")
+                        if isinstance(tc, dict)
+                        else getattr(tc, "name", "tool")
+                    )
+                    logger.warning(
+                        "Auto-closing dangling tool_call %s (%s)", tc_id, tool_name
+                    )
+                    result.append(
+                        ToolMessage(
+                            tool_call_id=str(tc_id),
+                            name=tool_name,
+                            status="error",
+                            content=json.dumps({
+                                "ok": False,
+                                "status": "error",
+                                "summary": f"Tool call {tool_name} was interrupted or superseded.",
+                            }),
+                        )
+                    )
+                    answered_ids.add(str(tc_id))
+    return result

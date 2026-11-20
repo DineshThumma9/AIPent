@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import os
 import shlex
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal
@@ -324,9 +326,11 @@ def _hashcat_argv(
 def _dirb_argv(
     assessment: Assessment, target: str, output: Path, params: dict[str, Any] | None = None
 ) -> list[str]:
+    host, port = _clean_host_and_port(target, _web_port(assessment))
+    scheme = "https" if port in (443, 8443) or target.strip().lower().startswith("https://") else "http"
     return [
         "dirb",
-        f"http://{target}:{_web_port(assessment)}/",
+        f"{scheme}://{host}:{port}/",
         "/usr/share/wordlists/dirb/common.txt",
         "-S",
         "-o",
@@ -338,9 +342,10 @@ def _ffuf_argv(
     assessment: Assessment, target: str, output: Path, params: dict[str, Any] | None = None
 ) -> list[str]:
     p = params or {}
+    host, port = _clean_host_and_port(target, _web_port(assessment))
     return ffuf.argv(
-        target=target,
-        port=_web_port(assessment),
+        target=host,
+        port=port,
         output_path=str(output),
         wordlist=p.get("wordlist"),
         path=p.get("path") or p.get("endpoint"),
@@ -355,9 +360,10 @@ def _katana_argv(
 ) -> list[str]:
     p = params or {}
     depth = int(p.get("depth", 3))
+    host, port = _clean_host_and_port(target, _web_port(assessment))
     return katana.argv(
-        target=target,
-        port=_web_port(assessment),
+        target=host,
+        port=port,
         output_path=str(output),
         depth=depth,
     )
@@ -367,9 +373,10 @@ def _nuclei_argv(
     assessment: Assessment, target: str, output: Path, params: dict[str, Any] | None = None
 ) -> list[str]:
     p = params or {}
+    host, port = _clean_host_and_port(target, _web_port(assessment))
     return nuclei.argv(
-        target=target,
-        port=_web_port(assessment),
+        target=host,
+        port=port,
         output_path=str(output),
         tags=p.get("tags"),
         severity=p.get("severity"),
@@ -791,6 +798,28 @@ def get_action(name: str) -> ActionSpec:
         raise UnknownAction(f"action {name!r} is not in the catalogue") from exc
 
 
+LOCAL_PREFERRED_ACTIONS = {"hashcat_crack", "ffuf_scan", "katana_crawl", "nuclei_scan"}
+
+
+def is_local_exempt(action: str) -> bool:
+    """Return True if the action is configured and available to run locally,
+
+    bypassing the MCP container so flags and auto-calibration are not stripped.
+    """
+    if action == "hashcat_crack":
+        return True
+    if action in LOCAL_PREFERRED_ACTIONS:
+        spec = ACTIONS.get(action)
+        if spec:
+            binary = spec.tool
+            if shutil.which(binary):
+                return True
+            local_bin = Path.home() / ".local" / "bin" / binary
+            if local_bin.exists() and os.access(local_bin, os.X_OK):
+                return True
+    return False
+
+
 def resolve_argv(
     action: str,
     assessment: Assessment,
@@ -803,7 +832,7 @@ def resolve_argv(
         settings.mcp_enabled
         and settings.mcp_transport == "gateway"
         and spec.transport != "http"
-        and action != "hashcat_crack"
+        and not is_local_exempt(action)
     ):
         return mcp_command(action, assessment, target, params=params)
     output = _artifact_dir(assessment.id or 0) / f"{step_id}{spec.suffix}"
@@ -814,8 +843,14 @@ _LOOPBACK = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
 def _normalize_scope_value(value: str) -> str:
-    """Case-fold a host and reduce a URL to its hostname."""
+    """Case-fold a host and reduce a URL or host:port to its hostname."""
     text = value.strip()
+    if "/" in text and "://" not in text:
+        parts = text.split("/", 1)
+        if parts[1].isdigit() and ":" not in text:
+            return text.rstrip(".").lower()
+    if "://" not in text and ":" in text:
+        text = f"http://{text}"
     if "://" in text:
         text = urlsplit(text).hostname or text
     return text.rstrip(".").lower()

@@ -16,6 +16,7 @@ from app.agents.contracts import ActionRequest
 from app.agents.direct_tools import run_direct
 from app.agents.nodes.specialist import _last_tool_call, handoff_node, next_no_progress
 from app.agents.observations import error_observation, observation_from_step
+from app.agents.state import get_role_messages, update_role_messages
 from app.agents.tool_specs import lookup_tool
 from app.core.db import get_async_session_ctx
 from app.core.log import get_logger
@@ -32,6 +33,9 @@ def make_execute_node(executor: Callable[..., Any] | None = None):
         pending = ActionRequest.model_validate(state["pending_action"])
         assessment_id = state["assessment_id"]
 
+        role = state.get("role") or "agent"
+        current_msgs = get_role_messages(state, role)
+
         async with get_async_session_ctx() as session:
             step_repo = StepRepo(session)
             audit_repo = AuditRepo(session)
@@ -42,15 +46,19 @@ def make_execute_node(executor: Callable[..., Any] | None = None):
                 obs = error_observation(pending.action, pending.target, "Step or approval record missing")
                 return Command(
                     update={
-                        "messages": [
-                            *state["messages"],
-                            ToolMessage(
-                                tool_call_id=pending.tool_call_id,
-                                name=pending.tool_name or pending.action,
-                                status="error",
-                                content=obs.model_dump_json(),
-                            ),
-                        ],
+                        **update_role_messages(
+                            state,
+                            [
+                                *current_msgs,
+                                ToolMessage(
+                                    tool_call_id=pending.tool_call_id,
+                                    name=pending.tool_name or pending.action,
+                                    status="error",
+                                    content=obs.model_dump_json(),
+                                ),
+                            ],
+                            role,
+                        ),
                         "pending_action": None,
                     },
                     goto="model",
@@ -60,15 +68,19 @@ def make_execute_node(executor: Callable[..., Any] | None = None):
                 obs = error_observation(pending.action, pending.target, "Step is not approved")
                 return Command(
                     update={
-                        "messages": [
-                            *state["messages"],
-                            ToolMessage(
-                                tool_call_id=pending.tool_call_id,
-                                name=pending.tool_name or pending.action,
-                                status="error",
-                                content=obs.model_dump_json(),
-                            ),
-                        ],
+                        **update_role_messages(
+                            state,
+                            [
+                                *current_msgs,
+                                ToolMessage(
+                                    tool_call_id=pending.tool_call_id,
+                                    name=pending.tool_name or pending.action,
+                                    status="error",
+                                    content=obs.model_dump_json(),
+                                ),
+                            ],
+                            role,
+                        ),
                         "pending_action": None,
                     },
                     goto="model",
@@ -83,15 +95,19 @@ def make_execute_node(executor: Callable[..., Any] | None = None):
                 obs = error_observation(pending.action, pending.target, "argv mismatch between approval and step")
                 return Command(
                     update={
-                        "messages": [
-                            *state["messages"],
-                            ToolMessage(
-                                tool_call_id=pending.tool_call_id,
-                                name=pending.tool_name or pending.action,
-                                status="error",
-                                content=obs.model_dump_json(),
-                            ),
-                        ],
+                        **update_role_messages(
+                            state,
+                            [
+                                *current_msgs,
+                                ToolMessage(
+                                    tool_call_id=pending.tool_call_id,
+                                    name=pending.tool_name or pending.action,
+                                    status="error",
+                                    content=obs.model_dump_json(),
+                                ),
+                            ],
+                            role,
+                        ),
                         "pending_action": None,
                     },
                     goto="model",
@@ -140,9 +156,8 @@ def make_execute_node(executor: Callable[..., Any] | None = None):
             await session.commit()
 
         role = state.get("role") or step.role
-        role_key = f"{role}_messages" if role in ("recon", "discovery", "validation") else None
         updated_messages = [
-            *state["messages"],
+            *get_role_messages(state, role),
             ToolMessage(
                 tool_call_id=pending.tool_call_id,
                 name=pending.tool_name or pending.action,
@@ -151,7 +166,7 @@ def make_execute_node(executor: Callable[..., Any] | None = None):
             ),
         ]
         update_dict: dict[str, Any] = {
-            "messages": updated_messages,
+            **update_role_messages(state, updated_messages, role),
             "pending_action": None,
             "approval_decision": None,
             "observations": [obs.model_dump()],
@@ -170,8 +185,6 @@ def make_execute_node(executor: Callable[..., Any] | None = None):
                 state.get("observations", []),
             ),
         }
-        if role_key:
-            update_dict[role_key] = updated_messages
 
         return Command(
             update=update_dict,
@@ -183,11 +196,12 @@ def make_execute_node(executor: Callable[..., Any] | None = None):
 
 async def direct_node(state: AssessmentState) -> Command:
     """Execute direct in-process tools like read_artifact, hypotheses, findings, handoff."""
-    tool_call = _last_tool_call(state["messages"])
+    role = state["role"]
+    current_msgs = get_role_messages(state, role)
+    tool_call = _last_tool_call(current_msgs)
     if tool_call.get("name") == "handoff":
         return await handoff_node(state)
 
-    role = state["role"]
     assessment_id = state["assessment_id"]
     spec = lookup_tool(role, tool_call["name"])
     logger.info("direct_node: role=%s running direct tool=%s", role, tool_call.get("name"))
@@ -213,9 +227,8 @@ async def direct_node(state: AssessmentState) -> Command:
         )
         await session.commit()
 
-    role_key = f"{role}_messages" if role in ("recon", "discovery", "validation") else None
     updated_messages = [
-        *state["messages"],
+        *current_msgs,
         ToolMessage(
             tool_call_id=tool_call["id"],
             name=tool_call["name"],
@@ -224,12 +237,10 @@ async def direct_node(state: AssessmentState) -> Command:
         ),
     ]
     update_dict = {
-        "messages": updated_messages,
+        **update_role_messages(state, updated_messages, role),
         "observations": [obs.model_dump()],
         "last_message": obs.summary,
     }
-    if role_key:
-        update_dict[role_key] = updated_messages
 
     return Command(
         update=update_dict,

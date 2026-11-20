@@ -4,8 +4,8 @@
 > *Final Participant Problem Statement: AI-Powered Unified VAPT Agent*  
 > *Fully compliant with Hackathon Rules, NIST SP 800-115, OWASP Top 10, and Human-in-the-Loop Governance.*
 
-[![Tests](https://img.shields.io/badge/backend%20tests-128%20passed-brightgreen)](#verification)
-[![Frontend](https://img.shields.io/badge/frontend%20tests-16%20passed-brightgreen)](#verification)
+[![Tests](https://img.shields.io/badge/backend%20tests-181%20passed-brightgreen)](#verification)
+[![Frontend](https://img.shields.io/badge/frontend%20tests-28%20passed-brightgreen)](#verification)
 [![Python](https://img.shields.io/badge/python-3.12-blue)](#prerequisites)
 [![React](https://img.shields.io/badge/react-19%20%7C%20vite-61dafb)](#prerequisites)
 [![LangGraph](https://img.shields.io/badge/orchestration-LangGraph%20v2-orange)](#architecture)
@@ -15,16 +15,17 @@
 
 ## Executive Summary
 
-Penetration testing typically forces security analysts to spend more time aggregating and formatting outputs from disconnected scanners than evaluating genuine security risks. 
+Penetration testing typically forces security analysts to spend more time aggregating and formatting outputs from disconnected scanners than evaluating genuine security risks.
 
-**AIPENT** solves this problem by providing a context-aware, adaptive, and evidence-driven conversational AI agent. Instead of blindly executing predefined script sequences, AIPENT orchestrates an end-to-end vulnerability assessment through a **three-specialist LangGraph loop** (`Recon` → `Discovery` → `Validation`), correlates multi-tool evidence into a unified finding model, enforces a **mandatory human approval gate** before every active probe, and compiles an executive-ready, cryptographically verifiable VAPT report in PDF format.
+**AIPENT** solves this problem by providing a context-aware, adaptive, and evidence-driven conversational AI agent. Instead of blindly executing predefined script sequences, AIPENT orchestrates an end-to-end vulnerability assessment through an **interactive Supervisor planning gate** (editable in both Web UI and Terminal CLI), a **three-specialist LangGraph loop** (`Recon` → `Discovery` → `Validation`) powered by high-speed engines (`ffuf`, `katana`, `nuclei`, `nmap`, `nikto`, `zap`), in-memory client-side JavaScript and artifact parsers, multi-tool evidence correlation, **dual-layer human approval gates** (initial plan review + active probe gating), and an executive-ready, cryptographically verifiable VAPT report in PDF format.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
 │                                AIPENT End-to-End VAPT Lifecycle                                 │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
-   Analyst Request ➔ Adaptive Plan ➔ Gated Scan Orchestration ➔ Raw Ingestion ➔ AI Correlation
-         ➔ Risk Prioritization ➔ Human Review & Active Validation ➔ Unified VAPT Report (PDF)
+   Analyst Request ➔ Supervisor Plan ➔ Operator Plan Review & Edit Gate ➔ Gated Scan Orchestration
+      ➔ Fast Ingestion & JS/HTML Parsers ➔ AI Correlation ➔ Risk Prioritization ➔ Active Validation Gate
+                                    ➔ Unified VAPT Report (PDF)
 ```
 
 ---
@@ -35,12 +36,12 @@ AIPENT is engineered specifically against the Hackathon Problem Statement and Ru
 
 | Requirement Category | Hackathon Section | AIPENT Solution |
 | :--- | :--- | :--- |
-| **End-to-End Workflow** | Problem Statement §3 | Full lifecycle: Natural-language request ➔ Plan ➔ Scans ➔ Ingestion ➔ Correlation ➔ Risk Ranking ➔ Human Gate ➔ Typst PDF Report. |
+| **End-to-End Workflow** | Problem Statement §3 | Full lifecycle: Natural-language request ➔ Adaptive Supervisor Plan ➔ Interactive Operator Review Gate ➔ Gated Scans ➔ Ingestion & Parsers ➔ Correlation ➔ Risk Ranking ➔ Final Human Gate ➔ Typst PDF Report. |
 | **Adaptive Reasoning** | Problem Statement §1, §2 | Evidence-based reasoning using an explicit `EvidenceBoard`: formulates hypotheses, identifies falsifiers, selects contextual tools, and avoids repeated actions. |
-| **Tool Scope & Coverage** | Problem Statement §4, §6 | **Clears mandatory prototype requirement** with 3 live engines covering network & web (Nmap, Nikto, OWASP ZAP), plus auxiliary probe tools. |
+| **Tool Scope & Coverage** | Problem Statement §4, §6 | **Clears mandatory prototype requirement** with 3 live engines covering network & web (Nmap, Nikto, OWASP ZAP), plus high-velocity discovery and validation tools (`ffuf`, `katana`, `nuclei`, `whatweb`, `sslscan`, `sqlmap`, `hashcat`, `curl_batch`). |
 | **Integration Transparency** | Problem Statement §4, §6, §9.6 | Truthful disclosure matrix classifying all 7 named tools as *Live*, *Import-only*, *Planned*, or *Unsupported*. |
-| **Evidence & Traceability** | Problem Statement §5.5, §13 | Raw output excerpts, step pointers, and cryptographic SHA-256 digests. Zero hallucinated CVEs (offline CVE Grounding). |
-| **Human-in-the-Loop** | Problem Statement §5.7, Rules §10.6 | Mandatory action approval gates before any active probe or scanner executes. Exact command line (`argv`) displayed. |
+| **Evidence & Traceability** | Problem Statement §5.5, §13 | Raw output excerpts, step pointers, and cryptographic SHA-256 digests. Zero hallucinated CVEs (offline CVE Grounding via Vulnify). |
+| **Human-in-the-Loop** | Problem Statement §5.7, Rules §10.6 | **Dual-layer approval gates:** Initial assessment plan review & customization before scanning begins, plus mandatory action gates before any active probe or scanner executes (verbatim `argv` displayed). |
 | **Client-Ready VAPT Report** | Problem Statement §5.8, §7 | Automated Typst PDF compilation containing all 6 required sections (§7.1 through §7.6) plus an evidence artifact index. |
 
 ---
@@ -61,13 +62,16 @@ In strict accordance with **Problem Statement §4, §6** and **Hackathon Rules �
 
 ### Auxiliary Tools Implemented (Beyond Baseline)
 
-AIPENT provides additional specialized verification tools integrated into its closed execution catalogue:
+AIPENT provides additional specialized discovery, fuzzing, and verification tools integrated into its closed execution catalogue:
 
-- **`curl_tool` (Live):** Safe, non-destructive HTTP request/response inspection with header & digest capture ([`actions/probe.py`](backend/src/app/actions/probe.py)).
+- **`ffuf` (Live):** Ultra-fast Go directory and parameter fuzzing with automated Single-Page Application (SPA) calibration (filtering fallback `index.html` responses) and curated high-signal API wordlists (< 1.5s execution) ([`adapters/ffuf.py`](backend/src/app/adapters/ffuf.py)).
+- **`katana` (Live):** Next-generation headless web crawler parsing client-side JavaScript bundles (`main.js`, `vendor.js`), discovering hidden REST endpoints, route schemas, and API paths in 2–3 seconds ([`adapters/katana.py`](backend/src/app/adapters/katana.py)).
+- **`nuclei` (Live):** Fast, template-based vulnerability scanner running targeted template packs (exposures, misconfigurations, swagger API, SQLi auth bypass, CVEs) with zero false positives ([`adapters/nuclei.py`](backend/src/app/adapters/nuclei.py)).
+- **`curl_batch` / `curl_tool` (Live):** Batched and single safe HTTP request/response inspection with header, status, and cryptographic SHA-256 digest capture ([`actions/probe.py`](backend/src/app/actions/probe.py), [`agents/direct_tools.py`](backend/src/app/agents/direct_tools.py)).
 - **`whatweb` (Live):** Technology stack, CMS, and framework fingerprinting ([`adapters/whatweb.py`](backend/src/app/adapters/whatweb.py)).
 - **`sslscan` (Live):** TLS/SSL cipher suite, certificate expiry, and protocol security auditing ([`adapters/sslscan.py`](backend/src/app/adapters/sslscan.py)).
-- **`sqlmap` (Live - Human Gated):** Non-destructive SQL injection verification under operator approval.
-- **`hashcat` (Live - Human Gated):** Controlled credential strength validation.
+- **`sqlmap` (Live - Human Gated):** Non-destructive SQL injection verification under operator approval ([`adapters/sqlmap.py`](backend/src/app/adapters/sqlmap.py)).
+- **`hashcat` (Live - Human Gated):** Controlled credential strength validation ([`adapters/hashcat.py`](backend/src/app/adapters/hashcat.py)).
 
 ---
 
@@ -96,21 +100,22 @@ AIPENT introduces an enterprise-grade **Docker MCP Gateway** architecture that c
 ├──────────────┤ ├────────────────────────┤ ├──────────────────────┤ ├──────────────────────┤
 │ • nmap_scan  │ │ • zap_crawl_start      │ │ • curl_request       │ │ • search_cve         │
 │ • nikto_scan │ │ • zap_crawl_status     │ │   (Safe, isolated    │ │ • get_cve_details    │
-│ • dirb_scan  │ │ • zap_passive_scan_wait│ │    HTTP requests)    │ │ • lookup_kev         │
-│ • whatweb    │ │ • zap_report_generate  │ └──────────────────────┘ └──────────────────────┘
-│ • sqlmap     │ └───────────┬────────────┘
-│ • hashcat    │             │
-└──────────────┘             ▼
-                     ┌───────────────┐
-                     │  zaproxy:8090 │
-                     │  (Daemon Core)│
+│ • ffuf_scan  │ │ • zap_passive_scan_wait│ │    HTTP requests)    │ │ • lookup_kev         │
+│ • katana_crawl││ • zap_report_generate  │ └──────────────────────┘ └──────────────────────┘
+│ • nuclei_scan│ └───────────┬────────────┘
+│ • whatweb    │             │
+│ • sqlmap     │             ▼
+│ • hashcat    │     ┌───────────────┐
+│ • dirb_scan  │     │  zaproxy:8090 │
+└──────────────┘     │  (Daemon Core)│
                      └───────────────┘
 ```
 
-### 1. Single-Point Tool Supply
-The backend communicates exclusively with the Gateway via standard Model Context Protocol (MCP) Server-Sent Events (SSE). The LLM never manages scanner processes, container lifecycles, or network ports directly; it interacts with normalized, schema-validated tools.
+### 1. Single-Point Tool Supply & Smart Hybrid Execution
+The backend communicates with the Gateway via standard Model Context Protocol (MCP) Server-Sent Events (SSE). The LLM never manages scanner processes, container lifecycles, or network ports directly; it interacts with normalized, schema-validated tools.
 
-- **Kali Linux MCP Server (`cyberillo/kali-mcp-server:latest`):** A long-lived stdio container exposing `nmap`, `nikto`, `dirb`, `whatweb`, `sqlmap`, and `hashcat`.
+- **Kali Linux MCP Server (`cyberillo/kali-mcp-server:latest`):** A long-lived stdio container exposing `nmap`, `nikto`, `ffuf`, `katana`, `nuclei`, `whatweb`, `sqlmap`, `hashcat`, and `dirb`.
+- **Smart Local Acceleration:** When high-throughput binaries are installed locally on the host (`ffuf`, `katana`, `nuclei`, `hashcat`), AIPENT automatically detects them and enables zero-latency local execution with real-time output streaming, avoiding container serialization overhead while maintaining 100% policy, scope, and approval gate parity.
 - **OWASP ZAP MCP Server (`dtkmn/mcp-zap-server:v0.17.1`):** A remote streamable HTTP service on port `7456` driving ZAP's automated spidering, AJAX crawling, and passive analysis.
 - **Curl MCP Server (`@calibress/curl-mcp`):** A lightweight HTTP microservice on port `7458` enabling granular request dispatching, header inspection, and response verification.
 - **Vulnify MCP Server (`vulnify-mcp`):** A FastMCP container exposing local SQLite CVE intelligence.
@@ -181,6 +186,18 @@ AIPENT uses a multi-agent StateGraph orchestrated with **LangGraph V2** and pers
                             └───────────┬────────────┘
                                         │
                                         ▼
+                            ┌────────────────────────┐
+                            │     Planning Node      │
+                            │ (Drafts Initial Plan)  │
+                            └───────────┬────────────┘
+                                        │
+                                        ▼
+                         ╔══════════════════════════════╗
+                         ║   INITIAL PLAN REVIEW GATE   ║
+                         ║  (Web UI / CLI Plan Editor)  ║
+                         ╚══════════════╤═══════════════╝
+                                        │ [Operator Edits & Approves Plan]
+                                        ▼
                              ┌──────────────────────┐
                              │  SUPERVISOR ROUTER   │◀────────────────┐
                              │ (Evaluates Hypotheses│                 │
@@ -192,21 +209,19 @@ AIPENT uses a multi-agent StateGraph orchestrated with **LangGraph V2** and pers
           ▼                             ▼                             ▼
    ┌───────────────┐             ┌───────────────┐             ┌───────────────┐
    │  Recon Role   │             │Discovery Role │             │Validation Role│
-   │  (nmap,       │             │  (nikto,      │             │  (curl_tool,  │
-   │   whatweb,    │             │   zap,        │             │   sqlmap,     │
-   │   sslscan)    │             │   dirb)       │             │   hashcat)    │
+   │  (nmap,       │             │ (ffuf, katana,│             │ (curl_batch,  │
+   │   whatweb,    │             │  nuclei, nikto│             │  sqlmap,      │
+   │   sslscan)    │             │  zap_baseline)│             │  hashcat)     │
    └──────┬────────┘             └───────┬───────┘             └───────┬───────┘
           │                             │                             │
           └─────────────────────────────┼─────────────────────────────┘
                                         │
                                         ▼
-                         ┌─────────────────────────────┐
-                         │      HUMAN ACTION GATE      │
-                         │   (Policy: Auto vs Pause)   │
-                         └──────────────┬──────────────┘
-                                        │
-                         [Operator Approves / Rejects / Steers]
-                                        │
+                         ╔══════════════════════════════╗
+                         ║      HUMAN ACTION GATE       ║
+                         ║   (Policy: Auto vs Pause)    ║
+                         ╚══════════════╤═══════════════╝
+                                        │ [Operator Approves / Rejects / Steers]
                                         ▼
                          ┌─────────────────────────────┐
                          │       Action Executor       │
@@ -215,15 +230,15 @@ AIPENT uses a multi-agent StateGraph orchestrated with **LangGraph V2** and pers
                                         │
                                         ▼
                          ┌─────────────────────────────┐
-                         │   Normalizer & Deduplicator │
-                         │ (Extracts Evidence & CVEs)  │
+                         │  Parsers, Normalizer & Dedup│
+                         │(Extracts JS Routes/CVE/CWE) │
                          └──────────────┬──────────────┘
                                         │
                                         ▼
-                         ┌─────────────────────────────┐
-                         │      Final Review Gate      │
-                         │ (Analyst Accepts Delivery)  │
-                         └──────────────┬──────────────┘
+                         ╔══════════════════════════════╗
+                         ║      Final Review Gate       ║
+                         ║  (Analyst Accepts Delivery)  ║
+                         ╚══════════════╤═══════════════╝
                                         │
                                         ▼
                          ┌─────────────────────────────┐
@@ -232,11 +247,39 @@ AIPENT uses a multi-agent StateGraph orchestrated with **LangGraph V2** and pers
                          └─────────────────────────────┘
 ```
 
-### The Three Specialist Roles
+### 1. Interactive Assessment Plan Gate & Plan Editor
+Before any network probe or scan is queued, the **Planning Node** analyzes the operator's natural language request, declared targets, and authorized boundaries.
+- **Automated Plan Drafting:** Formulates an initial structured plan (`PlanStep` list with action, target, and rationale).
+- **Interactive Web UI Plan Editor:** Displays a dedicated card in the mission desk where operators can reorder steps, add custom commands (`+ Add Step`), delete unnecessary actions (`✕`), or swap engines before executing.
+- **Terminal CLI Plan Review:** Provides interactive `[A]ccept / [E]dit / [R]eject` options in terminal mode.
+- Once approved, the plan is committed to the graph state (`state['plan']`) and guides specialist routing.
 
-1. **Recon Specialist:** Enumerates open ports, service banners, TLS configurations, and technology stacks without touching application logic.
-2. **Discovery Specialist:** Maps endpoints, checks for known web server vulnerabilities, scans directories, and runs DAST baselines.
-3. **Validation Specialist:** Formulates falsifiable hypotheses and executes safe, controlled probes (`curl_tool`, parameter checks) to confirm suspected findings.
+### 2. The Three Specialist Roles
+1. **Recon Specialist:** Enumerates open ports, service banners, TLS cipher suites, and technology fingerprints (`nmap_scan`, `whatweb`, `sslscan`) without executing application-level probes.
+2. **Discovery Specialist:** Maps attack surfaces using high-speed crawlers and fuzzers: parses client-side JavaScript bundles with `katana`, fuzzes hidden API endpoints with `ffuf` (SPA-calibrated), runs targeted CVE template packs with `nuclei`, and conducts web server baseline checks (`nikto`, `zap_baseline`).
+3. **Validation Specialist:** Formulates falsifiable hypotheses, parses discovered artifacts, and runs safe, controlled probes (`curl_batch`, `curl_request`, `sqlmap`, `hashcat`) to confirm or refute suspected vulnerabilities.
+
+### 3. Static Response & Bundle Parsers (`backend/src/app/parsers/`)
+To eliminate LLM context bloat and hallucination during discovery, AIPENT integrates dedicated, in-memory static parsers:
+- **`js_parser`:** Dissects modern SPA JavaScript bundles (`main.js`, `vendor.js`, `runtime.js`), extracting hardcoded REST routes (`/rest/admin/...`, `/api-docs/`, `/ftp/`), secrets, and API schemas.
+- **`html_parser`:** Parses raw HTML responses, directory listings, comments, and embedded forms.
+- **`json_parser`:** Ingests OpenAPI / Swagger schemas and API payloads.
+- **`manifest`:** Aggregates discovered routes, files, endpoints, and technologies into a persistent sidecar manifest per target.
+
+### 4. Decoupled Persistence & Bounded State Architecture
+AIPENT enforces strict decoupling between graph execution and relational persistence:
+- **Clean Repository Pattern:** All database operations are encapsulated in dedicated repositories ([`app.persistence.assessment_repo.AssessmentRepo`](backend/src/app/persistence/assessment_repo.py), [`StepRepo`](backend/src/app/persistence/step_repo.py), [`FindingRepo`](backend/src/app/persistence/finding_repo.py), [`AuditRepo`](backend/src/app/persistence/audit_repo.py)).
+- **Pure In-Memory Observation Builders:** [`observation_from_step`](backend/src/app/agents/observations.py) operates completely in-memory with zero ad-hoc SQL queries.
+- **Bounded State & Anti-Amnesia:** Observations and steps in `AssessmentState` are strictly capped (max 10 entries) to prevent unbounded memory growth and token exhaustion while preserving critical decision history and rejection records.
+- **Domain Event Folding:** State reconstruction folds timeline events in the domain layer ([`app.domain.reasoning`](backend/src/app/domain/reasoning.py)) to eliminate circular dependencies.
+
+### 5. Multi-Model Support & Run-Start Manifest
+AIPENT supports plug-and-play LLM providers across both cloud and local setups:
+- **Supported Providers:** Cerebras (ultra-fast inference), Groq, Ollama, DeepSeek, OpenAI, NVIDIA NIM, and Anthropic.
+- **Run-Start Transparency:** At mission initiation, AIPENT logs and broadcasts a full configuration manifest detailing:
+  - Model provider and name per agent role (`supervisor`, `recon`, `discovery`, `validation`, `coordinator`, `report`).
+  - Turn budgets per role (Recon: 3, Discovery: 4, Validation: 8; global turn limit: 60).
+  - Tool execution ceilings (max 10 tool calls per supervisor step; max 30 supervisor calls per run; recursion limit: 160).
 
 ### EvidenceBoard & Adaptive Memory
 
@@ -301,25 +344,35 @@ Open your browser at `http://localhost:5173`.
    - **Request:** `Perform an authorized reconnaissance and web vulnerability assessment against the target store.`
 2. Observe scope enforcement registering the boundary and displaying the engagement rules.
 
-### Step 3: Observe Adaptive Planning & Recon (§10.2, §10.3)
-1. Start the run. Watch the **Supervisor** route to the **Recon Specialist**.
-2. Recon dispatches `nmap_scan` and `whatweb`.
-3. Notice the real-time progress bar, live step cards with duration and exit codes, and service surface mapping.
+### Step 3: Review & Customize Proposed Plan (Interactive Plan Editor) (§10.2)
+1. Start the run. Watch the **Planning Node** generate a structured assessment plan tailored to the request.
+2. The agent pauses at the **Initial Plan Review Gate** (`AWAITING_PLAN`).
+3. In the Web UI **Review Proposed Assessment Plan** editor (or Terminal CLI prompt):
+   - Review proposed scan actions (`nmap_scan`, `katana_crawl`, `ffuf_scan`, `nuclei_scan`).
+   - Add new steps (`+ Add Step`), remove redundant checks (`✕`), or adjust targets.
+4. Click **Approve Plan** to commit the strategy to graph state and commence execution.
 
-### Step 4: Inspect the Human Action Gate (§10.5)
-1. When the agent advances to discovery and validation (`curl_tool` or `zap_baseline`), execution **pauses at the Human Action Gate**.
-2. Review the gate card: inspect the exact `argv` command, target, and rationale.
-3. Click **Approve** (or test **Steer** by entering developer guidance in the prompt). The action executes and records an immutable audit event.
+### Step 4: Observe High-Speed Recon & Discovery (§10.3)
+1. Watch the **Supervisor** route to the **Recon Specialist** for port & service enumeration (`nmap_scan`, `whatweb`).
+2. The agent transitions to the **Discovery Specialist**:
+   - `katana_crawl` parses client-side JavaScript bundles (`main.js`, `vendor.js`), discovering hidden REST endpoints (`/ftp`, `/rest/admin`, `/api-docs`) in **2–3 seconds**.
+   - `ffuf_scan` executes with automated SPA calibration, fuzzing high-value routes in **< 1.5 seconds** while discarding false-positive `index.html` fallback responses.
+3. Notice live step cards with duration, exit codes, and sidecar manifest route extraction in real-time.
 
-### Step 5: Verify AI Correlation & Deduplication (§10.4)
-1. Watch the agent formulate hypotheses in the reasoning thread.
+### Step 5: Inspect the Human Action Gate (§10.5)
+1. When the agent advances to active probes and validation (`sqlmap`, `curl_batch`, or active `zap`), execution **pauses at the Human Action Gate**.
+2. Review the gate card: inspect the exact command line (`argv`), destination target, and hypothesis rationale.
+3. Click **Approve** (or test **Steer** by injecting developer guidance). The action executes and records an immutable audit trail.
+
+### Step 6: Verify AI Correlation & Deduplication (§10.4)
+1. Watch the agent formulate hypotheses on the `EvidenceBoard` in the reasoning thread.
 2. Note findings appearing first as `suspected` and transitioning to `confirmed` upon multi-tool verification.
-3. Confirm that duplicate alerts for the same endpoint are consolidated without losing underlying evidence pointers.
+3. Confirm that duplicate alerts for the same endpoint are consolidated without losing underlying raw evidence pointers or SHA-256 hashes.
 
-### Step 6: Review & Final Report Download (§10.6, §10.7)
+### Step 7: Review & Final Report Download (§10.6, §10.7)
 1. At the conclusion of testing, the agent pauses at the **Final Review Gate**.
-2. Inspect the synthesized risk score and vulnerability counts.
-3. Click **Approve Final Report**. The backend compiles the Typst PDF.
+2. Inspect the synthesized risk score, executive summary, and vulnerability breakdown.
+3. Click **Approve Final Report**. The backend compiles the client-ready Typst PDF deliverable.
 4. Click **Download PDF Report**: verify all §7 sections, actionable remediation recommendations, and the cryptographic SHA-256 evidence index.
 
 ---
@@ -439,10 +492,10 @@ AIPENT includes a rich terminal CLI for running security assessments, monitoring
 AIPENT includes full automated test suites across both backend and frontend:
 
 ```bash
-# Backend unit & integration test suite (128 passed)
+# Backend unit & integration test suite (181 passed across 6 domain packages)
 cd backend && uv run pytest tests
 
-# Frontend unit tests & production build verification (16 passed)
+# Frontend unit tests & production build verification (28 passed)
 cd frontend && npm test && npm run build
 ```
 
@@ -454,18 +507,31 @@ cd frontend && npm test && npm run build
 aipent/
 ├── backend/
 │   ├── src/app/
-│   │   ├── actions/            # Closed action catalogue & subprocess executor
-│   │   ├── adapters/           # Tool parsers: nmap, nikto, zap, whatweb, sslscan, hashcat
-│   │   ├── agents/             # LangGraph  StateGraph, specialist roles & human gate
+│   │   ├── actions/            # Closed action catalogue & execution router
+│   │   ├── adapters/           # Adapters: nmap, nikto, zap, ffuf, katana, nuclei, whatweb, sslscan, sqlmap, hashcat
+│   │   ├── parsers/            # Static parsers: html_parser, js_parser, json_parser, target manifest
+│   │   ├── agents/
+│   │   │   ├── nodes/          # Modular LangGraph nodes: intake, planning, supervisor, specialist, execution, reporting
+│   │   │   ├── mission_brain.py# Initial plan synthesis, turn budgeting, & specialist prompting
+│   │   │   ├── state.py        # Bounded AssessmentState model & event contracts
+│   │   │   └── observations.py # Pure in-memory observation builders
+│   │   ├── persistence/        # Decoupled DB repos: AssessmentRepo, StepRepo, FindingRepo, AuditRepo
+│   │   ├── intel/              # Offline Vulnify SQLite CVE intelligence & KEV catalog
 │   │   ├── api/                # FastAPI REST endpoints & SSE event streaming
-│   │   ├── core/               # DB, policy, config, and in-process notifications
-│   │   ├── domain/             # SQLModel models: Assessment, Step, Finding, Evidence, Approval
+│   │   ├── core/               # DB engine, policy engine, config, and notifications
+│   │   ├── domain/             # SQLModel models & domain reasoning event folding
 │   │   └── reporting/          # Typst PDF report compiler & executive templates
-│   ├── tests/                  # 128 automated pytest unit and integration tests
+│   ├── tests/                  # 181 automated pytest unit and integration tests
+│   │   ├── agent_intelligence/ # Contracts, evidence board, planning gates, role budgets
+│   │   ├── scanners_and_tools/ # Adapters (ffuf, katana, nuclei), parsers, scope, policy
+│   │   ├── persistence_and_repo/# Repositories & mission context preloading
+│   │   ├── correlation_and_dedup/# Evidence consolidation & finding promotion
+│   │   ├── reporting_and_narrative/# Typst report compilation & executive synthesis
+│   │   └── e2e_and_api/        # End-to-end lifecycle & API endpoint tests
 │   └── scripts/                # Observation test suites & challenge verification
 ├── frontend/
 │   ├── src/
-│   │   ├── components/         # Mission Conversation desk, approval cards, side record
+│   │   ├── components/         # Mission Conversation desk, Assessment Plan Editor, approval cards
 │   │   ├── hooks/              # SSE live event streaming hooks
 │   │   └── lib/                # Schemas, mission state folding & API client
 │   └── scripts/dev.mjs         # Dual-process orchestrator for API + Vite
@@ -473,6 +539,7 @@ aipent/
 ├── gateway/                    # Docker MCP Gateway runner & catalog (:8812)
 ├── mcp/                        # MCP tool containers & compose (ZAP, Vulnify, Curl, Typst)
 ├── labs/                       # Authorized lab compose targets (Juice Shop, DVWA)
+├── docs/                       # Technical specs, AGENT_ARCHITECTURE_AND_COMMUNICATION.md, slides, ideas
 └── README.md
 ```
 
@@ -488,6 +555,8 @@ In compliance with **Hackathon Rules §4.5 & §7.3**, AIPENT gratefully acknowle
 - **SQLAlchemy & SQLModel:** Database ORM and schema modeling (MIT License).
 - **Typst:** High-speed document and PDF typesetting system (Apache 2.0 License).
 - **Nmap, Nikto, OWASP ZAP:** Industry-standard security assessment tools (GPL / Apache 2.0).
+- **ffuf (by joohoi):** Fast web fuzzer for directory and parameter discovery (MIT License).
+- **Katana & Nuclei (by ProjectDiscovery):** Next-generation crawling and template-based vulnerability scanning (MIT License).
 - **React, Vite, Zustand, TailwindCSS:** Frontend interface and reactive desk framework (MIT License).
 - **IBM Plex Fonts:** Professional typography (SIL Open Font License).
 
