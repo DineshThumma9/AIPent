@@ -33,6 +33,170 @@ def _proving_locator(locator: dict[str, Any], status: str = "confirmed") -> bool
 class FindingRepo(BaseRepo):
     """All database access for findings and evidence."""
 
+    async def record_agent_finding(
+        self,
+        assessment_id: int,
+        run_id: str,
+        role: str,
+        title: str = "",
+        asset: str = "",
+        endpoint: str = "",
+        severity: str | None = None,
+        description: str = "",
+        evidence_step_ids: list[int] | None = None,
+        reasoning: str = "",
+        cwe: list[str] | None = None,
+        finding_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Create or extend an agent-discovered finding and link step evidence."""
+        import re
+        from app.actions.catalogue import check_scope
+        from app.actions.evidence import link_step_evidence
+        from app.domain.models import Assessment, FindingStatus, Origin, Step, StepStatus
+
+        assessment = await self.session.get(Assessment, assessment_id)
+        if assessment is None:
+            return {
+                "ok": False,
+                "status": "error",
+                "summary": f"assessment {assessment_id} not found",
+                "errors": ["assessment not found"],
+            }
+
+        existing: Finding | None = None
+        if finding_id:
+            existing = await self.session.get(Finding, int(finding_id))
+            if existing is None or existing.assessment_id != assessment_id:
+                return {
+                    "ok": False,
+                    "status": "error",
+                    "summary": f"finding {finding_id} is not part of assessment {assessment_id}",
+                    "errors": ["invalid finding_id"],
+                }
+            asset = asset or existing.asset
+            endpoint = endpoint or (existing.endpoint or "")
+            title = title or existing.title
+        elif not (title and asset and endpoint):
+            return {
+                "ok": False,
+                "status": "error",
+                "summary": "record_finding requires title, asset and endpoint when finding_id is omitted",
+                "errors": ["missing finding fields"],
+            }
+
+        try:
+            check_scope(assessment, asset)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "status": "blocked",
+                "summary": f"Blocked: {exc}",
+                "errors": [str(exc)],
+            }
+
+        clean_severity: str | None = None
+        if severity is not None:
+            clean_severity = str(severity).lower()
+            if clean_severity not in SEVERITY_RANK:
+                return {
+                    "ok": False,
+                    "status": "error",
+                    "summary": "severity must be one of critical, high, medium, low, info",
+                    "errors": ["invalid severity"],
+                }
+
+        steps: list[Step] = []
+        for step_id in evidence_step_ids or []:
+            step = await self.session.get(Step, int(step_id))
+            if step is None or step.assessment_id != assessment_id:
+                return {
+                    "ok": False,
+                    "status": "error",
+                    "summary": f"step {step_id} is not part of assessment {assessment_id}",
+                    "errors": ["invalid evidence_step_id"],
+                }
+            if step.status != StepStatus.SUCCEEDED.value:
+                return {
+                    "ok": False,
+                    "status": "error",
+                    "summary": f"step {step_id} is {step.status}, not succeeded",
+                    "errors": ["evidence step did not succeed"],
+                }
+            steps.append(step)
+
+        finding = existing
+        created = False
+        if finding is None:
+            slug = re.sub(r"[^a-z0-9]+", "-", (title or "").lower()).strip("-")[:40] or "finding"
+            key = f"agent:{asset.lower()}:{(endpoint or '/').lower()}:{slug}"
+            result = await self.session.execute(
+                select(Finding).where(
+                    Finding.assessment_id == assessment_id,
+                    Finding.canonical_key == key,
+                )
+            )
+            finding = result.scalars().first()
+            created = finding is None
+
+        if finding is None:
+            finding = Finding(
+                assessment_id=assessment_id,
+                canonical_key=key,
+                asset=asset,
+                endpoint=endpoint,
+                title=title,
+                description=description or reasoning,
+                severity=clean_severity or "medium",
+                confidence=0.5,
+                status=FindingStatus.SUSPECTED.value,
+                origin=Origin.LLM.value,
+                cwe=cwe or [],
+            )
+            self.session.add(finding)
+            await self.session.flush()
+        else:
+            if clean_severity is not None and SEVERITY_RANK[clean_severity] < SEVERITY_RANK.get(
+                finding.severity, 9
+            ):
+                finding.severity = clean_severity
+            if not finding.description and (description or reasoning):
+                finding.description = description or reasoning
+            if cwe:
+                finding.cwe = sorted(set(finding.cwe or []) | set(cwe))
+            finding.updated_at = utcnow()
+            self.session.add(finding)
+            await self.session.flush()
+
+        evidence_ids: list[int] = []
+        for step in steps:
+            evidence = await link_step_evidence(self.session, step, finding.id)
+            if evidence is not None:
+                evidence_ids.append(evidence.id)
+
+        from app.persistence.audit_repo import AuditRepo
+
+        await AuditRepo(self.session).record_event(
+            assessment_id=assessment_id,
+            event_type="finding.recorded" if created else "finding.extended",
+            payload={
+                "run_id": run_id,
+                "role": role,
+                "finding_id": finding.id,
+                "title": title,
+                "endpoint": endpoint,
+                "severity": finding.severity,
+                "evidence_step_ids": [s.id for s in steps],
+                "evidence_ids": evidence_ids,
+            },
+        )
+
+        return {
+            "ok": True,
+            "created": created,
+            "finding": finding,
+            "evidence_ids": evidence_ids,
+        }
+
     async def create(
         self,
         assessment_id: int,

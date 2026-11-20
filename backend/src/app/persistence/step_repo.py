@@ -553,3 +553,8 @@ class StepRepo(BaseRepo):
         self.session.add(step)
         await self.session.flush()
         return step
+
+    async def get_artifact_path(self, step_id: int) -> str | None:
+        """Get output_path for a step if it exists."""
+        step = await self.session.get(Step, step_id)
+        return step.output_path if step else None

@@ -10,25 +10,14 @@ import re
 from pathlib import Path
 from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlmodel import select
 
-from app.actions.catalogue import check_scope
-from app.actions.evidence import link_step_evidence
-from app.agents.control import audit
 from app.agents.loop.contracts import Observation
 from app.agents.loop.reasoning import record_hypothesis, update_hypothesis
 from app.agents.loop.tool_specs import ToolSpec
 from app.core.config import settings
-from app.domain.models import (
-    Assessment,
-    Finding,
-    FindingStatus,
-    Origin,
-    Step,
-    StepStatus,
-    utcnow,
-)
+from app.persistence.audit_repo import AuditRepo
 from app.persistence.finding_repo import FindingRepo
+from app.persistence.step_repo import StepRepo
 
 
 _SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
@@ -48,7 +37,7 @@ async def read_artifact(
     offset: int = 0,
     **kwargs: Any,
 ) -> Observation:
-    step = await session.get(Step, step_id)
+    step = await StepRepo(session).get_by_id(step_id)
     if step is None or step.assessment_id != assessment_id:
         return Observation(
             ok=False,
@@ -217,158 +206,35 @@ async def record_finding(
     finding_id: int | None = None,
     **kwargs: Any,
 ) -> Observation:
-    """Create or extend a finding from the agent's own observation.
-
-    Creation is capped at ``suspected``; confirmation still has to pass the
-    evidence gate in ``FindingRepo.update_status``. Passing ``finding_id``
-    extends an existing finding (including scanner-created candidates) with
-    new evidence instead of creating a duplicate.
-    """
-    assessment = await session.get(Assessment, assessment_id)
-    if assessment is None:
-        return Observation(
-            ok=False,
-            status="error",
-            action="record_finding",
-            target=asset,
-            summary=f"assessment {assessment_id} not found",
-            errors=["assessment not found"],
-        )
-
-    existing: Finding | None = None
-    if finding_id:
-        existing = await session.get(Finding, int(finding_id))
-        if existing is None or existing.assessment_id != assessment_id:
-            return Observation(
-                ok=False,
-                status="error",
-                action="record_finding",
-                target=asset,
-                summary=f"finding {finding_id} is not part of assessment {assessment_id}",
-                errors=["invalid finding_id"],
-            )
-        asset = asset or existing.asset
-        endpoint = endpoint or (existing.endpoint or "")
-        title = title or existing.title
-    elif not (title and asset and endpoint):
-        return Observation(
-            ok=False,
-            status="error",
-            action="record_finding",
-            target=asset,
-            summary="record_finding requires title, asset and endpoint when finding_id is omitted",
-            errors=["missing finding fields"],
-        )
-
-    try:
-        check_scope(assessment, asset)
-    except Exception as exc:
-        return Observation(
-            ok=False,
-            status="blocked",
-            action="record_finding",
-            target=asset,
-            summary=f"Blocked: {exc}",
-            errors=[str(exc)],
-        )
-
-    clean_severity: str | None = None
-    if severity is not None:
-        clean_severity = str(severity).lower()
-        if clean_severity not in _SEVERITY_RANK:
-            return Observation(
-                ok=False,
-                status="error",
-                action="record_finding",
-                target=asset,
-                summary="severity must be one of critical, high, medium, low, info",
-                errors=["invalid severity"],
-            )
-
-    steps: list[Step] = []
-    for step_id in evidence_step_ids or []:
-        step = await session.get(Step, int(step_id))
-        if step is None or step.assessment_id != assessment_id:
-            return Observation(
-                ok=False,
-                status="error",
-                action="record_finding",
-                target=asset,
-                summary=f"step {step_id} is not part of assessment {assessment_id}",
-                errors=["invalid evidence_step_id"],
-            )
-        if step.status != StepStatus.SUCCEEDED.value:
-            return Observation(
-                ok=False,
-                status="error",
-                action="record_finding",
-                target=asset,
-                summary=f"step {step_id} is {step.status}, not succeeded",
-                errors=["evidence step did not succeed"],
-            )
-        steps.append(step)
-
-    finding = existing
-    created = False
-    if finding is None:
-        key = f"agent:{asset.lower()}:{(endpoint or '/').lower()}:{_finding_slug(title)}"
-        result = await session.execute(
-            select(Finding).where(
-                Finding.assessment_id == assessment_id,
-                Finding.canonical_key == key,
-            )
-        )
-        finding = result.scalars().first()
-        created = finding is None
-
-    if finding is None:
-        finding = Finding(
-            assessment_id=assessment_id,
-            canonical_key=key,
-            asset=asset,
-            endpoint=endpoint,
-            title=title,
-            description=description or reasoning,
-            severity=clean_severity or "medium",
-            confidence=0.5,
-            status=FindingStatus.SUSPECTED.value,
-            origin=Origin.LLM.value,
-            cwe=cwe or [],
-        )
-        session.add(finding)
-        await session.flush()
-    else:
-        if clean_severity is not None and _SEVERITY_RANK[clean_severity] < _SEVERITY_RANK.get(
-            finding.severity, 9
-        ):
-            finding.severity = clean_severity
-        if not finding.description and (description or reasoning):
-            finding.description = description or reasoning
-        if cwe:
-            finding.cwe = sorted(set(finding.cwe or []) | set(cwe))
-        finding.updated_at = utcnow()
-
-    evidence_ids: list[int] = []
-    for step in steps:
-        evidence = await link_step_evidence(session, step, finding.id)
-        if evidence is not None:
-            evidence_ids.append(evidence.id)
-
-    audit(
-        session,
-        assessment_id,
-        "finding.recorded" if created else "finding.extended",
-        {
-            "run_id": run_id,
-            "role": role,
-            "finding_id": finding.id,
-            "title": title,
-            "endpoint": endpoint,
-            "severity": finding.severity,
-            "evidence_step_ids": [step.id for step in steps],
-            "evidence_ids": evidence_ids,
-        },
+    """Create or extend a finding from the agent's own observation."""
+    repo = FindingRepo(session)
+    res = await repo.record_agent_finding(
+        assessment_id=assessment_id,
+        run_id=run_id,
+        role=role,
+        title=title,
+        asset=asset,
+        endpoint=endpoint,
+        severity=severity,
+        description=description,
+        evidence_step_ids=evidence_step_ids,
+        reasoning=reasoning,
+        cwe=cwe,
+        finding_id=finding_id,
     )
+    if not res["ok"]:
+        return Observation(
+            ok=False,
+            status=res["status"],
+            action="record_finding",
+            target=asset,
+            summary=res["summary"],
+            errors=res.get("errors", []),
+        )
+
+    finding = res["finding"]
+    created = res["created"]
+    evidence_ids = res["evidence_ids"]
     await session.commit()
 
     return Observation(
@@ -503,9 +369,7 @@ async def hash_identify_direct(
     **kwargs: Any,
 ) -> Observation:
     """Identify the hash type using local heuristics, verifying it appears in the artifact."""
-    from app.domain.models import Audit
-
-    step = await session.get(Step, source_step_id)
+    step = await StepRepo(session).get_by_id(source_step_id)
     if step is None or step.assessment_id != assessment_id:
         return Observation(
             ok=False,
@@ -568,16 +432,14 @@ async def hash_identify_direct(
     else:
         confidence = "low"
 
-    session.add(
-        Audit(
-            assessment_id=assessment_id,
-            event_type="hash.identified",
-            payload={
-                "source_step_id": source_step_id,
-                "candidates": candidates,
-                "confidence": confidence,
-            },
-        )
+    await AuditRepo(session).record_event(
+        assessment_id=assessment_id,
+        event_type="hash.identified",
+        payload={
+            "source_step_id": source_step_id,
+            "candidates": candidates,
+            "confidence": confidence,
+        },
     )
     await session.commit()
 
