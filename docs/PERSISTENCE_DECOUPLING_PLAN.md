@@ -146,23 +146,11 @@ def test_observation_from_step_pure():
     assert obs.evidence_ids == [100]
 ```
 
-- [ ] **Step 2: Refactor `observation_from_step` to be pure in-memory**
-
-Remove `session: AsyncSession` parameter (or accept optional session for backwards-compat while deprecating). Construct `Observation` directly from `step.action`, `step.target`, `step.status`, and the passed in `finding_ids` and `evidence_ids`.
-
-- [ ] **Step 3: Update `nodes.py:1131` call site**
-
-Pass the execution result's `finding_ids` and `evidence_ids` directly:
-```python
-obs = observation_from_step(step, finding_ids=created_findings, evidence_ids=evidence_ids)
-```
-
-- [ ] **Step 4: Run tests and verify zero regressions**
-
-Run: `cd backend && uv run pytest tests/test_observations.py tests/test_loop_nodes.py -v`  
-Expected: PASS
-
-- [ ] **Step 5: Commit**
+- [x] **Step 1: Write test for pure in-memory observation construction**
+- [x] **Step 2: Refactor `observation_from_step` to be pure in-memory**
+- [x] **Step 3: Update `nodes.py:1131` call site**
+- [x] **Step 4: Run tests and verify zero regressions**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend/src/app/agents/loop/observations.py backend/src/app/agents/loop/nodes.py backend/tests/test_observations.py
@@ -183,28 +171,12 @@ git commit -m "refactor(agents): make observation_from_step a pure in-memory bui
 - Implement: `step_repo.get_artifact_path(step_id)` for `read_artifact` and `hash_identify_direct`.
 - Eliminates: All direct `session.add(Finding)`, `session.flush()`, `session.execute(select(Finding))`, and `session.commit()` inside `direct_tools.py`. The caller/session owns the commit.
 
-- [ ] **Step 1: Write test for `finding_repo.record_agent_finding`**
-
-Write test verifying that calling `FindingRepo.record_agent_finding` handles both new finding creation and existing finding extension with evidence linking.
-
-- [ ] **Step 2: Implement `record_agent_finding` on `FindingRepo`**
-
-Move the finding deduplication, severity validation, evidence linking (`link_step_evidence`), and audit event logging (`finding.recorded` / `finding.extended`) into `FindingRepo`.
-
-- [ ] **Step 3: Simplify `direct_tools.py:record_finding`**
-
-`record_finding` in `direct_tools.py` now purely validates tool arguments, delegates to `FindingRepo.record_agent_finding`, and constructs the `Observation`.
-
-- [ ] **Step 4: Refactor `hash_identify_direct` and `read_artifact`**
-
-Replace `session.get(Step, step_id)` with `StepRepo(session).get(step_id)` and replace direct `Audit` creation with `AuditRepo(session).record_event(...)`.
-
-- [ ] **Step 5: Run tests and verify clean execution**
-
-Run: `cd backend && uv run pytest tests/test_direct_tools.py -v`  
-Expected: PASS
-
-- [ ] **Step 6: Commit**
+- [x] **Step 1: Write test for `finding_repo.record_agent_finding`**
+- [x] **Step 2: Implement `record_agent_finding` on `FindingRepo`**
+- [x] **Step 3: Simplify `direct_tools.py:record_finding`**
+- [x] **Step 4: Refactor `hash_identify_direct` and `read_artifact`**
+- [x] **Step 5: Run tests and verify clean execution**
+- [x] **Step 6: Commit**
 
 ```bash
 git add backend/src/app/persistence/finding_repo.py backend/src/app/agents/loop/direct_tools.py backend/tests/test_direct_tools.py
@@ -233,22 +205,12 @@ git commit -m "refactor(agents): move finding and artifact persistence from dire
 - Eliminate: Raw `select(Audit)` queries inside `control.py` and `reasoning.py`.
 - Keep: `control.py` as a thin compatibility wrapper that calls `AuditRepo` methods so any legacy imports remain functional.
 
-- [ ] **Step 1: Write tests for role and hypothesis methods on `AuditRepo`**
-- [ ] **Step 2: Implement role and hypothesis methods in `AuditRepo`**
-- [ ] **Step 3: Move `build_evidence_board` query logic to `AuditRepo.get_evidence_board`**
-
-`reasoning.py` keeps the domain logic (`fold_events_into_evidence_board`), while `AuditRepo` fetches the events and calls the pure folding function.
-
-- [ ] **Step 4: Update `control.py` to delegate to `AuditRepo`**
-
-Turn `control.py` into a thin wrapper around `AuditRepo`.
-
-- [ ] **Step 5: Run tests and verify zero regressions**
-
-Run: `cd backend && uv run pytest tests/test_reasoning.py tests/test_agent_control.py -v`  
-Expected: PASS
-
-- [ ] **Step 6: Commit**
+- [x] **Step 1: Write tests for role and hypothesis methods on `AuditRepo`**
+- [x] **Step 2: Implement role and hypothesis methods in `AuditRepo`**
+- [x] **Step 3: Move `build_evidence_board` query logic to `AuditRepo.get_evidence_board`**
+- [x] **Step 4: Update `control.py` to delegate to `AuditRepo`**
+- [x] **Step 5: Run tests and verify zero regressions**
+- [x] **Step 6: Commit**
 
 ```bash
 git add backend/src/app/persistence/audit_repo.py backend/src/app/agents/control.py backend/src/app/agents/loop/reasoning.py

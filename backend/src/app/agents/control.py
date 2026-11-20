@@ -1,28 +1,17 @@
-"""Run-scoped role and handoff state.
+"""Run-scoped role and handoff state (compatibility wrapper for AuditRepo).
 
 The three specialist roles are real graph nodes now. The LLM decides what to do
 inside its role; Python records which role ran, what it handed off, and enforces
-the role budgets. Keeping this in the database (rather than only in a
-checkpoint) means a restart cannot silently lose the handoff trail.
-
-Every event is scoped by ``run_id`` so a previous run cannot leak its handoffs
-into a new one.
-
-Write helpers are plain functions because they only append ORM objects to the
-session; the caller owns the commit. Read helpers are async because they issue
-queries.
+the role budgets.
 """
 
 from __future__ import annotations
 
 from typing import Any
-
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlmodel import select
 
 from app.domain.models import Audit
-
-ROLES = ("recon", "discovery", "validation")
+from app.persistence.audit_repo import AuditRepo, ROLES
 
 # The role label is the agent identity used by the skill allowlists.
 ROLE_AGENT = {
@@ -58,15 +47,7 @@ def audit(
 async def _events(
     session: AsyncSession, assessment_id: int, event_type: str
 ) -> list[Audit]:
-    result = await session.execute(
-        select(Audit)
-        .where(
-            Audit.assessment_id == assessment_id,
-            Audit.event_type == event_type,
-        )
-        .order_by(Audit.id)
-    )
-    return list(result.scalars().all())
+    return await AuditRepo(session).get_events(assessment_id, event_type)
 
 
 def _for_run(events: list[Audit], run_id: str) -> list[dict]:
@@ -79,19 +60,13 @@ def _for_run(events: list[Audit], run_id: str) -> list[dict]:
 
 async def current_role(session: AsyncSession, assessment_id: int, run_id: str) -> str:
     """The last role entered during this run."""
-    for payload in reversed(
-        _for_run(await _events(session, assessment_id, "role.started"), run_id)
-    ):
-        role = str(payload.get("role") or "")
-        if role in ROLES:
-            return role
-    return "recon"
+    return await AuditRepo(session).current_role(assessment_id, run_id)
 
 
 async def role_history(
     session: AsyncSession, assessment_id: int, run_id: str
 ) -> list[dict]:
-    return _for_run(await _events(session, assessment_id, "role.started"), run_id)
+    return await AuditRepo(session).role_history(assessment_id, run_id)
 
 
 def record_role(
@@ -124,27 +99,13 @@ async def record_turn(
     from_role: str | None = None,
 ) -> int:
     """Record one specialist model invocation and return its turn number."""
-    if role not in ROLES:
-        raise ValueError(f"unknown role {role!r}; expected one of {ROLES}")
-    turn = (
-        await role_event_count(
-            session, assessment_id, run_id, role, "role.turn"
-        )
-        + 1
+    return await AuditRepo(session).record_turn(
+        assessment_id=assessment_id,
+        run_id=run_id,
+        role=role,
+        reason=reason,
+        from_role=from_role,
     )
-    audit(
-        session,
-        assessment_id,
-        "role.turn",
-        {
-            "run_id": run_id,
-            "role": role,
-            "reason": reason,
-            "from": from_role,
-            "turn": turn,
-        },
-    )
-    return turn
 
 
 def record_handoff(
@@ -178,12 +139,7 @@ async def handoff_history(
     run_id: str,
     role: str | None = None,
 ) -> list[dict]:
-    rows = _for_run(
-        await _events(session, assessment_id, "handoff.created"), run_id
-    )
-    if role is not None:
-        rows = [row for row in rows if row.get("role") == role]
-    return rows
+    return await AuditRepo(session).handoff_history(assessment_id, run_id, role)
 
 
 async def latest_handoff(
@@ -192,8 +148,7 @@ async def latest_handoff(
     run_id: str,
     role: str | None = None,
 ) -> dict | None:
-    rows = await handoff_history(session, assessment_id, run_id, role)
-    return rows[-1] if rows else None
+    return await AuditRepo(session).latest_handoff(assessment_id, run_id, role)
 
 
 async def role_event_count(
@@ -203,10 +158,4 @@ async def role_event_count(
     role: str,
     event_type: str,
 ) -> int:
-    return sum(
-        1
-        for payload in _for_run(
-            await _events(session, assessment_id, event_type), run_id
-        )
-        if payload.get("role") == role
-    )
+    return await AuditRepo(session).role_event_count(assessment_id, run_id, role, event_type)

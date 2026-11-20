@@ -16,7 +16,7 @@ from sqlmodel import col, select
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
-
+from app.agents.prompts import ROLE_PROMPTS
 from app.adapters.base import strip_html
 from app.agents.loop.reasoning import build_evidence_board
 from app.core.config import settings
@@ -30,169 +30,10 @@ from app.reporting.common import (
     count_severities as _counts,
     iso_timestamp as _iso,
 )
-
+from app.agents.loop.contracts import ReportNarrative,FindingNarrative
 log = get_logger("reporting.narrative")
 
 
-class FindingNarrative(BaseModel):
-    finding_id: int
-    technical_analysis: str = Field(min_length=1, max_length=4000)
-    impact: str = Field(min_length=1, max_length=2000)
-    remediation: str = Field(min_length=1, max_length=2000)
-    confidence_statement: str = Field(min_length=1, max_length=1000)
-    observed_vs_inferred: str = Field(min_length=1, max_length=1500)
-
-    @model_validator(mode="before")
-    @classmethod
-    def _coerce_fields(cls, data: Any) -> Any:
-        if not isinstance(data, dict):
-            return data
-        d = dict(data)
-        if "finding_id" not in d and "id" in d:
-            d["finding_id"] = d["id"]
-
-        obs = str(d.get("observed") or "").strip()
-        inf = str(d.get("inferred") or "").strip()
-        if not d.get("observed_vs_inferred"):
-            if obs or inf:
-                d["observed_vs_inferred"] = f"Observed: {obs}\nInferred: {inf}".strip()
-            else:
-                d["observed_vs_inferred"] = "Direct observation documented in evidence."
-
-        if not d.get("technical_analysis"):
-            if obs or inf:
-                d["technical_analysis"] = f"{obs} {inf}".strip()
-            elif d.get("title"):
-                d["technical_analysis"] = str(d.get("title"))
-            else:
-                d["technical_analysis"] = "Technical analysis based on tool observation."
-
-        if not d.get("confidence_statement"):
-            c = d.get("confidence")
-            if c is not None:
-                d["confidence_statement"] = f"Confidence score {c} based on direct execution evidence."
-            else:
-                d["confidence_statement"] = "Confidence established through verifiable tool output."
-
-        if not d.get("impact"):
-            d["impact"] = "No direct business impact demonstrated beyond observed behavior."
-
-        if not d.get("remediation"):
-            d["remediation"] = "Review service exposure and enforce least privilege."
-
-        return d
-
-
-class ReportNarrative(BaseModel):
-    executive_summary: str = Field(min_length=1, max_length=4000)
-    methodology: str = Field(min_length=1, max_length=3000)
-    risk_overview: str = Field(min_length=1, max_length=2500)
-    findings: list[FindingNarrative] = Field(default_factory=list)
-    limitations: str = Field(min_length=1, max_length=2500)
-    recommendations: list[str] = Field(default_factory=list, max_length=12)
-    conclusion: str = Field(min_length=1, max_length=2000)
-
-    @model_validator(mode="before")
-    @classmethod
-    def _coerce_fields(cls, data: Any) -> Any:
-        if not isinstance(data, dict):
-            return data
-        d = dict(data)
-        if "report" in d and isinstance(d["report"], dict):
-            d = dict(d["report"])
-
-        if isinstance(d.get("methodology"), (dict, list)):
-            if isinstance(d["methodology"], dict):
-                steps_cnt = d["methodology"].get("steps_executed") or len(d["methodology"].get("steps") or [])
-                d["methodology"] = f"The assessment executed {steps_cnt} testing actions using automated tools."
-            else:
-                d["methodology"] = "\n".join(f"- {s}" for s in d["methodology"] if s)
-        elif not d.get("methodology"):
-            alt = d.get("approach") or d.get("testing_methodology") or d.get("execution")
-            if isinstance(alt, str) and alt.strip():
-                d["methodology"] = alt.strip()
-            else:
-                d["methodology"] = "Methodical vulnerability assessment conducted within authorized scope."
-
-        if not d.get("risk_overview"):
-            rs = d.get("risk_summary")
-            if isinstance(rs, dict):
-                score = rs.get("overall_risk_score", 0.0)
-                level = rs.get("risk_level", "Informational")
-                d["risk_overview"] = f"Overall risk score: {score} ({level})."
-            elif isinstance(rs, str):
-                d["risk_overview"] = rs
-            else:
-                d["risk_overview"] = "Risk evaluated based on verified findings and exposure."
-
-        if isinstance(d.get("limitations"), list):
-            d["limitations"] = "\n".join(f"- {item}" for item in d["limitations"])
-        elif not d.get("limitations"):
-            d["limitations"] = "Testing was conducted in a bounded environment without disruptive exploits."
-
-        if not d.get("conclusion"):
-            alt_c = d.get("outcome") or d.get("final_summary")
-            if isinstance(alt_c, str) and alt_c.strip():
-                d["conclusion"] = alt_c.strip()
-            else:
-                d["conclusion"] = "Assessment completed. Refer to findings for remediation steps."
-
-        if isinstance(d.get("recommendations"), str):
-            d["recommendations"] = [d["recommendations"]]
-        elif not d.get("recommendations"):
-            d["recommendations"] = ["Maintain updated software versions.", "Review open ports and services."]
-
-        return d
-
-
-REPORT_WRITER_PROMPT = """You are a senior VAPT report writer preparing a
-client-ready report for an authorized, lab-only assessment.
-
-You receive a JSON evidence pack. You may only use facts present in that pack.
-You must not invent a CVE, CWE, CVSS score, affected asset, exploit result, or
-remediation step. If the pack does not contain a value, omit it or say it was
-not established.
-
-Write for two audiences at once:
-- an executive who needs business impact, risk, and what to fix first;
-- an engineer who needs the observation, the inference, and the remediation.
-
-For methodology:
-- Describe the testing phases clearly with a concise introductory sentence followed by clean bullet points (- Phase/Tool: Action and target) for each major step.
-- Avoid cramped inline numbering like (1) or (2) or monolithic run-on text.
-
-For findings:
-- Provide detailed findings narrative objects in `findings` for priority findings (focus on confirmed, high, medium, or the top 8 findings).
-- For routine informational scanner notices (such as exposed static paths or header hints), omit them from the `findings` array and summarize their aggregate impact in `risk_overview`.
-- In each finding narrative, separate OBSERVED vs INFERRED: cite the exact HTTP status, banner, response excerpt, or tool output that proved or supported the hypothesis.
-- In remediation, recommend specific defensive controls, secure headers, parameterization, or configuration directives rather than vague guidance.
-
-In recommendations, prioritize actionable engineering fixes by greatest risk reduction (addressing confirmed High/Critical vulnerabilities first).
-
-Mention rejected approvals, failed steps, timeouts, and open questions in the
-limitations section. A rejected action is not a finding; it is a coverage gap.
-
-You MUST return valid JSON matching this exact top-level schema:
-{
-  "executive_summary": "string",
-  "methodology": "string",
-  "risk_overview": "string",
-  "findings": [
-    {
-      "finding_id": 123,
-      "technical_analysis": "string",
-      "impact": "string",
-      "remediation": "string",
-      "confidence_statement": "string",
-      "observed_vs_inferred": "string"
-    }
-  ],
-  "limitations": "string",
-  "recommendations": ["string"],
-  "conclusion": "string"
-}
-No markdown formatting, no preamble, only pure JSON.
-"""
 
 CVE_PATTERN = re.compile(r"\bCVE-\d{4}-\d{4,7}\b", re.IGNORECASE)
 CVSS_PATTERN = re.compile(
@@ -638,7 +479,7 @@ async def write_narrative_result(
             return None, f"build_report_model failed: {exc}"
 
     messages = [
-        SystemMessage(content=REPORT_WRITER_PROMPT),
+        SystemMessage(content=ROLE_PROMPTS.get("report_writer")),
         HumanMessage(content=json.dumps(context, indent=2)),
     ]
 

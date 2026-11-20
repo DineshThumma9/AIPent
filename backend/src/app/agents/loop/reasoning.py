@@ -9,9 +9,7 @@ from __future__ import annotations
 from typing import Any
 from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlmodel import select
 
-from app.agents.control import audit
 from app.agents.loop.contracts import (
     DecisionRecord,
     EvidenceBoard,
@@ -21,40 +19,15 @@ from app.agents.loop.contracts import (
 from app.domain.models import Audit, utcnow
 
 
-async def next_hypothesis_id(session: AsyncSession, assessment_id: int) -> str:
-    """Generate the next sequential hypothesis id like H-1, H-2."""
-    result = await session.execute(
-        select(Audit).where(
-            Audit.assessment_id == assessment_id,
-            Audit.event_type == "hypothesis.created",
-        )
-    )
-    count = len(result.scalars().all())
-    return f"H-{count + 1}"
-
-
-async def build_evidence_board(session: AsyncSession, assessment_id: int) -> EvidenceBoard:
-    """Fold audit events into an EvidenceBoard."""
-    events = await session.execute(
-        select(Audit)
-        .where(
-            Audit.assessment_id == assessment_id,
-            Audit.event_type.in_([
-                "hypothesis.created",
-                "hypothesis.updated",
-                "decision.recorded",
-                "handoff.created",
-            ]),
-        )
-        .order_by(Audit.id)
-    )
+def fold_events_into_evidence_board(events: list[Audit]) -> EvidenceBoard:
+    """Pure domain function folding a sequence of Audit events into an EvidenceBoard."""
     hypotheses: dict[str, Hypothesis] = {}
     decision_map: dict[str, DecisionRecord] = {}
     decision_order: list[str] = []
     anon_decisions: list[DecisionRecord] = []
     open_questions: list[str] = []
 
-    for event in events.scalars():
+    for event in events:
         payload = event.payload or {}
         if event.event_type == "hypothesis.created":
             try:
@@ -117,6 +90,20 @@ async def build_evidence_board(session: AsyncSession, assessment_id: int) -> Evi
     )
 
 
+async def build_evidence_board(session: AsyncSession, assessment_id: int) -> EvidenceBoard:
+    """Fold audit events into an EvidenceBoard via AuditRepo."""
+    from app.persistence.audit_repo import AuditRepo
+
+    return await AuditRepo(session).get_evidence_board(assessment_id)
+
+
+async def next_hypothesis_id(session: AsyncSession, assessment_id: int) -> str:
+    """Generate the next sequential hypothesis id like H-1, H-2 via AuditRepo."""
+    from app.persistence.audit_repo import AuditRepo
+
+    return await AuditRepo(session).next_hypothesis_id(assessment_id)
+
+
 async def record_hypothesis(
     session: AsyncSession,
     assessment_id: int,
@@ -129,23 +116,18 @@ async def record_hypothesis(
     evidence_ids: list[int] | None = None,
 ) -> Observation:
     """Record a hypothesis creation audit event and return an Observation."""
-    h_id = await next_hypothesis_id(session, assessment_id)
-    now = utcnow()
-    payload = {
-        "run_id": run_id,
-        "hypothesis_id": h_id,
-        "role": role,
-        "statement": statement,
-        "asset": asset,
-        "endpoint": endpoint,
-        "falsifier": falsifier,
-        "evidence_ids": evidence_ids or [],
-        "confidence": 0.5,
-        "status": "open",
-        "created_by": role,
-        "updated_at": now.isoformat(),
-    }
-    audit(session, assessment_id, "hypothesis.created", payload)
+    from app.persistence.audit_repo import AuditRepo
+
+    h_id, _ = await AuditRepo(session).record_hypothesis(
+        assessment_id=assessment_id,
+        run_id=run_id,
+        role=role,
+        statement=statement,
+        asset=asset,
+        endpoint=endpoint,
+        falsifier=falsifier,
+        evidence_ids=evidence_ids,
+    )
     await session.commit()
 
     return Observation(
@@ -170,18 +152,18 @@ async def update_hypothesis(
     note: str | None = None,
 ) -> Observation:
     """Record a hypothesis update audit event and return an Observation."""
-    now = utcnow()
-    payload = {
-        "run_id": run_id,
-        "hypothesis_id": hypothesis_id,
-        "role": role,
-        "status": status,
-        "confidence": confidence,
-        "evidence_ids": evidence_ids or [],
-        "note": note,
-        "updated_at": now.isoformat(),
-    }
-    audit(session, assessment_id, "hypothesis.updated", payload)
+    from app.persistence.audit_repo import AuditRepo
+
+    await AuditRepo(session).update_hypothesis(
+        assessment_id=assessment_id,
+        run_id=run_id,
+        role=role,
+        hypothesis_id=hypothesis_id,
+        status=status,
+        confidence=confidence,
+        evidence_ids=evidence_ids,
+        note=note,
+    )
     await session.commit()
 
     return Observation(
