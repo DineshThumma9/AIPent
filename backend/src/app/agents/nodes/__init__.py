@@ -8,7 +8,6 @@ from __future__ import annotations
 # Re-exported for monkeypatching compatibility in tests
 from app.agents.model import build_role_model
 from app.agents.mission_brain import run_supervisor_agent
-from app.reporting.narrative import write_narrative_result
 
 from app.agents.nodes.intake import intake_node
 from app.agents.nodes.supervisor import _failure_from_state, supervisor_node
@@ -53,3 +52,12 @@ __all__ = [
     "run_supervisor_agent",
     "write_narrative_result",
 ]
+
+
+def __getattr__(name: str):
+    if name == "write_narrative_result":
+        from app.reporting.narrative import write_narrative_result
+
+        return write_narrative_result
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+

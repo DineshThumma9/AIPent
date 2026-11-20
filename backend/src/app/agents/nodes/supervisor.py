@@ -17,7 +17,6 @@ from app.agents.mission_brain import (
     validate_route,
 )
 from app.agents.nodes.specialist import brief_node
-from app.core.config import settings
 from app.core.db import get_async_session_ctx
 from app.core.log import get_logger
 from app.persistence import AuditRepo, load_mission_context
@@ -68,7 +67,6 @@ async def supervisor_node(state: AssessmentState) -> Command:
         proposed = await supervisor_agent_fn(
             digest=digest,
             response_model=RouteDecision,
-            max_tool_calls=settings.supervisor_tool_calls,
         )
     except Exception as exc:
         supervisor_exc = exc

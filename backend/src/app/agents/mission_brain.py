@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from typing import TYPE_CHECKING, Any
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,7 +19,6 @@ from app.agents.prompts import ROLE_PROMPTS
 if TYPE_CHECKING:
     from app.agents.state import AssessmentState
 from app.agents.contracts import FailureSignal, RouteDecision
-from app.agents.tool_specs import bindable_tools
 from app.core.config import settings
 from app.core.db import get_async_session_ctx
 from app.core.log import get_logger
@@ -257,33 +257,6 @@ def validate_route(
     return proposed, None
 
 
-def _supervisor_tool_payload(
-    name: str, args: dict[str, Any], digest: MissionDigest
-) -> dict[str, Any]:
-    """Serve supervisor tool calls from the already-built digest."""
-    limit = int(args.get("limit") or 0)
-    if name == "get_mission_digest":
-        return digest.model_dump(mode="json")
-    if name == "list_services":
-        return {"services": digest.services[: limit or 50]}
-    if name == "list_findings":
-        return {
-            "findings": [
-                f.model_dump(mode="json") if hasattr(f, "model_dump") else f
-                for f in digest.candidates[: limit or 50]
-            ]
-        }
-    if name == "get_steps":
-        return {"steps": digest.recent_steps[-limit:] if limit else digest.recent_steps}
-    if name == "get_handoffs":
-        return {
-            "handoffs": digest.recent_handoffs[-limit:] if limit else digest.recent_handoffs
-        }
-    if name == "get_budget":
-        return digest.budget
-    return {"error": f"unknown supervisor tool {name}"}
-
-
 def _extract_route_decision(raw_obj: Any) -> RouteDecision | None:
     """Robustly extract RouteDecision from a Pydantic object, dict, or AIMessage/text."""
     if isinstance(raw_obj, RouteDecision):
@@ -344,10 +317,15 @@ def _extract_route_decision(raw_obj: Any) -> RouteDecision | None:
 async def run_supervisor_agent(
     digest: MissionDigest,
     response_model: type[RouteDecision] = RouteDecision,
-    max_tool_calls: int = 4,
     chat_model: Any | None = None,
 ) -> RouteDecision:
-    """Invoke the supervisor LLM mission director or return safe route."""
+    """Ask the supervisor for one RouteDecision.
+
+    The mission digest is the supervisor's whole context: services, candidates,
+    hypotheses, recent steps, handoffs, and budget are already in it. A tool
+    loop would only re-read that same prompt, so the supervisor gets one
+    structured call and no execution tools.
+    """
     model = chat_model
     if model is None:
         try:
@@ -357,11 +335,11 @@ async def run_supervisor_agent(
             log.warning("supervisor model build failed: %s", exc)
             return deterministic_safe_route({"turns": digest.budget.get("turns", {})}, digest)
 
-
     user_content = (
         f"MISSION DIGEST:\n{digest.model_dump_json(indent=2)}\n\n"
-        "Analyze the mission digest and provide your RouteDecision by calling the RouteDecision tool with next_role, why, confidence score, and tactical directive. "
-        "Populate all required arguments directly inside the tool call."
+        "Analyze the mission digest and return a RouteDecision with next_role, "
+        "why, confidence score, and a tactical directive. Populate every field "
+        "directly in the response."
     )
     messages = [
         SystemMessage(content=ROLE_PROMPTS.get("supervisor")),
@@ -374,68 +352,31 @@ async def run_supervisor_agent(
         "metadata": {"assessment_id": digest.assessment_id, "run_id": digest.run_id},
     }
 
-    # 1. Let the supervisor read mission state through its tools.
-    conversation = list(messages)
+    started = time.perf_counter()
     try:
-        tool_model = model.bind_tools(bindable_tools("supervisor"))
-        for _ in range(max(0, max_tool_calls)):
-            ai = await tool_model.ainvoke(conversation, config=call_config)
-            decision = _extract_route_decision(ai)
-            if decision:
-                return decision
-
-            tool_calls = list(getattr(ai, "tool_calls", []) or [])
-            if not tool_calls:
-                break
-            conversation.append(ai)
-            for call in tool_calls:
-                cname = call.get("name") or "unknown"
-                if cname == "RouteDecision":
-                    continue
-                conversation.append(
-                    ToolMessage(
-                        tool_call_id=call.get("id") or "",
-                        name=cname,
-                        content=json.dumps(
-                            _supervisor_tool_payload(
-                                cname,
-                                call.get("args") or {},
-                                digest,
-                            ),
-                            default=str,
-                        ),
-                    )
-                )
-    except Exception as exc:
-        log.warning("supervisor tool loop failed: %s", exc)
-        # Clean up any trailing assistant message that has unresolved tool calls
-        if conversation and getattr(conversation[-1], "tool_calls", None):
-            conversation.pop()
-
-    # 2. RouteDecision is the response format (first attempt with include_raw=True).
-    try:
-        structured = model.with_structured_output(response_model, include_raw=True)
-        result = await structured.ainvoke(conversation, config=call_config)
+        structured = model.with_structured_output(response_model)
+        result = await structured.ainvoke(messages, config=call_config)
         decision = _extract_route_decision(result)
         if decision:
+            log.info(
+                "supervisor_decision role=%s elapsed=%.1fs",
+                decision.next_role,
+                time.perf_counter() - started,
+            )
             return decision
     except Exception as exc:
-        log.warning("supervisor structured route with include_raw failed: %s", exc)
-        try:
-            structured = model.with_structured_output(response_model)
-            result = await structured.ainvoke(conversation, config=call_config)
-            decision = _extract_route_decision(result)
-            if decision:
-                return decision
-        except Exception as exc2:
-            log.warning("supervisor structured route failed: %s", exc2)
+        log.warning("supervisor structured route failed: %s", exc)
 
-    # Fallback to direct model invocation and text extraction if structured tool-calling failed
+    # Some providers return the decision as text instead of a structured call.
     try:
-        raw_ai = await model.ainvoke(conversation, config=call_config)
+        raw_ai = await model.ainvoke(messages, config=call_config)
         decision = _extract_route_decision(raw_ai)
         if decision:
-            log.info("recovered RouteDecision via direct text fallback (role=%s)", decision.next_role)
+            log.info(
+                "recovered RouteDecision via direct text fallback (role=%s, elapsed=%.1fs)",
+                decision.next_role,
+                time.perf_counter() - started,
+            )
             return decision
     except Exception as exc:
         log.warning("supervisor direct invoke fallback failed: %s", exc)

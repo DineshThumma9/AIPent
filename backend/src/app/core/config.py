@@ -51,7 +51,6 @@ class Settings(BaseSettings):
     run_timeout: int = 1800
 
     agent_loop: Literal["legacy", "v2"] = "v2"
-    supervisor_tool_calls: int = 10
     supervisor_calls_per_run: int = 30
     max_no_progress: int = 5
     max_role_retries: int = 5

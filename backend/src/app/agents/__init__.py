@@ -16,13 +16,6 @@ from app.agents.contracts import (
     SteeringNote,
 )
 from app.agents.state import AssessmentState, initial_state
-from app.agents.builder import (
-    build_assessment_graph,
-    build_assessment_graph_v2,
-    get_assessment_graph,
-    graph_config,
-    prepare_run,
-)
 
 __all__ = [
     "ActionRequest",
@@ -43,3 +36,17 @@ __all__ = [
     "graph_config",
     "prepare_run",
 ]
+
+
+def __getattr__(name: str):
+    if name in (
+        "build_assessment_graph",
+        "build_assessment_graph_v2",
+        "get_assessment_graph",
+        "graph_config",
+        "prepare_run",
+    ):
+        from app.agents import builder
+
+        return getattr(builder, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

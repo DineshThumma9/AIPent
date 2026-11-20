@@ -139,10 +139,10 @@ SUPERVISOR_PROMPT = (
         "- ONLY reference endpoints, hosts, or paths that are explicitly observed in the MISSION DIGEST (e.g. from service enumeration, candidate findings, or recent steps). DO NOT invent or hallucinate routes like '/rest/search' if discovery revealed '/rest/products/search'.\n"
         "- If the endpoint path is uncertain, direct the specialist to run discovery/fuzzing first to find the exact route.\n"
         "- Never instruct validation to probe a guessed endpoint when 5xx errors or 404s were recently returned.\n\n"
-        "STRUCTURED ROUTE DECISION REQUIREMENT:\n"
-        "- You MUST call the 'RouteDecision' tool with all required fields (next_role, why, confidence, directive) fully populated inside the function call arguments.\n"
-        "- Do NOT provide an empty tool call or write the JSON decision only in message text.\n"
-        "- The 'next_role' must be one of: 'recon', 'discovery', 'validation', or 'review'."
+        "ROUTE DECISION:\n"
+        "- Return exactly one decision with these fields: next_role, why, confidence, directive.\n"
+        "- The 'next_role' must be one of: 'recon', 'discovery', 'validation', or 'review'.\n"
+        "- Do not ask for more data or call tools; the mission digest is your complete context."
     )
 
 

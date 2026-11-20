@@ -62,3 +62,4 @@ strix_runs/
 .pytest_cache/
 reports/
 
+opencode.json 
