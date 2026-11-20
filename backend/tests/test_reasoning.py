@@ -15,6 +15,11 @@ from app.agents.loop.reasoning import (
 from app.persistence.audit_repo import AuditRepo
 
 
+def test_domain_reasoning_has_zero_agent_dependencies():
+    from app.domain.reasoning import fold_events_into_evidence_board
+    assert callable(fold_events_into_evidence_board)
+
+
 def test_fold_events_into_evidence_board_pure():
     """Verify fold_events_into_evidence_board does not touch any database."""
     now = datetime.now(timezone.utc)

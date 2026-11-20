@@ -374,7 +374,7 @@ class AuditRepo(BaseRepo):
 
     async def get_evidence_board(self, assessment_id: int) -> EvidenceBoard:
         """Fetch audit events and fold into an EvidenceBoard domain model."""
-        from app.agents.loop.reasoning import fold_events_into_evidence_board
+        from app.domain.reasoning import fold_events_into_evidence_board
 
         events = await self.get_events(
             assessment_id,
