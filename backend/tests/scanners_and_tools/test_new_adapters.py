@@ -67,3 +67,103 @@ def test_ffuf_parser_empty():
 
     assert ffuf.scan("", "127.0.0.1", 3000) == []
     assert ffuf.scan("{}", "127.0.0.1", 3000) == []
+
+
+def test_katana_argv_builder():
+    from app.adapters import katana
+
+    args = katana.argv("127.0.0.1", 3000, "/tmp/out.txt", depth=2)
+    assert "katana" in args[0]
+    assert "-u" in args
+    assert "http://127.0.0.1:3000" in args
+    assert "-d" in args
+    assert "2" in args
+    assert "-jc" in args
+
+
+def test_katana_parser_jsonl_and_text():
+    from app.adapters import katana
+
+    jsonl_text = "\n".join(
+        [
+            json.dumps({"request": {"endpoint": "http://127.0.0.1:3000/api/v1/users", "method": "GET"}}),
+            json.dumps({"request": {"endpoint": "http://127.0.0.1:3000/assets/main.js", "method": "GET"}}),
+            "http://127.0.0.1:3000/rest/admin/settings",
+            "",
+            "invalid-url-to-skip",
+        ]
+    )
+    findings = katana.scan(jsonl_text, "127.0.0.1", 3000)
+    assert len(findings) == 3
+    endpoints = {f.endpoint for f in findings}
+    assert "/api/v1/users" in endpoints
+    assert "/assets/main.js" in endpoints
+    assert "/rest/admin/settings" in endpoints
+
+    admin_f = next(f for f in findings if f.endpoint == "/rest/admin/settings")
+    assert admin_f.severity == Severity.LOW
+    assert admin_f.origin == Origin.TOOL
+    assert admin_f.status == FindingStatus.SUSPECTED
+
+    js_f = next(f for f in findings if f.endpoint == "/assets/main.js")
+    assert js_f.severity == Severity.INFO
+
+
+def test_katana_parser_empty():
+    from app.adapters import katana
+
+    assert katana.scan("", "127.0.0.1", 3000) == []
+
+
+def test_nuclei_argv_builder():
+    from app.adapters import nuclei
+
+    args = nuclei.argv("127.0.0.1", 3000, "/tmp/out.jsonl", tags="cve,xss", severity="high,critical")
+    assert "nuclei" in args[0]
+    assert "-u" in args
+    assert "http://127.0.0.1:3000" in args
+    assert "-tags" in args
+    assert "cve,xss" in args
+    assert "-severity" in args
+    assert "high,critical" in args
+    assert "-jsonl" in args
+
+
+def test_nuclei_parser_jsonl():
+    from app.adapters import nuclei
+
+    mock_line = json.dumps(
+        {
+            "template-id": "cve-2020-5902",
+            "info": {
+                "name": "F5 BIG-IP TMUI RCE",
+                "severity": "critical",
+                "description": "Remote code execution vulnerability in F5 BIG-IP.",
+                "classification": {
+                    "cve-id": ["CVE-2020-5902"],
+                    "cwe-id": ["CWE-22", "CWE-78"],
+                    "cvss-score": 9.8,
+                },
+            },
+            "matched-at": "http://127.0.0.1:3000/tmui/login.jsp",
+            "curl-command": "curl -X GET 'http://127.0.0.1:3000/tmui/login.jsp'",
+        }
+    )
+    findings = nuclei.scan(mock_line, "127.0.0.1", 3000)
+    assert len(findings) == 1
+    f = findings[0]
+    assert f.title == "F5 BIG-IP TMUI RCE"
+    assert f.severity == Severity.CRITICAL
+    assert f.status == FindingStatus.CONFIRMED
+    assert f.cve == ["CVE-2020-5902"]
+    assert "CWE-22" in f.cwe
+    assert f.endpoint == "/tmui/login.jsp"
+    assert "curl -X GET" in f.evidence[0].excerpt
+
+
+def test_nuclei_parser_empty():
+    from app.adapters import nuclei
+
+    assert nuclei.scan("", "127.0.0.1", 3000) == []
+
+

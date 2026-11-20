@@ -15,7 +15,18 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 from urllib.parse import parse_qsl, urlsplit
 
-from app.adapters import dirb, hashcat, nikto, nmap, sqlmap, whatweb, zap
+from app.adapters import (
+    dirb,
+    ffuf,
+    hashcat,
+    katana,
+    nikto,
+    nmap,
+    nuclei,
+    sqlmap,
+    whatweb,
+    zap,
+)
 from app.adapters.base import FindingDraft
 from app.core.config import settings
 from app.domain.models import Assessment
@@ -323,6 +334,46 @@ def _dirb_argv(
     ]
 
 
+def _ffuf_argv(
+    assessment: Assessment, target: str, output: Path, params: dict[str, Any] | None = None
+) -> list[str]:
+    p = params or {}
+    return ffuf.argv(
+        target=target,
+        port=_web_port(assessment),
+        output_path=str(output),
+        wordlist=p.get("wordlist"),
+        path=p.get("path") or p.get("endpoint"),
+    )
+
+
+def _katana_argv(
+    assessment: Assessment, target: str, output: Path, params: dict[str, Any] | None = None
+) -> list[str]:
+    p = params or {}
+    depth = int(p.get("depth", 3))
+    return katana.argv(
+        target=target,
+        port=_web_port(assessment),
+        output_path=str(output),
+        depth=depth,
+    )
+
+
+def _nuclei_argv(
+    assessment: Assessment, target: str, output: Path, params: dict[str, Any] | None = None
+) -> list[str]:
+    p = params or {}
+    return nuclei.argv(
+        target=target,
+        port=_web_port(assessment),
+        output_path=str(output),
+        tags=p.get("tags"),
+        severity=p.get("severity"),
+    )
+
+
+
 ACTIONS: dict[str, ActionSpec] = {
     "recon_services": ActionSpec(
         name="recon_services",
@@ -449,6 +500,47 @@ ACTIONS: dict[str, ActionSpec] = {
             "hash_mode": "Hashcat mode (-m), e.g. 0 for MD5, 100 for SHA-1, 3200 for bcrypt",
             "wordlist": "Allowlisted wordlist: lab (default) or rockyou",
             "runtime": "Max cracking time in seconds (10-300, default 120)",
+        },
+    ),
+    "ffuf_scan": ActionSpec(
+        name="ffuf_scan",
+        tool="ffuf",
+        suffix=".ffuf.json",
+        output="file",
+        transport="local",
+        ok_codes=(0, 1),
+        build_argv=_ffuf_argv,
+        parse=lambda text, host, port: ffuf.scan(text, host, port),
+        param_hints={
+            "path": "Base path to fuzz, e.g. /api/FUZZ (defaults to /FUZZ)",
+            "wordlist": "Path to wordlist inside container or local environment",
+        },
+    ),
+    "katana_crawl": ActionSpec(
+        name="katana_crawl",
+        tool="katana",
+        suffix=".katana.txt",
+        output="file",
+        transport="local",
+        ok_codes=(0, 1),
+        build_argv=_katana_argv,
+        parse=lambda text, host, port: katana.scan(text, host, port),
+        param_hints={
+            "depth": "Crawl depth (default: 3)",
+        },
+    ),
+    "nuclei_scan": ActionSpec(
+        name="nuclei_scan",
+        tool="nuclei",
+        suffix=".nuclei.jsonl",
+        output="file",
+        transport="local",
+        ok_codes=(0, 1),
+        build_argv=_nuclei_argv,
+        parse=lambda text, host, port: nuclei.scan(text, host, port),
+        param_hints={
+            "tags": "Template tags to filter by (e.g. cve, xss, misconfig)",
+            "severity": "Severity filter (e.g. low, medium, high, critical)",
         },
     ),
 }
@@ -653,6 +745,28 @@ def mcp_tool_call(
                 requests.append(args)
             return "curl_request", {"batch": requests}
         return "curl_request", _curl_tool_args(assessment, target, p, alias)
+    if action == "ffuf_scan":
+        p = params or {}
+        raw_path = p.get("path") or p.get("endpoint")
+        fuzz_url = ffuf.normalize_fuzz_url(target_url, raw_path)
+        tool_args: dict[str, Any] = {"target_url": fuzz_url}
+        if p.get("wordlist"):
+            tool_args["wordlist"] = p["wordlist"]
+        return "ffuf_scan", tool_args
+    if action == "katana_crawl":
+        p = params or {}
+        tool_args = {"target_url": target_url}
+        if "depth" in p:
+            tool_args["depth"] = int(p["depth"])
+        return "katana_crawl", tool_args
+    if action == "nuclei_scan":
+        p = params or {}
+        tool_args = {"target_url": target_url}
+        if p.get("tags"):
+            tool_args["tags"] = str(p["tags"])
+        if p.get("severity"):
+            tool_args["severity"] = str(p["severity"])
+        return "nuclei_scan", tool_args
 
     raise UnknownAction(action)
 
