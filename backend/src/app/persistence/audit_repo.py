@@ -29,6 +29,60 @@ class AuditRepo(BaseRepo):
         await self.session.flush()
         return audit
 
+    async def record_event(
+        self,
+        assessment_id: int,
+        event_type: str,
+        payload: dict[str, Any],
+        actor: str = "system",
+    ) -> Audit:
+        """Record an arbitrary audit event."""
+        return await self.add(
+            assessment_id=assessment_id,
+            event_type=event_type,
+            payload=payload,
+            actor=actor,
+        )
+
+    async def record_decision(
+        self,
+        assessment_id: int,
+        run_id: str,
+        role: str,
+        step_id: int,
+        action: str,
+        target: str,
+        observation: str,
+        outcome: str,
+        confidence: float = 0.8,
+        hypothesis_id: str | None = None,
+        evidence_ids: list[int] | None = None,
+        expected_observation: str | None = None,
+        would_falsify: str | None = None,
+        actor: str = "agent",
+    ) -> Audit:
+        """Record a structured decision.recorded audit event."""
+        payload: dict[str, Any] = {
+            "id": f"D-{step_id}",
+            "run_id": run_id,
+            "role": role,
+            "action": action,
+            "target": target,
+            "observation": observation,
+            "outcome": outcome,
+            "confidence": confidence,
+            "hypothesis_id": hypothesis_id,
+            "evidence_ids": evidence_ids or [],
+            "expected_observation": expected_observation,
+            "would_falsify": would_falsify,
+        }
+        return await self.add(
+            assessment_id=assessment_id,
+            event_type="decision.recorded",
+            payload=payload,
+            actor=actor,
+        )
+
     async def get_all_for_assessment(
         self,
         assessment_id: int,
