@@ -92,15 +92,33 @@ def filter_self_routes(routes: list[str], request_url: str) -> list[str]:
     clean: list[str] = []
     for r in routes:
         r_str = str(r).strip()
-        if not r_str or r_str in ("/", ""):
+        if not r_str or r_str in ("/", "", "/#", "#", "/#/", "#/"):
             continue
+
+        # Discard if it strictly equals the full request URL
+        if request_url and r_str.lower().rstrip("/") == request_url.lower().rstrip("/"):
+            continue
+
+        # Handle SPA client-side hash routes (e.g. /#/administration or #/administration)
+        if r_str.startswith(("/#", "#/")):
+            try:
+                parsed_hash = urllib.parse.urlsplit(r_str)
+                frag = parsed_hash.fragment.strip("/")
+            except Exception:
+                frag = r_str.lstrip("/#").strip("/")
+            if not frag:
+                continue
+            # If request_url matches the fragment route
+            if request_url and frag.lower() == req_path.lstrip("/"):
+                continue
+            clean.append(r_str)
+            continue
+
         try:
             r_path = urllib.parse.urlsplit(r_str).path
         except Exception:
             r_path = r_str
-        # Discard if it strictly equals the full request URL
-        if request_url and r_str.lower().rstrip("/") == request_url.lower().rstrip("/"):
-            continue
+
         # Normalize route path to ensure a leading slash and no trailing slash for comparison
         r_norm = f"/{r_path.lstrip('/')}".rstrip("/").lower()
         if not r_norm or r_norm == "/":

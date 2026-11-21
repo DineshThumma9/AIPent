@@ -3,6 +3,7 @@
 import json
 import re
 import shutil
+import urllib.parse
 from pathlib import Path
 from typing import Any
 
@@ -109,6 +110,28 @@ def _severity(message: str) -> Severity:
 
 def to_drafts(host: str, port: int, items: list[NiktoItem]) -> list[FindingDraft]:
     drafts: list[FindingDraft] = []
+
+    # Normalize host and port to prevent URL doubling (e.g. http://http://127.0.0.1:3000:3000/)
+    clean_host = host
+    scheme = "http"
+    clean_port = port
+    if "://" in host:
+        parsed = urllib.parse.urlsplit(host)
+        scheme = parsed.scheme or "http"
+        clean_host = parsed.hostname or host
+        if parsed.port:
+            clean_port = parsed.port
+    elif ":" in host:
+        parts = host.split(":", 1)
+        clean_host = parts[0]
+        try:
+            clean_port = int(parts[1])
+        except ValueError:
+            pass
+
+    port_suffix = f":{clean_port}" if clean_port and clean_port not in (80, 443) else ""
+    base_url = f"{scheme}://{clean_host}{port_suffix}"
+
     for item in items:
         clean_msg = re.sub(r"^\[\d+\]\s*", "", item.msg.strip())
         clean_msg = re.sub(r"^/:\s*", "", clean_msg)
@@ -116,11 +139,12 @@ def to_drafts(host: str, port: int, items: list[NiktoItem]) -> list[FindingDraft
         if not title:
             continue
         cve_list = _extract_cves(clean_msg)
+        item_path = item.url if item.url.startswith("/") else f"/{item.url}"
         drafts.append(
             FindingDraft(
-                canonical_key=f"web:{title.lower()}:{host}:{port}",
-                asset=host,
-                endpoint=f"http://{host}:{port}{item.url}",
+                canonical_key=f"web:{title.lower()}:{clean_host}:{clean_port}",
+                asset=clean_host,
+                endpoint=f"{base_url}{item_path}",
                 title=title,
                 description=clean_msg,
                 severity=_severity(clean_msg),

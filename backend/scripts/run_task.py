@@ -29,7 +29,7 @@ from tasks import task_hints, tasks
 
 from app.core.config import settings
 from app.core.db import get_async_session_ctx, init_db
-from app.domain.models import Assessment, Audit, Finding, Step
+from app.domain.models import Assessment, AssessmentStatus, Audit, Finding, Step
 from app.integrations.juiceshop import compute_delta, fetch_solved_challenges
 from app.persistence import AssessmentRepo, SteeringRepo
 from app.runtime import runner
@@ -207,6 +207,16 @@ async def run_single_task(task_id: int, timeout_seconds: int = 360) -> dict:
             if not view.running and not view.paused:
                 print(f"\n{GREEN}Agent run finished naturally with status: {view.status}{RESET}")
                 break
+        else:
+            print(f"\n{RED}Task {task_id} timed out after {timeout_seconds}s.{RESET}")
+            async with get_async_session_ctx() as session:
+                a_repo = AssessmentRepo(session)
+                a = await a_repo.get(aid)
+                if a and a.status == AssessmentStatus.RUNNING.value:
+                    from app.core.time import utcnow
+                    a.status = AssessmentStatus.FAILED.value
+                    a.finished_at = utcnow()
+                    await session.commit()
 
     except Exception as exc:
         print(f"{RED}Exception while running task {task_id}: {exc}{RESET}")
@@ -247,6 +257,7 @@ async def run_single_task(task_id: int, timeout_seconds: int = 360) -> dict:
 async def main():
     parser = argparse.ArgumentParser(description="Sequential Task Runner for AIPENT")
     parser.add_argument("--task", type=int, default=None, help="Run a specific task ID (1, 2, or 3)")
+    parser.add_argument("--tasks", type=str, default=None, help="Comma-separated task IDs (e.g. '2,3')")
     parser.add_argument("--all", action="store_true", help="Run all tasks sequentially (1, 2, 3)")
     parser.add_argument("--timeout", type=int, default=360, help="Timeout in seconds per task")
     args = parser.parse_args()
@@ -254,7 +265,9 @@ async def main():
     await init_db()
 
     task_list = []
-    if args.task:
+    if args.tasks:
+        task_list = [int(t.strip()) for t in args.tasks.split(",") if t.strip()]
+    elif args.task:
         task_list = [args.task]
     elif args.all:
         task_list = sorted(tasks.keys())

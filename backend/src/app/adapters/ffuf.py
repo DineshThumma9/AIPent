@@ -113,11 +113,32 @@ def argv(
     if auto_calibrate:
         args.append("-ac")
     if filter_status:
-        args.extend(["-fc", str(filter_status)])
+        s_fc = str(filter_status).strip().lower()
+        if s_fc not in ("", "none", "null", "false", "0"):
+            cleaned_fc = "".join(c for c in s_fc if c.isdigit() or c in ",-")
+            if cleaned_fc:
+                args.extend(["-fc", cleaned_fc])
     if filter_size:
-        args.extend(["-fs", str(filter_size)])
+        s_fs = str(filter_size).strip().lower()
+        if s_fs not in ("", "none", "null", "false", "0"):
+            cleaned_fs = "".join(c for c in s_fs if c.isdigit() or c in ",-")
+            if cleaned_fs:
+                args.extend(["-fs", cleaned_fs])
 
     return args
+
+
+def extract_wildcard_lengths(
+    results: list[Any], min_occurrences: int = 5, min_size_bytes: int = 100
+) -> set[int]:
+    """Identify wildcard catch-all response sizes (e.g. repeated SPA index.html on HTTP 200)."""
+    length_counts: dict[int, int] = {}
+    for item in results:
+        if isinstance(item, dict) and item.get("status") == 200:
+            l = item.get("length")
+            if isinstance(l, int) and l >= min_size_bytes:
+                length_counts[l] = length_counts.get(l, 0) + 1
+    return {l for l, count in length_counts.items() if count >= min_occurrences}
 
 
 def scan(text: str, host: str, port: int) -> list[FindingDraft]:
@@ -136,17 +157,7 @@ def scan(text: str, host: str, port: int) -> list[FindingDraft]:
     if not isinstance(results, list):
         return []
 
-    # Detect wildcard / SPA catch-all response sizes.
-    # If a specific response length appears >= 5 times for HTTP 200, it represents a default
-    # fallback page (e.g. index.html) and should be filtered out to eliminate false positives.
-    length_counts: dict[int, int] = {}
-    for item in results:
-        if isinstance(item, dict) and item.get("status") == 200:
-            l = item.get("length")
-            if isinstance(l, int):
-                length_counts[l] = length_counts.get(l, 0) + 1
-
-    wildcard_lengths = {l for l, count in length_counts.items() if count >= 5}
+    wildcard_lengths = extract_wildcard_lengths(results)
 
     drafts: list[FindingDraft] = []
     seen_endpoints: set[str] = set()
@@ -160,7 +171,10 @@ def scan(text: str, host: str, port: int) -> list[FindingDraft]:
 
         # Extract endpoint path
         if url:
-            path = urlsplit(url).path or url
+            if "://" in url:
+                path = urlsplit(url).path or "/"
+            else:
+                path = urlsplit(url).path or url
         else:
             inputs = item.get("input", {})
             fuzz_val = inputs.get("FUZZ", "") if isinstance(inputs, dict) else ""
@@ -169,11 +183,14 @@ def scan(text: str, host: str, port: int) -> list[FindingDraft]:
         if not path.startswith("/"):
             path = f"/{path}"
 
+        if not path or path == "/":
+            continue
+
         if path in seen_endpoints:
             continue
 
         is_sensitive = any(kw in path.lower() for kw in SENSITIVE_KEYWORDS)
-        if length in wildcard_lengths and not is_sensitive:
+        if length in wildcard_lengths:
             continue
 
         seen_endpoints.add(path)

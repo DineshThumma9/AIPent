@@ -504,8 +504,55 @@ def _build_pure_observation(
         )
 
     if step.action == "ffuf_scan":
-        count = len(findings)
+        from app.adapters.ffuf import extract_wildcard_lengths
+
         endpoints = [f.endpoint or f.title for f in findings if f.endpoint or f.title]
+
+        # Inspect raw FFUF output file if available on disk for exact status codes and lengths
+        ffuf_items_by_path: dict[str, dict[str, Any]] = {}
+        wildcard_lengths: set[int] = set()
+        raw_lengths_by_path: dict[str, int] = {}
+        out_p = Path(step.output_path) if step.output_path else None
+        if out_p and out_p.exists() and out_p.is_file() and out_p.stat().st_size <= 5_000_000:
+            try:
+                raw_json = json.loads(out_p.read_text(encoding="utf-8", errors="replace"))
+                if isinstance(raw_json, dict) and isinstance(raw_json.get("results"), list):
+                    raw_results = raw_json["results"]
+                    wildcard_lengths = extract_wildcard_lengths(raw_results)
+
+                    for item in raw_results:
+                        if isinstance(item, dict):
+                            u = str(item.get("url") or "")
+                            if "://" in u:
+                                p = urllib.parse.urlsplit(u).path or "/"
+                            else:
+                                p = urllib.parse.urlsplit(u).path if u else ""
+                            if not p and isinstance(item.get("input"), dict):
+                                fz = item["input"].get("FUZZ", "")
+                                p = f"/{fz}" if fz else ""
+                            if p:
+                                if not p.startswith("/"):
+                                    p = f"/{p}"
+                                l = int(item.get("length") or 0)
+                                raw_lengths_by_path[p] = l
+                                if l in wildcard_lengths:
+                                    continue
+                                ffuf_items_by_path[p] = item
+            except Exception:
+                pass
+
+        # Discard any endpoints whose raw length matched wildcard fallback lengths
+        if raw_lengths_by_path and wildcard_lengths:
+            endpoints = [
+                ep for ep in endpoints
+                if raw_lengths_by_path.get(ep) not in wildcard_lengths
+            ]
+
+        # Fallback if findings list is empty but artifact has items
+        if not endpoints and ffuf_items_by_path:
+            endpoints = list(ffuf_items_by_path.keys())
+
+        count = len(endpoints)
         sensitive = [
             ep
             for ep in endpoints
@@ -530,28 +577,91 @@ def _build_pure_observation(
         ]
         sample = endpoints[:5]
 
+        # Normalize candidates across findings and artifact fallback
+        candidates: list[tuple[str, int, int]] = []
+        if findings:
+            for f in findings:
+                ep = f.endpoint or f.title
+                if not ep:
+                    continue
+                # Skip if raw response identified this endpoint as a wildcard SPA response
+                if raw_lengths_by_path.get(ep) in wildcard_lengths:
+                    continue
+                item = ffuf_items_by_path.get(ep)
+                if item:
+                    st = int(item.get("status") or 200)
+                    sz = int(item.get("length") or 0)
+                else:
+                    m = re.search(r"\(HTTP (\d+)\)", f.title or "")
+                    st = int(m.group(1)) if m else 200
+                    sz = 0
+                candidates.append((ep, st, sz))
+        if not candidates and ffuf_items_by_path:
+            for ep, item in ffuf_items_by_path.items():
+                candidates.append((ep, int(item.get("status") or 200), int(item.get("length") or 0)))
+
+        live_entries: list[tuple[str, int, int]] = []
+        error_entries: list[tuple[str, int, int]] = []
+        for ep, st, sz in candidates:
+            if st in (200, 201, 204, 301, 302, 307, 308, 401, 403):
+                live_entries.append((ep, st, sz))
+            elif st >= 500:
+                error_entries.append((ep, st, sz))
+
+        def _fmt_size(b: int) -> str:
+            if b <= 0:
+                return "0B"
+            if b < 1024:
+                return f"{b}B"
+            return f"{b / 1024:.1f}KB"
+
+        live_details = [
+            f"{ep} (HTTP {st}, {_fmt_size(sz)})" for ep, st, sz in live_entries
+        ]
+
         if count > 0:
             summary_str = (
                 f"{count} web endpoint{'s' if count != 1 else ''} discovered by FFUF: {', '.join(sample)}"
             )
             if sensitive:
                 summary_str += f" (sensitive: {', '.join(sensitive[:3])})"
+            if live_entries:
+                summary_str += f" | Live ({len(live_entries)}): {', '.join(live_details[:4])}"
+            if error_entries:
+                summary_str += f" | {len(error_entries)} endpoint(s) returned HTTP 500"
+
+            sensitive_live = [ep for ep, _, _ in live_entries if ep in sensitive]
+            sensitive_errors = [ep for ep, _, _ in error_entries if ep in sensitive]
             if sensitive:
-                next_hint = (
-                    f"FFUF discovered sensitive surfaces ({', '.join(sensitive[:3])}). "
-                    "Formulate hypotheses for authentication, authorization, or information disclosure and probe with curl_request."
-                )
+                if sensitive_live:
+                    next_hint = (
+                        f"FFUF discovered sensitive surfaces ({', '.join(sensitive[:3])}). "
+                        f"Live targets: {', '.join(sensitive_live[:3])}. "
+                        f"Probe live endpoints with curl_request or inspect sidecar manifest via read_artifact(step_id={step.id}, view='routes')."
+                    )
+                elif sensitive_errors:
+                    live_sample = [ep for ep, _, _ in live_entries[:3]]
+                    next_hint = (
+                        f"FFUF discovered sensitive surfaces ({', '.join(sensitive[:3])}), but they returned HTTP 500. "
+                        f"Active live endpoints: {', '.join(live_sample) if live_sample else 'none'}. "
+                        f"Probe live endpoints with curl_request or inspect sidecar manifest via read_artifact(step_id={step.id}, view='routes')."
+                    )
+                else:
+                    live_sample = [ep for ep, _, _ in live_entries[:3]]
+                    next_hint = (
+                        f"FFUF discovered sensitive surfaces ({', '.join(sensitive[:3])}), but none were directly accessible. "
+                        f"Active live endpoints: {', '.join(live_sample) if live_sample else 'none'}. "
+                        f"Probe live endpoints with curl_request or inspect sidecar manifest via read_artifact(step_id={step.id}, view='routes')."
+                    )
             else:
+                live_sample = [ep for ep, _, _ in live_entries[:3]]
                 next_hint = (
-                    "FFUF discovered candidate endpoints. Probe discovered routes with "
-                    "curl_request to inspect responses and headers."
+                    f"FFUF discovered {count} endpoint(s). Live ({len(live_entries)}): {', '.join(live_sample) if live_sample else 'none'}. "
+                    f"Probe live routes with curl_request or inspect sidecar manifest via read_artifact(step_id={step.id}, view='routes')."
                 )
         else:
             summary_str = "FFUF scan completed; 0 paths discovered."
-            next_hint = (
-                "FFUF fuzzing found no additional routes with the current wordlist. "
-                "Explore alternate surfaces or examine known endpoints."
-            )
+            next_hint = "FFUF fuzzing completed with 0 matches for the given wordlist."
 
         return Observation(
             ok=True,
@@ -568,6 +678,12 @@ def _build_pure_observation(
                 "discovered_endpoints": endpoints,
                 "sensitive_endpoints": sensitive,
                 "total_discovered": count,
+                "live_endpoints": [ep for ep, _, _ in live_entries],
+                "live_details": [
+                    {"endpoint": ep, "status": st, "length": sz} for ep, st, sz in live_entries
+                ],
+                "server_errors": [ep for ep, _, _ in error_entries],
+                "manifest_routes_hint": f"Call read_artifact(step_id={step.id}, view='routes') for filtered reachable endpoints.",
             },
             errors=[],
             next_hint=next_hint,
@@ -637,15 +753,15 @@ def _build_pure_observation(
                 if item.get("status_code") is not None
             ]
             if any(item.get("error") for item in results):
-                next_hint = "Some batched requests failed at the transport level. Retry those individually; do not repeat the whole batch."
+                next_hint = "Some batched requests encountered transport errors (connection or network failure)."
             elif any(status >= 500 for status in statuses):
-                next_hint = "A batched request returned 5xx. Inspect that result's artifact entry before retrying."
+                next_hint = "One or more batched requests returned 5xx server errors."
             elif any(status in (401, 403) for status in statuses):
-                next_hint = "One or more batched requests require authentication. Do not retry the batch blindly."
+                next_hint = "One or more batched requests returned 401/403 (authentication/authorization required)."
             elif any(200 <= status < 300 for status in statuses):
-                next_hint = "Compare the successful responses. Batch only independent probes; follow dependent auth flows with single requests."
+                next_hint = "Batched probes yielded 2xx responses. Evaluate response differentials across endpoints."
             else:
-                next_hint = "Compare each result against expected_observation and would_falsify."
+                next_hint = "Compare observed results against expected_observation and would_falsify."
 
             facts_dict: dict[str, Any] = {"batch": True, "results": results}
             if batch_routes:
@@ -793,50 +909,46 @@ def _build_pure_observation(
         elif http_status in (401, 403):
             if any(term in request_url.lower() for term in ("login", "auth", "token", "session")):
                 next_hint = (
-                    f"HTTP {http_status} on login/auth: Credentials rejected. Do not brute-force or guess credentials repeatedly. "
-                    "Test for authentication bypass (e.g. SQL injection on login: {\"email\": \"' or 1=1--\", \"password\": \"x\"}), "
-                    "or test user registration (e.g. /api/users, /register, /signup) to create an account."
+                    f"HTTP {http_status} on auth endpoint: Credentials rejected. "
+                    "Target rejected authentication attempt; requires valid credentials, active session token, or bypass."
                 )
             else:
-                next_hint = f"HTTP {http_status}: Authentication or authorization required. Analyze headers, test for token bypass, or inspect public paths."
+                next_hint = f"HTTP {http_status}: Authentication or authorization required. Endpoint denied unauthenticated or unauthorized access."
         elif http_status == 200 and ("<!doctype html" in body_excerpt.lower() or "<html" in body_excerpt.lower()) and req_method in ("POST", "PUT", "PATCH"):
-            next_hint = "HTTP 200 returned frontend SPA HTML shell (index.html), not an API response. The root endpoint does not accept POST requests. Probe the actual API route (e.g. /rest/user/login or /api/Users)."
+            next_hint = "HTTP 200 returned client-side SPA HTML shell (index.html fallback) instead of an API response. Target router served frontend entrypoint rather than handling the method/route as an API endpoint."
         elif http_status in (400, 422):
             err_msg = ""
             if isinstance(parsed_body, dict):
                 err_msg = str(parsed_body.get("message") or parsed_body.get("error") or "")
-            if err_msg and any(w in err_msg.lower() for w in ("email", "unique", "already exist")):
-                next_hint = f"HTTP {http_status}: Registration rejected ('{err_msg}'). Use a unique, dynamic email address (e.g. pentest_user_<random>@example.com) and retry."
-            elif err_msg:
-                next_hint = f"HTTP {http_status}: Server rejected request with message '{err_msg}'. Adjust JSON fields/headers and retry."
+            if err_msg:
+                next_hint = f"HTTP {http_status}: Request rejected by target validation constraint: '{err_msg}'."
             else:
-                next_hint = "HTTP 4xx: Server rejected request syntax or payload structure. Inspect response body for validation errors, adjust JSON fields/headers, and retry."
+                next_hint = f"HTTP {http_status}: Server rejected request syntax or schema. Target reported invalid or malformed input."
         elif http_status == 404:
-            next_hint = "HTTP 404: path does not exist. Do not retry variants; use ffuf results or read the API documentation artifact."
+            next_hint = "HTTP 404: Endpoint path not found on target. Unmapped route."
         elif http_status == 500 and "Unexpected path" in body_excerpt:
-            next_hint = "HTTP 500 with 'Unexpected path': the route does not exist. Stop guessing endpoints; read the API/swagger artifact or use a path already discovered."
+            next_hint = "HTTP 500 with 'Unexpected path': Application routing fault for unmapped route; endpoint does not exist."
         elif http_status == 500:
-            next_hint = "HTTP 500: Server exception occurred. Check if payload triggered an unhandled database error or query crash."
+            next_hint = "HTTP 500: Server raised an unhandled exception. Potential server-side crash or unhandled input error."
         elif json_items is not None and ("search" in request_url or "q=" in request_url):
             next_hint = (
-                f"Search endpoint returned {json_items} items. Compare this with a benign "
-                "baseline; a payload that changes the row count is evidence of injection. "
-                "Record it with record_finding, cite both step ids, and hand off."
+                f"Search endpoint returned {json_items} items. Differential row count "
+                "against baseline indicates potential query manipulation or injection (verify before record_finding)."
             )
         elif extracted_routes:
             sample_routes_hint = ", ".join(extracted_routes[:5])
             next_hint = (
                 f"Discovered {len(extracted_routes)} client/API routes in response (e.g. {sample_routes_hint}). "
-                "Probe these discovered routes with curl_request rather than guessing paths."
+                "Probe these discovered routes to explore exposed application attack surface."
             )
         elif extracted_files:
             sample_files_hint = ", ".join(extracted_files[:5])
             next_hint = (
                 f"Discovered {len(extracted_files)} file link(s) (e.g. {sample_files_hint}). "
-                "Inspect or retrieve relevant files with curl_request."
+                "Disclosed files may contain sensitive source, backups, or configuration assets."
             )
         elif extracted_forms:
-            next_hint = f"Discovered {len(extracted_forms)} HTML forms. Test form submission endpoints and input parameters."
+            next_hint = f"Discovered {len(extracted_forms)} HTML forms. Forms expose input parameters and submission endpoints."
         else:
             next_hint = "Compare observed HTTP status and response against expected_observation and would_falsify."
 

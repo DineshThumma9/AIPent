@@ -119,7 +119,35 @@ def parse_html(html_text: str, base_url: str = "") -> ParsedEntities:
 
     for a in soup.find_all("a", href=True):
         href = str(a.get("href", "")).strip()
-        if not href or href.startswith(("?", "#", "javascript:", "mailto:")):
+        if not href or href.startswith(("?", "javascript:", "mailto:")):
+            continue
+        if href in ("#", "/#"):
+            continue
+
+        # If href is an absolute URL, check for fragment hash routes or extract path
+        if href.startswith(("http://", "https://")):
+            try:
+                p_u = urllib.parse.urlsplit(href)
+                if p_u.fragment:
+                    frag = p_u.fragment.lstrip("/")
+                    href = f"/#/{frag}"
+                else:
+                    href = p_u.path
+            except Exception:
+                pass
+
+        # Extract client-side SPA hash routes (e.g. /#/administration or #/administration)
+        if href.startswith(("/#/", "#/")):
+            spa_h = href if href.startswith("/#/") else f"/{href}"
+            spa_route = spa_h.split("?")[0].rstrip("/")
+            if len(spa_route) > 4:
+                entities.routes.append(spa_route)
+                unhashed = spa_route[2:]
+                if unhashed and unhashed != "/":
+                    entities.routes.append(unhashed)
+            continue
+
+        if href.startswith("#"):
             continue
 
         # Ignore parent directory links in directory listings
@@ -164,21 +192,32 @@ def parse_html(html_text: str, base_url: str = "") -> ParsedEntities:
                 entities.routes.append(cr.rstrip(".,;:'\")"))
             entities.comments.append(c_text[:300])
 
-    # 5. Regex route sweep in raw HTML (for client-side routing configs)
+    # 5. Regex route sweep in raw HTML (for client-side routing configs and SPA hash routes)
     raw_routes = re.findall(
-        r"""["'`]((?:https?://[^"'`\s]+)?/(?:rest|api|auth|oauth|admin|ftp|file|redirect|profile|promotion|assets|v\d+)[a-zA-Z0-9_\-/\.:]*)["'`]""",
+        r"""["'`]((?:https?://[^"'`\s]+)?/(?:rest|api|auth|oauth|admin|ftp|file|redirect|profile|promotion|assets|v\d+|#/[a-zA-Z0-9_\-]+)[a-zA-Z0-9_\-/\.:]*)["'`]""",
         html_text,
     )
     for rr in raw_routes:
         r_str = rr.strip()
         if r_str.startswith(("http://", "https://")):
             try:
-                r_str = urllib.parse.urlparse(r_str).path
+                p_u = urllib.parse.urlsplit(r_str)
+                if p_u.fragment:
+                    frag = p_u.fragment.lstrip("/")
+                    r_str = f"/#/{frag}"
+                else:
+                    r_str = p_u.path
             except Exception:
                 pass
         cleaned = r_str.rstrip(".,;:'\")")
         if len(cleaned) > 2 and cleaned.startswith("/"):
-            entities.routes.append(cleaned)
+            if cleaned.startswith("/#/"):
+                entities.routes.append(cleaned)
+                unhashed = cleaned[2:]
+                if unhashed and unhashed != "/":
+                    entities.routes.append(unhashed)
+            elif not cleaned.startswith("/#"):
+                entities.routes.append(cleaned)
 
     # Deduplicate while preserving order
     entities.routes = list(dict.fromkeys(entities.routes))[:100]

@@ -79,7 +79,7 @@ async def read_artifact(
         view_mode = (view or kwargs.get("view") or "").lower().strip()
 
         # 1. Manifest view mode
-        if view_mode in ("manifest", "forms", "routes"):
+        if view_mode in ("manifest", "forms", "routes", "files"):
             if not manifest:
                 return Observation(
                     ok=True,
@@ -93,6 +93,8 @@ async def read_artifact(
 
             if view_mode == "routes":
                 content_out = json.dumps(manifest.get("routes", []), indent=2)
+            elif view_mode == "files":
+                content_out = json.dumps(manifest.get("files", []), indent=2)
             elif view_mode == "forms":
                 content_out = json.dumps(manifest.get("forms", []), indent=2)
             else:
@@ -281,10 +283,17 @@ async def record_finding(
     evidence_step_ids: list[int] | None = None,
     reasoning: str = "",
     cwe: list[str] | None = None,
-    finding_id: int | None = None,
+    finding_id: int | str | None = None,
     **kwargs: Any,
 ) -> Observation:
     """Create or extend a finding from the agent's own observation."""
+    clean_finding_id: int | None = None
+    if finding_id not in (None, "", "none", "None", "null", "NULL"):
+        try:
+            clean_finding_id = int(finding_id)
+        except (ValueError, TypeError):
+            clean_finding_id = None
+
     repo = FindingRepo(session)
     res = await repo.record_agent_finding(
         assessment_id=assessment_id,
@@ -298,7 +307,7 @@ async def record_finding(
         evidence_step_ids=evidence_step_ids,
         reasoning=reasoning,
         cwe=cwe,
-        finding_id=finding_id,
+        finding_id=clean_finding_id,
     )
     if not res["ok"]:
         return Observation(

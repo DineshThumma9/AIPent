@@ -262,3 +262,271 @@ def test_filter_self_routes_with_query_params():
     assert "/dashboard" in filtered
     assert "/dashboard?tab=settings" in filtered
 
+
+def test_ffuf_json_parsing_and_manifest(tmp_path):
+    """Ensure FFUF JSON output is safely extracted into routes and files without 500 errors or wildcard noise."""
+    ffuf_payload = {
+        "commandline": "ffuf -u http://127.0.0.1:3000/FUZZ -w common.txt",
+        "results": [
+            {"url": "http://127.0.0.1:3000/ftp", "status": 200, "length": 11328},
+            {"url": "http://127.0.0.1:3000/robots.txt", "status": 200, "length": 28},
+            {"url": "http://127.0.0.1:3000/ftp/acquisitions.md", "status": 200, "length": 350},
+            {"url": "http://127.0.0.1:3000/assets", "status": 301, "length": 156},
+            {"url": "http://127.0.0.1:3000/.env", "status": 200, "length": 42},
+            {"url": "http://127.0.0.1:3000/config/.backup", "status": 200, "length": 100},
+            {"url": "http://127.0.0.1:3000", "status": 200, "length": 1000},
+            {"url": "http://127.0.0.1:3000/administration", "status": 403, "length": 500},
+            {"url": "http://127.0.0.1:3000/api", "status": 500, "length": 2408},
+            {"url": "http://127.0.0.1:3000/rest", "status": 500, "length": 2410},
+            # Wildcard catch-all SPA fallbacks (same length 9984 >= 5 times)
+            {"url": "http://127.0.0.1:3000/bogus1", "status": 200, "length": 9984},
+            {"url": "http://127.0.0.1:3000/bogus2", "status": 200, "length": 9984},
+            {"url": "http://127.0.0.1:3000/bogus3", "status": 200, "length": 9984},
+            {"url": "http://127.0.0.1:3000/bogus4", "status": 200, "length": 9984},
+            {"url": "http://127.0.0.1:3000/bogus5", "status": 200, "length": 9984},
+        ],
+        "config": {},
+    }
+
+    res = parse_json(ffuf_payload)
+
+    # Valid reachable routes must be extracted
+    assert "/ftp" in res.routes
+    assert "/assets" in res.routes
+    assert "/administration" in res.routes
+    assert "/robots.txt" in res.routes
+    assert "/ftp/acquisitions.md" in res.routes
+
+    # Files must be separated (including dotfiles like /.env)
+    assert "/robots.txt" in res.files
+    assert "/ftp/acquisitions.md" in res.files
+    assert "/.env" in res.files
+    assert "/config/.backup" in res.files
+    assert "/ftp" not in res.files
+
+    # Root URLs without trailing path must not produce corrupted route strings
+    assert "/http://127.0.0.1:3000" not in res.routes
+
+    # 500 server errors and wildcard SPA fallbacks must NOT be in routes
+    assert "/api" not in res.routes
+    assert "/rest" not in res.routes
+    assert "/bogus1" not in res.routes
+    assert "/bogus5" not in res.routes
+
+    # Sidecar manifest creation test
+    ffuf_file = tmp_path / "101.ffuf.json"
+    ffuf_file.write_text(json.dumps(ffuf_payload), encoding="utf-8")
+
+    manifest_path = create_sidecar_manifest(ffuf_file, url="127.0.0.1:3000")
+    assert manifest_path is not None
+    assert manifest_path.exists()
+
+    manifest_data = read_sidecar_manifest(ffuf_file)
+    assert manifest_data is not None
+    assert "/ftp" in manifest_data["routes"]
+    assert "/ftp/acquisitions.md" in manifest_data["files"]
+    assert "/api" not in manifest_data["routes"]
+
+
+@pytest.mark.asyncio
+async def test_read_artifact_ffuf_routes_and_files_view(engine, tmp_path):
+    async with get_async_session_ctx() as session:
+        assessment = Assessment(title="FFUF Views", targets=["127.0.0.1"], ports=[3000])
+        session.add(assessment)
+        await session.commit()
+        await session.refresh(assessment)
+
+        ffuf_file = tmp_path / "301.ffuf.json"
+        ffuf_file.write_text(
+            json.dumps({
+                "commandline": "ffuf -u http://127.0.0.1:3000/FUZZ",
+                "results": [
+                    {"url": "http://127.0.0.1:3000/ftp", "status": 200, "length": 11328},
+                    {"url": "http://127.0.0.1:3000/robots.txt", "status": 200, "length": 28},
+                    {"url": "http://127.0.0.1:3000/api", "status": 500, "length": 2408},
+                ],
+            }),
+            encoding="utf-8",
+        )
+        create_sidecar_manifest(ffuf_file, url="127.0.0.1:3000")
+
+        step_repo = StepRepo(session)
+        step, _ = await step_repo.create_planned_step(
+            assessment_id=assessment.id,
+            run_id="run-views",
+            role="discovery",
+            action="ffuf_scan",
+            target="127.0.0.1",
+        )
+        await step_repo.complete_step(step.id, status=StepStatus.SUCCEEDED.value, output_path=str(ffuf_file))
+        await session.commit()
+
+        # Test view="routes"
+        obs_routes = await read_artifact(session, assessment.id, step.id, view="routes")
+        assert obs_routes.ok is True
+        assert "/ftp" in obs_routes.summary
+        assert "/robots.txt" in obs_routes.summary
+        assert "/api" not in obs_routes.summary
+
+        # Test view="files"
+        obs_files = await read_artifact(session, assessment.id, step.id, view="files")
+        assert obs_files.ok is True
+        assert "/robots.txt" in obs_files.summary
+        assert "/ftp" not in obs_files.summary
+
+
+def test_js_parser_extracts_spa_hash_and_framework_routes():
+    """Ensure js_parser extracts Angular/React router tables and preserves /#/ routes."""
+    js_code = """
+    // Framework route configuration (Angular / React Router style)
+    const routes = [
+        { path: 'administration', component: AdminComponent },
+        { path: 'score-board', component: ScoreBoardComponent },
+        { path: 'accounting', redirectTo: '/accounting-login' },
+    ];
+    function navigate() {
+        window.location.href = "/#/tokens";
+        fetch("/api/Feedbacks");
+    }
+    """
+    res = parse_js(js_code)
+    # Direct and hash versions of router definitions
+    assert "/#/administration" in res.routes
+    assert "/administration" in res.routes
+    assert "/#/score-board" in res.routes
+    assert "/score-board" in res.routes
+    assert "/#/accounting" in res.routes
+    assert "/#/tokens" in res.routes
+    assert "/api/Feedbacks" in res.routes
+
+
+def test_filter_self_routes_preserves_spa_hash_routes():
+    """Ensure filter_self_routes does not discard SPA hash routes like /#/administration."""
+    from app.parsers.manifest import filter_self_routes
+
+    routes = [
+        "/",
+        "/#/administration",
+        "/#/score-board",
+        "#/tokens",
+        "/login",
+        "/login?ref=1",
+    ]
+    filtered = filter_self_routes(routes, "http://127.0.0.1:3000/")
+    assert "/" not in filtered
+    assert "/#/administration" in filtered
+    assert "/#/score-board" in filtered
+    assert "#/tokens" in filtered
+    assert "/login" in filtered
+
+
+def test_html_parser_extracts_spa_hash_routes():
+    """Ensure html_parser extracts SPA hash routes from anchor tags and scripts."""
+    html = """
+    <!DOCTYPE html>
+    <html>
+      <head><title>Juice Shop</title></head>
+      <body>
+        <a href="/#/administration">Admin</a>
+        <a href="#/score-board">Scoreboard</a>
+        <script src="main.js"></script>
+        <script src="runtime.js"></script>
+      </body>
+    </html>
+    """
+    res = parse_html(html, base_url="http://127.0.0.1:3000")
+    assert "/#/administration" in res.routes
+    assert "/administration" in res.routes
+    assert "/#/score-board" in res.routes
+    assert "main.js" in res.files
+    assert "runtime.js" in res.files
+
+
+def test_html_and_js_parser_preserve_absolute_hash_routes():
+    """Ensure absolute URLs with hash routes (e.g. http://host/#/administration) are not dropped."""
+    html = """
+    <div>
+        <a href="http://127.0.0.1:3000/#/administration">Admin Panel</a>
+        <p>Endpoint in script: "http://target.local/#/score-board"</p>
+    </div>
+    """
+    res_html = parse_html(html, base_url="http://127.0.0.1:3000")
+    assert "/#/administration" in res_html.routes
+    assert "/administration" in res_html.routes
+    assert "/#/score-board" in res_html.routes
+    assert "/score-board" in res_html.routes
+
+    js_code = """
+    const adminUrl = "https://example.com/#/administration";
+    const boardUrl = "http://target.local/#/tokens";
+    """
+    res_js = parse_js(js_code)
+    assert "/#/administration" in res_js.routes
+    assert "/administration" in res_js.routes
+    assert "/#/tokens" in res_js.routes
+
+
+def test_ffuf_argv_filters_out_invalid_filter_size_and_status():
+    """Ensure string 'none' or 'null' is never passed as -fs or -fc to ffuf CLI."""
+    from app.adapters.ffuf import argv
+
+    # When filter_size or filter_status is "none", they should be omitted
+    args_none = argv(target="http://127.0.0.1:3000", port=3000, output_path="/tmp/out.json", filter_size="none", filter_status="none")
+    assert "-fs" not in args_none
+    assert "-fc" not in args_none
+    assert "none" not in args_none
+
+    # When valid values are passed, they should be present
+    args_valid = argv(target="http://127.0.0.1:3000", port=3000, output_path="/tmp/out.json", filter_size="5230", filter_status="404,500")
+    assert "-fs" in args_valid
+    assert "5230" in args_valid
+    assert "-fc" in args_valid
+    assert "404,500" in args_valid
+
+
+def test_extract_wildcard_lengths_ignores_small_responses():
+    """Small responses (< 100 bytes) like empty body (0) or {} (2) must not be treated as wildcard fallbacks."""
+    from app.adapters.ffuf import extract_wildcard_lengths
+
+    results = [
+        {"url": "http://127.0.0.1:3000/a", "status": 200, "length": 0},
+        {"url": "http://127.0.0.1:3000/b", "status": 200, "length": 0},
+        {"url": "http://127.0.0.1:3000/c", "status": 200, "length": 0},
+        {"url": "http://127.0.0.1:3000/d", "status": 200, "length": 0},
+        {"url": "http://127.0.0.1:3000/e", "status": 200, "length": 0},
+        # Real wildcard catch-all pages (> 100 bytes)
+        {"url": "http://127.0.0.1:3000/w1", "status": 200, "length": 9999},
+        {"url": "http://127.0.0.1:3000/w2", "status": 200, "length": 9999},
+        {"url": "http://127.0.0.1:3000/w3", "status": 200, "length": 9999},
+        {"url": "http://127.0.0.1:3000/w4", "status": 200, "length": 9999},
+        {"url": "http://127.0.0.1:3000/w5", "status": 200, "length": 9999},
+    ]
+    wildcards = extract_wildcard_lengths(results)
+    assert 9999 in wildcards
+    assert 0 not in wildcards
+
+
+def test_nikto_adapter_prevents_url_doubling():
+    """Ensure Nikto adapter does not double scheme/host when host is already a full URL."""
+    from app.adapters.nikto import NiktoItem, to_drafts
+
+    items = [
+        NiktoItem(id="1", msg="CORS header wildcard found", url="/", method="GET"),
+        NiktoItem(id="2", msg="robots.txt found", url="/robots.txt", method="GET"),
+    ]
+    # Pass host with scheme and port
+    drafts = to_drafts(host="http://127.0.0.1:3000", port=3000, items=items)
+    assert len(drafts) == 2
+    for d in drafts:
+        assert "http://http://" not in d.endpoint
+        assert ":3000:3000" not in d.endpoint
+        assert d.asset == "127.0.0.1"
+        assert d.canonical_key.startswith("web:")
+        assert "http://http://" not in d.canonical_key
+    assert drafts[0].endpoint == "http://127.0.0.1:3000/"
+    assert drafts[1].endpoint == "http://127.0.0.1:3000/robots.txt"
+
+
+
+
+

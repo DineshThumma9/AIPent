@@ -430,6 +430,245 @@ async def test_ffuf_scan_observation(engine, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_ffuf_scan_observation_with_artifact_on_disk(engine, tmp_path):
+    from app.domain.models import Finding, FindingStatus, Origin, Severity
+
+    async with get_async_session_ctx() as session:
+        assessment = Assessment(title="Lab FFUF Disk", targets=["127.0.0.1"], ports=[3000])
+        session.add(assessment)
+        await session.commit()
+        await session.refresh(assessment)
+
+        artifact_file = tmp_path / "102.ffuf.json"
+        artifact_file.write_text(
+            json.dumps(
+                {
+                    "commandline": "ffuf -u http://127.0.0.1:3000/FUZZ",
+                    "results": [
+                        {"url": "http://127.0.0.1:3000/ftp", "status": 200, "length": 11328},
+                        {"url": "http://127.0.0.1:3000/assets", "status": 301, "length": 156},
+                        {"url": "http://127.0.0.1:3000/api", "status": 500, "length": 2408},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        step = Step(
+            assessment_id=assessment.id,
+            seq=1,
+            action="ffuf_scan",
+            target="127.0.0.1",
+            status=StepStatus.SUCCEEDED.value,
+            output_path=str(artifact_file),
+        )
+        session.add(step)
+        await session.commit()
+        await session.refresh(step)
+
+        f1 = Finding(
+            assessment_id=assessment.id,
+            canonical_key="ffuf:127.0.0.1:3000:/ftp",
+            title="Discovered Endpoint (FFUF): /ftp (HTTP 200)",
+            asset="127.0.0.1",
+            endpoint="/ftp",
+            severity=Severity.INFO,
+            status=FindingStatus.SUSPECTED,
+            origin=Origin.TOOL,
+        )
+        f2 = Finding(
+            assessment_id=assessment.id,
+            canonical_key="ffuf:127.0.0.1:3000:/assets",
+            title="Discovered Endpoint (FFUF): /assets (HTTP 301)",
+            asset="127.0.0.1",
+            endpoint="/assets",
+            severity=Severity.INFO,
+            status=FindingStatus.SUSPECTED,
+            origin=Origin.TOOL,
+        )
+        f3 = Finding(
+            assessment_id=assessment.id,
+            canonical_key="ffuf:127.0.0.1:3000:/api",
+            title="Discovered Endpoint (FFUF): /api (HTTP 500)",
+            asset="127.0.0.1",
+            endpoint="/api",
+            severity=Severity.LOW,
+            status=FindingStatus.SUSPECTED,
+            origin=Origin.TOOL,
+        )
+        f4 = Finding(
+            assessment_id=assessment.id,
+            canonical_key="ffuf:127.0.0.1:3000:/missing",
+            title="Discovered Endpoint (FFUF): /missing (HTTP 404)",
+            asset="127.0.0.1",
+            endpoint="/missing",
+            severity=Severity.INFO,
+            status=FindingStatus.SUSPECTED,
+            origin=Origin.TOOL,
+        )
+        session.add_all([f1, f2, f3, f4])
+        await session.commit()
+        await session.refresh(f1)
+        await session.refresh(f2)
+        await session.refresh(f3)
+        await session.refresh(f4)
+
+        from app.domain.models import Evidence
+        e1 = Evidence(finding_id=f1.id, step_id=step.id, excerpt="ftp")
+        e2 = Evidence(finding_id=f2.id, step_id=step.id, excerpt="assets")
+        e3 = Evidence(finding_id=f3.id, step_id=step.id, excerpt="api")
+        e4 = Evidence(finding_id=f4.id, step_id=step.id, excerpt="missing")
+        session.add_all([e1, e2, e3, e4])
+        await session.commit()
+
+        obs = await observation_from_step(session, step)
+        assert obs.ok is True
+        assert "4 web endpoints discovered by FFUF" in obs.summary
+        assert "Live (2)" in obs.summary
+        assert "1 endpoint(s) returned HTTP 500" in obs.summary
+        assert obs.facts["live_endpoints"] == ["/ftp", "/assets"]
+        assert "/missing" not in obs.facts["live_endpoints"]
+        assert obs.facts["server_errors"] == ["/api"]
+        # Hint should prioritize live endpoints over the 500 error
+        assert "returned HTTP 500" in (obs.next_hint or "")
+        assert "/ftp" in (obs.next_hint or "")
+
+
+@pytest.mark.asyncio
+async def test_ffuf_scan_observation_fallback_wildcard_suppression(engine, tmp_path):
+    """When no findings are in DB, artifact fallback must suppress wildcard SPA responses and 404s."""
+    async with get_async_session_ctx() as session:
+        assessment = Assessment(title="Lab FFUF Fallback", targets=["127.0.0.1"], ports=[3000])
+        session.add(assessment)
+        await session.commit()
+        await session.refresh(assessment)
+
+        artifact_file = tmp_path / "103.ffuf.json"
+        artifact_file.write_text(
+            json.dumps(
+                {
+                    "commandline": "ffuf -u http://127.0.0.1:3000/FUZZ",
+                    "results": [
+                        {"url": "http://127.0.0.1:3000/real-api", "status": 200, "length": 500},
+                        {"url": "http://127.0.0.1:3000/not-found", "status": 404, "length": 120},
+                        # 5 wildcard SPA fallbacks with length 9999
+                        {"url": "http://127.0.0.1:3000/wild1", "status": 200, "length": 9999},
+                        {"url": "http://127.0.0.1:3000/wild2", "status": 200, "length": 9999},
+                        {"url": "http://127.0.0.1:3000/wild3", "status": 200, "length": 9999},
+                        {"url": "http://127.0.0.1:3000/wild4", "status": 200, "length": 9999},
+                        {"url": "http://127.0.0.1:3000/wild5", "status": 200, "length": 9999},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        step = Step(
+            assessment_id=assessment.id,
+            seq=1,
+            action="ffuf_scan",
+            target="127.0.0.1",
+            status=StepStatus.SUCCEEDED.value,
+            output_path=str(artifact_file),
+        )
+        session.add(step)
+        await session.commit()
+        await session.refresh(step)
+
+        obs = await observation_from_step(session, step)
+        assert obs.ok is True
+        assert "/real-api" in obs.facts["live_endpoints"]
+        assert "/not-found" not in obs.facts["live_endpoints"]
+        assert "/wild1" not in obs.facts["live_endpoints"]
+        assert obs.facts["total_discovered"] == 2
+
+
+@pytest.mark.asyncio
+async def test_ffuf_scan_observation_wildcard_suppression_with_db_findings(engine, tmp_path):
+    """When findings exist in DB, wildcard SPA fallbacks must still be rejected from live endpoints."""
+    from app.domain.models import Evidence, Finding, FindingStatus, Origin, Severity
+
+    async with get_async_session_ctx() as session:
+        assessment = Assessment(title="Lab FFUF DB Wildcard", targets=["127.0.0.1"], ports=[3000])
+        session.add(assessment)
+        await session.commit()
+        await session.refresh(assessment)
+
+        artifact_file = tmp_path / "104.ffuf.json"
+        artifact_file.write_text(
+            json.dumps(
+                {
+                    "commandline": "ffuf -u http://127.0.0.1:3000/FUZZ",
+                    "results": [
+                        {"url": "http://127.0.0.1:3000/real-service", "status": 200, "length": 450},
+                        # 5 wildcard responses with length 9999, including a sensitive endpoint name
+                        {"url": "http://127.0.0.1:3000/admin", "status": 200, "length": 9999},
+                        {"url": "http://127.0.0.1:3000/bogus1", "status": 200, "length": 9999},
+                        {"url": "http://127.0.0.1:3000/bogus2", "status": 200, "length": 9999},
+                        {"url": "http://127.0.0.1:3000/bogus3", "status": 200, "length": 9999},
+                        {"url": "http://127.0.0.1:3000/bogus4", "status": 200, "length": 9999},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        step = Step(
+            assessment_id=assessment.id,
+            seq=1,
+            action="ffuf_scan",
+            target="127.0.0.1",
+            status=StepStatus.SUCCEEDED.value,
+            output_path=str(artifact_file),
+        )
+        session.add(step)
+        await session.commit()
+        await session.refresh(step)
+
+        # Both the real service and the false-positive admin were saved to DB findings
+        f_real = Finding(
+            assessment_id=assessment.id,
+            canonical_key="ffuf:127.0.0.1:3000:/real-service",
+            title="Discovered Endpoint (FFUF): /real-service (HTTP 200)",
+            asset="127.0.0.1",
+            endpoint="/real-service",
+            severity=Severity.INFO,
+            status=FindingStatus.SUSPECTED,
+            origin=Origin.TOOL,
+        )
+        f_wild = Finding(
+            assessment_id=assessment.id,
+            canonical_key="ffuf:127.0.0.1:3000:/admin",
+            title="Discovered Endpoint (FFUF): /admin (HTTP 200)",
+            asset="127.0.0.1",
+            endpoint="/admin",
+            severity=Severity.LOW,
+            status=FindingStatus.SUSPECTED,
+            origin=Origin.TOOL,
+        )
+        session.add_all([f_real, f_wild])
+        await session.commit()
+        await session.refresh(f_real)
+        await session.refresh(f_wild)
+
+        e1 = Evidence(finding_id=f_real.id, step_id=step.id, excerpt="real-service")
+        e2 = Evidence(finding_id=f_wild.id, step_id=step.id, excerpt="admin-wildcard")
+        session.add_all([e1, e2])
+        await session.commit()
+
+        obs = await observation_from_step(session, step)
+        assert obs.ok is True
+        # Real endpoint must be live
+        assert "/real-service" in obs.facts["live_endpoints"]
+        # Wildcard fallback /admin must NOT be treated as live or discovered
+        assert "/admin" not in obs.facts["live_endpoints"]
+        assert "/admin" not in obs.facts["discovered_endpoints"]
+        assert "/admin" not in obs.summary
+        assert obs.facts["total_discovered"] == 1
+
+
+
+@pytest.mark.asyncio
 async def test_curl_auth_success_compact_summary_and_session_save(engine, tmp_path):
     async with get_async_session_ctx() as session:
         assessment = Assessment(title="Lab Auth", targets=["127.0.0.1"], ports=[3000])
@@ -1197,6 +1436,105 @@ def test_save_session_file_credential_isolation(tmp_path):
     assert "user_id" not in loaded2
     assert "basket_id" not in loaded2
     assert "email" not in loaded2
+
+
+@pytest.mark.asyncio
+async def test_record_finding_coerces_none_string(engine):
+    """Ensure passing finding_id='none' does not fail validation and creates a finding cleanly."""
+    from app.agents.direct_tools import record_finding
+
+    async with get_async_session_ctx() as session:
+        assessment = Assessment(title="Test Finding Coerce", targets=["127.0.0.1"], ports=[3000])
+        session.add(assessment)
+        await session.commit()
+        await session.refresh(assessment)
+
+        obs = await record_finding(
+            session=session,
+            assessment_id=assessment.id,
+            run_id="run-123",
+            role="discovery",
+            title="Exposure test",
+            asset="127.0.0.1:3000",
+            endpoint="/.well-known/security.txt",
+            finding_id="none",  # String "none" from LLM
+            severity="info",
+            description="Security.txt disclosed",
+        )
+        assert obs.ok is True
+        assert obs.status == "succeeded"
+        assert len(obs.findings_created) == 1
+        assert obs.facts["finding_id"] is not None
+
+
+@pytest.mark.asyncio
+async def test_ffuf_observation_candidates_fallback_to_artifact(engine, tmp_path):
+    """When DB findings only contain wildcard responses, candidates must fall back to artifact live items."""
+    from app.domain.models import Evidence, Finding, FindingStatus, Origin, Severity
+
+    async with get_async_session_ctx() as session:
+        assessment = Assessment(title="Lab FFUF Fallback", targets=["127.0.0.1"], ports=[3000])
+        session.add(assessment)
+        await session.commit()
+        await session.refresh(assessment)
+
+        artifact_file = tmp_path / "105.ffuf.json"
+        artifact_file.write_text(
+            json.dumps(
+                {
+                    "commandline": "ffuf -u http://127.0.0.1:3000/FUZZ",
+                    "results": [
+                        {"url": "http://127.0.0.1:3000/real-live", "status": 200, "length": 500},
+                        # 5 wildcard entries
+                        {"url": "http://127.0.0.1:3000/fake1", "status": 200, "length": 8888},
+                        {"url": "http://127.0.0.1:3000/fake2", "status": 200, "length": 8888},
+                        {"url": "http://127.0.0.1:3000/fake3", "status": 200, "length": 8888},
+                        {"url": "http://127.0.0.1:3000/fake4", "status": 200, "length": 8888},
+                        {"url": "http://127.0.0.1:3000/fake5", "status": 200, "length": 8888},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        step = Step(
+            assessment_id=assessment.id,
+            seq=1,
+            action="ffuf_scan",
+            target="127.0.0.1",
+            status=StepStatus.SUCCEEDED.value,
+            output_path=str(artifact_file),
+        )
+        session.add(step)
+        await session.commit()
+        await session.refresh(step)
+
+        # Only fake1 was added to DB findings (all DB findings are wildcards)
+        f_fake = Finding(
+            assessment_id=assessment.id,
+            canonical_key="ffuf:127.0.0.1:3000:/fake1",
+            title="Discovered Endpoint (FFUF): /fake1 (HTTP 200)",
+            asset="127.0.0.1",
+            endpoint="/fake1",
+            severity=Severity.INFO,
+            status=FindingStatus.SUSPECTED,
+            origin=Origin.TOOL,
+        )
+        session.add(f_fake)
+        await session.commit()
+        await session.refresh(f_fake)
+
+        e = Evidence(finding_id=f_fake.id, step_id=step.id, excerpt="fake")
+        session.add(e)
+        await session.commit()
+
+        obs = await observation_from_step(session, step)
+        assert obs.ok is True
+        # Must fall back to artifact live endpoint /real-live
+        assert "/real-live" in obs.facts["live_endpoints"]
+        assert "/fake1" not in obs.facts["live_endpoints"]
+        assert obs.facts["total_discovered"] == 1
+
 
 
 

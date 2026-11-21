@@ -75,7 +75,12 @@ def parse_js(
                         url_str = str(raw_url).strip()
                         if url_str.startswith(("http://", "https://")):
                             try:
-                                url_str = urllib.parse.urlparse(url_str).path
+                                p_u = urllib.parse.urlsplit(url_str)
+                                if p_u.fragment:
+                                    frag = p_u.fragment.lstrip("/")
+                                    url_str = f"/#/{frag}"
+                                else:
+                                    url_str = p_u.path
                             except Exception:
                                 pass
 
@@ -83,9 +88,15 @@ def parse_js(
                         if (
                             cleaned.startswith("/")
                             and len(cleaned) > 2
-                            and not cleaned.startswith(("//", "/#", "/?"))
+                            and not cleaned.startswith(("//", "/?"))
                         ):
-                            entities.routes.append(cleaned)
+                            if cleaned.startswith("/#/"):
+                                entities.routes.append(cleaned)
+                                unhashed = cleaned[2:]
+                                if unhashed and unhashed != "/":
+                                    entities.routes.append(unhashed)
+                            elif not cleaned.startswith("/#"):
+                                entities.routes.append(cleaned)
                     except Exception:
                         continue
 
@@ -122,24 +133,55 @@ def parse_js(
         except Exception as exc:
             logger.warning("jsluice execution failed, falling back to regex: %s", exc)
 
-    # 3. Supplemental Regex Sweep (catches concatenated route fragments that AST might classify differently)
+    # 3. Supplemental Regex Sweep (catches concatenated route fragments and hash routes)
     route_matches = re.findall(
-        r"""["'`]((?:https?://[^"'`\s]+)?/(?:rest|api|auth|oauth|admin|ftp|file|redirect|profile|promotion|assets|v\d+)[a-zA-Z0-9_\-/\.:]*)["'`]""",
+        r"""["'`]((?:https?://[^"'`\s]+)?/(?:rest|api|auth|oauth|admin|ftp|file|redirect|profile|promotion|assets|v\d+|#/[a-zA-Z0-9_\-]+)[a-zA-Z0-9_\-/\.:]*)["'`]""",
         js_content,
     )
     for rm in route_matches:
         r_str = rm.strip()
         if r_str.startswith(("http://", "https://")):
             try:
-                r_str = urllib.parse.urlparse(r_str).path
+                p_u = urllib.parse.urlsplit(r_str)
+                if p_u.fragment:
+                    frag = p_u.fragment.lstrip("/")
+                    r_str = f"/#/{frag}"
+                else:
+                    r_str = p_u.path
             except Exception:
                 pass
         cleaned_route = r_str.rstrip(".,;:'\")")
         if len(cleaned_route) > 2 and cleaned_route.startswith("/"):
-            entities.routes.append(cleaned_route)
+            if cleaned_route.startswith("/#/"):
+                entities.routes.append(cleaned_route)
+                unhashed = cleaned_route[2:]
+                if unhashed and unhashed != "/":
+                    entities.routes.append(unhashed)
+            elif not cleaned_route.startswith("/#"):
+                entities.routes.append(cleaned_route)
 
-    # 4. Extract linked chunk/script assets (e.g. main.js, vendor.js, polyfills.js)
-    script_chunks = re.findall(r"""["']([a-zA-Z0-9_\-\.]+\.(?:js|json|wasm))["']""", js_content[:20000])
+    # 4. Framework Client-Side SPA Route Extraction (Angular, React Router, Vue Router)
+    # Extracts router configurations like path: "administration" or path: 'score-board'
+    spa_route_matches = re.findall(
+        r"""(?:path|redirectTo)\s*:\s*[`'"]([a-zA-Z0-9_\-/\.:]+)[`'"]""",
+        js_content,
+    )
+    IGNORED_SPA_TOKENS = {
+        "**", "", "/", "true", "false", "null", "undefined", "string", "number",
+        "object", "function", "any", "get", "post", "put", "delete", "none", "auto",
+        "parent", "children", "root", "default",
+    }
+    for sr in spa_route_matches:
+        s_clean = sr.strip().strip("/")
+        if not s_clean or s_clean.lower() in IGNORED_SPA_TOKENS:
+            continue
+        if len(s_clean) < 3 or " " in s_clean:
+            continue
+        entities.routes.append(f"/#/{s_clean}")
+        entities.routes.append(f"/{s_clean}")
+
+    # 5. Extract linked chunk/script assets (e.g. main.js, vendor.js, polyfills.js, component chunks)
+    script_chunks = re.findall(r"""["']([a-zA-Z0-9_\-\.]+\.(?:js|json|wasm))["']""", js_content[:50000])
     for chunk in script_chunks:
         if not chunk.startswith(("http://", "https://")) and len(chunk) > 3:
             entities.files.append(chunk)

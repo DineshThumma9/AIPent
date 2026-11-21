@@ -64,7 +64,7 @@ class ReadArtifactArgs(BaseModel):
     offset: int = Field(default=0, ge=0, description="Character offset from start of artifact to read from.")
     max_chars: int = Field(default=4000, le=8000, description="Max characters to read.")
     search: str | None = Field(default=None, description="Optional substring to search within artifact (returns grep-style multi-matches with line numbers).")
-    view: str | None = Field(default=None, description="Optional view mode: 'content' (default), 'manifest', 'forms', or 'routes'.")
+    view: str | None = Field(default=None, description="Optional view mode: 'content' (default), 'manifest', 'forms', 'routes', or 'files'.")
 
 
 class ListServicesArgs(BaseModel):
@@ -241,7 +241,7 @@ class UpdateFindingStatusArgs(BaseModel):
 
 
 class RecordFindingArgs(BaseModel):
-    finding_id: int | None = Field(
+    finding_id: int | str | None = Field(
         default=None,
         description=(
             "Existing finding to extend with evidence. Omit to create a new finding; "

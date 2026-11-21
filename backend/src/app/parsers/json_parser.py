@@ -3,13 +3,96 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
+import urllib.parse
 
+from app.adapters.ffuf import extract_wildcard_lengths
 from .models import FormEntity, FormField, ParsedEntities
+
+COMMON_FILE_EXTENSIONS = {
+    ".txt",
+    ".md",
+    ".json",
+    ".xml",
+    ".html",
+    ".htm",
+    ".js",
+    ".css",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".svg",
+    ".ico",
+    ".pdf",
+    ".zip",
+    ".tar",
+    ".gz",
+    ".tgz",
+    ".bak",
+    ".backup",
+    ".kdbx",
+    ".sql",
+    ".db",
+    ".sqlite",
+    ".env",
+    ".yml",
+    ".yaml",
+    ".conf",
+    ".ini",
+    ".log",
+}
+
+
+def _parse_ffuf_results(results: list[Any], entities: ParsedEntities) -> None:
+    """Safely extract reachable routes and files from FFUF scan results."""
+    wildcard_lengths = extract_wildcard_lengths(results)
+
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+
+        status = item.get("status")
+        # Keep valid reachable status codes: 2xx, 3xx redirects, 401/403 auth boundaries
+        if status not in (200, 201, 204, 301, 302, 307, 308, 401, 403):
+            continue
+
+        length = item.get("length", 0)
+        # Filter out wildcard SPA fallback responses (e.g. repeated fallback index.html)
+        if length in wildcard_lengths:
+            continue
+
+        url = str(item.get("url") or "").strip()
+        if url:
+            try:
+                if "://" in url:
+                    path = urllib.parse.urlsplit(url).path or "/"
+                else:
+                    path = urllib.parse.urlsplit(url).path or url
+            except Exception:
+                path = url
+        else:
+            inputs = item.get("input", {})
+            fuzz_val = inputs.get("FUZZ", "") if isinstance(inputs, dict) else ""
+            path = f"/{fuzz_val}" if fuzz_val else "/"
+
+        if not path.startswith("/"):
+            path = f"/{path}"
+
+        if not path or path == "/":
+            continue
+
+        entities.routes.append(path)
+
+        ext = Path(path).suffix.lower()
+        name = Path(path).name.lower()
+        if ext in COMMON_FILE_EXTENSIONS or name in COMMON_FILE_EXTENSIONS:
+            entities.files.append(path)
 
 
 def parse_json(json_content: str | dict | list) -> ParsedEntities:
-    """Parse JSON content, extracting OpenAPI routes, schema keys, and sample parameters."""
+    """Parse JSON content, extracting OpenAPI routes, FFUF scan results, and schema keys."""
     entities = ParsedEntities()
 
     if isinstance(json_content, (dict, list)):
@@ -69,7 +152,15 @@ def parse_json(json_content: str | dict | list) -> ParsedEntities:
                                 )
                             )
 
-        # 2. General JSON Object Keys
+        # 2. FFUF Scanner Output Check
+        elif (
+            ("commandline" in data or "config" in data)
+            and "results" in data
+            and isinstance(data["results"], list)
+        ):
+            _parse_ffuf_results(data["results"], entities)
+
+        # 3. General JSON Object Keys
         entities.keys = list(data.keys())[:50]
 
         # Check for nested data array
@@ -84,6 +175,7 @@ def parse_json(json_content: str | dict | list) -> ParsedEntities:
             entities.keys = list(data[0].keys())[:50]
 
     entities.routes = list(dict.fromkeys(entities.routes))[:100]
+    entities.files = list(dict.fromkeys(entities.files))[:50]
     entities.keys = list(dict.fromkeys(entities.keys))[:50]
 
     return entities
