@@ -10,6 +10,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import re
 import shlex
 import shutil
 from dataclasses import dataclass, field
@@ -629,6 +630,23 @@ def _curl_tool_args(
         url = f"{'https' if port in (443, 8443) else 'http'}://{alias}:{port}{raw_url}"
     raw_headers = dict(p.get("headers") or {})
     headers = {str(k).rstrip(": \t"): str(v) for k, v in raw_headers.items()}
+
+    # Normalize Authorization header if present:
+    # 1. Repeated "Bearer" prefixes → collapse to single "Bearer <token>"
+    # 2. Bare JWT (starts with "eyJ") → "Bearer <jwt>"
+    # 3. Other auth schemes (Basic, Digest, ApiKey, etc.) → leave untouched
+    for key in list(headers):
+        if key.lower() == "authorization":
+            val = headers[key].strip()
+            if not val:
+                continue
+            if re.match(r"^bearer\s+", val, re.IGNORECASE):
+                stripped = re.sub(r"^(Bearer\s+)+", "", val, flags=re.IGNORECASE)
+                headers[key] = f"Bearer {stripped}"
+            elif val.startswith("eyJ"):
+                headers[key] = f"Bearer {val}"
+            break
+
     raw_body = p.get("body")
     if isinstance(raw_body, dict):
         body = json.dumps(raw_body)

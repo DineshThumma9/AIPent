@@ -6,6 +6,7 @@ Transforms executed Steps, Evidence, and Findings into compact Observations.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 import re
 from typing import Any
@@ -13,9 +14,12 @@ import urllib.parse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
+logger = logging.getLogger(__name__)
+
 from app.actions.evidence import SQLMAP_PROOF
 from app.agents.contracts import ActionRequest, Observation
 from app.domain.models import Evidence, Finding, Step, StepStatus
+from app.parsers import filter_self_routes, read_sidecar_manifest
 
 
 def _curl_batch_facts(entry: dict[str, Any]) -> dict[str, Any]:
@@ -70,6 +74,173 @@ def _curl_batch_facts(entry: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _is_auth_url(url: str) -> bool:
+    """Return True when the request URL targets an authentication endpoint."""
+    return any(term in url.lower() for term in ("login", "auth", "token", "session", "register", "signup", "signin", "oauth"))
+
+
+def _extract_auth_session(
+    parsed_body: Any,
+    headers: dict[str, Any],
+    request_url: str = "",
+) -> dict[str, Any] | None:
+    """Extract auth token, session identifiers, and user metadata from response.
+
+    Only extracts generic top-level token keys when the request URL targets an
+    auth endpoint, to avoid mis-identifying CSRF tokens or reset tokens as JWTs.
+    """
+    auth_data: dict[str, Any] = {}
+    is_auth_endpoint = _is_auth_url(request_url)
+
+    if isinstance(parsed_body, dict):
+        # Case A: {"authentication": {"token": "...", "bid": 6, "umail": "..."}}
+        # This shape is specific enough to always extract.
+        auth_obj = parsed_body.get("authentication")
+        if isinstance(auth_obj, dict):
+            if "token" in auth_obj and auth_obj["token"]:
+                auth_data["token"] = str(auth_obj["token"])
+            if "bid" in auth_obj and auth_obj["bid"] is not None:
+                auth_data["basket_id"] = auth_obj["bid"]
+            if "umail" in auth_obj and auth_obj["umail"]:
+                auth_data["email"] = str(auth_obj["umail"])
+            if "id" in auth_obj and auth_obj["id"] is not None:
+                auth_data["user_id"] = auth_obj["id"]
+
+        # Case B: Top-level token-like keys — only on auth endpoints, and only JWT-shaped values.
+        # shortcut: non-JWT bearer tokens (opaque strings) skipped unless on an auth endpoint
+        if is_auth_endpoint:
+            for tok_key in ("token", "access_token", "jwt", "id_token", "authToken", "bearerToken"):
+                val = parsed_body.get(tok_key)
+                if isinstance(val, str) and val and val.startswith("eyJ"):
+                    auth_data.setdefault("token", val)
+
+        # Case C: Nested in "data" object — same JWT-shape guard
+        data_obj = parsed_body.get("data")
+        if isinstance(data_obj, dict) and is_auth_endpoint:
+            for tok_key in ("token", "access_token", "jwt", "id_token", "authToken"):
+                val = data_obj.get(tok_key)
+                if isinstance(val, str) and val and val.startswith("eyJ"):
+                    auth_data.setdefault("token", val)
+            if "bid" in data_obj and data_obj["bid"] is not None:
+                auth_data.setdefault("basket_id", data_obj["bid"])
+            if "id" in data_obj and data_obj["id"] is not None:
+                auth_data.setdefault("user_id", data_obj["id"])
+            if "email" in data_obj and data_obj["email"]:
+                auth_data.setdefault("email", str(data_obj["email"]))
+
+        # Additional identifiers at top level
+        if "bid" in parsed_body and parsed_body["bid"] is not None:
+            auth_data.setdefault("basket_id", parsed_body["bid"])
+        if "user" in parsed_body and isinstance(parsed_body["user"], dict):
+            u = parsed_body["user"]
+            if "id" in u and u["id"] is not None:
+                auth_data.setdefault("user_id", u["id"])
+            if "email" in u and u["email"]:
+                auth_data.setdefault("email", str(u["email"]))
+
+    # Check Set-Cookie headers for session cookies — only on auth endpoints
+    if is_auth_endpoint and isinstance(headers, dict):
+        for k, v in headers.items():
+            if str(k).lower() == "set-cookie":
+                raw_cookies = v if isinstance(v, list) else [v] if isinstance(v, str) else []
+                for header_val in raw_cookies:
+                    if not isinstance(header_val, str):
+                        continue
+                    # Only the first semicolon-separated piece is the cookie name=value pair;
+                    # subsequent pieces are attributes like Path=/session, HttpOnly, SameSite.
+                    cookie_pair = header_val.split(";")[0].strip()
+                    if "=" not in cookie_pair:
+                        continue
+                    # Skip invalidated/deleted cookies
+                    if "deleted" in cookie_pair.lower() or "max-age=0" in header_val.lower():
+                        continue
+                    cookie_name = cookie_pair.split("=")[0].strip().lower()
+                    if any(s in cookie_name for s in ("session", "connect.sid", "jwt", "token", "auth", "sid", "sess")):
+                        auth_data.setdefault("cookie", cookie_pair)
+
+    if not auth_data.get("token") and not auth_data.get("cookie"):
+        return None
+
+    if "token" in auth_data:
+        token_str = auth_data["token"]
+        auth_data["token_type"] = "Bearer"
+        auth_data["authorization_header"] = f"Bearer {token_str}"
+
+    return auth_data
+
+
+def _session_file_path(
+    assessment_id: int | None,
+    output_path: str | Path | None,
+) -> Path | None:
+    """Resolve the session.json path from absolute output_path or assessment_id."""
+    if output_path and Path(output_path).is_absolute():
+        return Path(output_path).parent / "session.json"
+    if assessment_id:
+        try:
+            from app.core.config import settings
+            return settings.artifacts_path / str(assessment_id) / "session.json"
+        except Exception:
+            return None
+    return None
+
+
+def _save_session_file(
+    assessment_id: int | None,
+    output_path: str | Path | None,
+    auth_data: dict[str, Any],
+) -> str | None:
+    if not auth_data:
+        return None
+    session_file = _session_file_path(assessment_id, output_path)
+    if session_file:
+        try:
+            session_file.parent.mkdir(parents=True, exist_ok=True)
+            existing: dict[str, Any] = {}
+            if session_file.exists():
+                try:
+                    existing = json.loads(session_file.read_text(encoding="utf-8"))
+                except Exception:
+                    existing = {}
+
+            # Clear user-specific identity keys when a new token or cookie credential arrives
+            # so multiple accounts or role switches don't inherit previous user/basket IDs.
+            new_token = auth_data.get("token")
+            new_cookie = auth_data.get("cookie")
+            token_changed = bool(new_token and new_token != existing.get("token"))
+            cookie_changed = bool(new_cookie and new_cookie != existing.get("cookie"))
+
+            if token_changed or cookie_changed:
+                for key in ("user_id", "basket_id", "email"):
+                    existing.pop(key, None)
+                if token_changed:
+                    for key in ("authorization_header", "token_type", "cookie"):
+                        existing.pop(key, None)
+                if cookie_changed and not new_token:
+                    for key in ("token", "authorization_header", "token_type"):
+                        existing.pop(key, None)
+
+            existing.update(auth_data)
+            session_file.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+            return str(session_file)
+        except Exception as exc:
+            logger.warning("Failed to save session file %s: %s", session_file, exc)
+    return None
+
+
+def _load_session_file(
+    assessment_id: int | None,
+    output_path: str | Path | None,
+) -> dict[str, Any] | None:
+    session_file = _session_file_path(assessment_id, output_path)
+    if session_file and session_file.exists():
+        try:
+            return json.loads(session_file.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+    return None
+
+
 def _extract_curl_entities(
     request_url: str,
     headers: dict[str, Any],
@@ -83,11 +254,12 @@ def _extract_curl_entities(
     if output_path:
         manifest = read_sidecar_manifest(output_path)
         if manifest:
+            clean_routes = filter_self_routes(manifest.get("routes", []) or [], request_url)
             return (
-                manifest.get("routes", []),
-                manifest.get("files", []),
-                manifest.get("keys", []),
-                manifest.get("forms", []),
+                clean_routes,
+                manifest.get("files", []) or [],
+                manifest.get("keys", []) or [],
+                manifest.get("forms", []) or [],
             )
 
     # 2. Parse content in-memory via app.parsers
@@ -112,10 +284,11 @@ def _extract_curl_entities(
         content_type=ct,
         file_path=output_path,
     )
+    clean_routes = filter_self_routes(parsed.routes, request_url)
     forms_dict = [f.to_dict() for f in parsed.forms]
 
     return (
-        parsed.routes,
+        clean_routes,
         parsed.files,
         parsed.keys,
         forms_dict,
@@ -422,16 +595,21 @@ def _build_pure_observation(
             ]
             batch_routes: set[str] = set()
             batch_files: set[str] = set()
-            for entry in (p_data.get("results") or []):
-                if isinstance(entry, dict):
-                    res_obj = entry.get("result") if isinstance(entry.get("result"), dict) else {}
-                    resp_obj = res_obj.get("response") if isinstance(res_obj.get("response"), dict) else {}
-                    b_url = str(entry.get("request", {}).get("url") or res_obj.get("request", {}).get("url") or "")
-                    b_hdrs = resp_obj.get("headers") or {}
-                    b_body = resp_obj.get("body") or res_obj.get("body") or ""
-                    r_routes, r_files, *_ = _extract_curl_entities(b_url, b_hdrs, b_body)
-                    batch_routes.update(r_routes)
-                    batch_files.update(r_files)
+            manifest = read_sidecar_manifest(step.output_path) if step.output_path else None
+            if manifest is not None:
+                batch_routes = set(manifest.get("routes") or [])
+                batch_files = set(manifest.get("files") or [])
+            else:
+                for entry in (p_data.get("results") or []):
+                    if isinstance(entry, dict):
+                        res_obj = entry.get("result") if isinstance(entry.get("result"), dict) else {}
+                        resp_obj = res_obj.get("response") if isinstance(res_obj.get("response"), dict) else {}
+                        b_url = str(entry.get("request", {}).get("url") or res_obj.get("request", {}).get("url") or "")
+                        b_hdrs = resp_obj.get("headers") or {}
+                        b_body = resp_obj.get("body") or res_obj.get("body") or ""
+                        r_routes, r_files, *_ = _extract_curl_entities(b_url, b_hdrs, b_body)
+                        batch_routes.update(r_routes)
+                        batch_files.update(r_files)
 
             parts: list[str] = []
             for item in results:
@@ -526,6 +704,7 @@ def _build_pure_observation(
         else:
             body_excerpt = str(body_full)[:1000]
 
+        parsed_body: Any = None
         try:
             parsed_body = (
                 json.loads(body_full)
@@ -539,8 +718,23 @@ def _build_pure_observation(
             )
             if isinstance(rows, list):
                 json_items = len(rows)
-        except (TypeError, ValueError):
+        except Exception:
             json_items = None
+
+        auth_data = None
+        is_fresh_auth = False
+        if http_status in (200, 201):
+            auth_data = _extract_auth_session(parsed_body, headers, request_url)
+            if auth_data:
+                is_fresh_auth = True
+                session_path = _save_session_file(step.assessment_id, step.output_path, auth_data)
+                if session_path:
+                    auth_data["session_file"] = session_path
+
+        if not auth_data:
+            existing_auth = _load_session_file(step.assessment_id, step.output_path)
+            if existing_auth:
+                auth_data = existing_auth
 
         extracted_routes, extracted_files, json_keys, extracted_forms = _extract_curl_entities(
             request_url=request_url,
@@ -549,11 +743,17 @@ def _build_pure_observation(
             output_path=step.output_path,
         )
 
-        status_part = f"HTTP {http_status}" if http_status is not None else "HTTP request succeeded"
-        if json_items is not None:
-            status_part += f" ({json_items} items)"
-        body_part = f" - excerpt: {body_excerpt!r}" if body_excerpt else ""
-        summary_str = f"{status_part}{body_part}"
+        if is_fresh_auth and http_status in (200, 201) and auth_data:
+            user_val = auth_data.get("email") or auth_data.get("user_id")
+            user_str = f", user={user_val}" if user_val is not None else ""
+            tok_type = "JWT token" if auth_data.get("token") else "session cookie"
+            summary_str = f"HTTP {http_status} - Authenticated ({tok_type} obtained{user_str})"
+        else:
+            status_part = f"HTTP {http_status}" if http_status is not None else "HTTP request succeeded"
+            if json_items is not None:
+                status_part += f" ({json_items} items)"
+            body_part = f" - excerpt: {body_excerpt!r}" if body_excerpt else ""
+            summary_str = f"{status_part}{body_part}"
 
         extra_parts: list[str] = []
         if extracted_routes:
@@ -572,10 +772,58 @@ def _build_pure_observation(
                 inps = ", ".join(i.get("name") for i in f.get("inputs", [])[:4] if i.get("name"))
                 form_samples.append(f"{f.get('method', 'GET')} {f.get('action')} ({inps})")
             extra_parts.append(f"extracted {len(extracted_forms)} form(s): [{'; '.join(form_samples)}]")
-        if extra_parts:
+        if extra_parts and not (is_fresh_auth and http_status in (200, 201)):
             summary_str = f"{summary_str} | {' | '.join(extra_parts)}"
 
-        if extracted_routes:
+        req_method = str(request.get("method") or res.get("method") or "GET").upper()
+        if is_fresh_auth and http_status in (200, 201) and auth_data:
+            if auth_data.get("token"):
+                next_hint = (
+                    "Authentication succeeded. Auth credentials obtained in facts['auth']. "
+                    "Probe discovered authenticated routes using header 'Authorization: Bearer <token>' "
+                    "to test access control and authorization boundaries."
+                )
+            else:
+                cookie_val = auth_data.get("cookie", "")
+                next_hint = (
+                    "Authentication succeeded. Session cookie obtained in facts['auth']['cookie']. "
+                    f"Probe discovered authenticated routes using header 'Cookie: {cookie_val}' "
+                    "to test access control and authorization boundaries."
+                )
+        elif http_status in (401, 403):
+            if any(term in request_url.lower() for term in ("login", "auth", "token", "session")):
+                next_hint = (
+                    f"HTTP {http_status} on login/auth: Credentials rejected. Do not brute-force or guess credentials repeatedly. "
+                    "Test for authentication bypass (e.g. SQL injection on login: {\"email\": \"' or 1=1--\", \"password\": \"x\"}), "
+                    "or test user registration (e.g. /api/users, /register, /signup) to create an account."
+                )
+            else:
+                next_hint = f"HTTP {http_status}: Authentication or authorization required. Analyze headers, test for token bypass, or inspect public paths."
+        elif http_status == 200 and ("<!doctype html" in body_excerpt.lower() or "<html" in body_excerpt.lower()) and req_method in ("POST", "PUT", "PATCH"):
+            next_hint = "HTTP 200 returned frontend SPA HTML shell (index.html), not an API response. The root endpoint does not accept POST requests. Probe the actual API route (e.g. /rest/user/login or /api/Users)."
+        elif http_status in (400, 422):
+            err_msg = ""
+            if isinstance(parsed_body, dict):
+                err_msg = str(parsed_body.get("message") or parsed_body.get("error") or "")
+            if err_msg and any(w in err_msg.lower() for w in ("email", "unique", "already exist")):
+                next_hint = f"HTTP {http_status}: Registration rejected ('{err_msg}'). Use a unique, dynamic email address (e.g. pentest_user_<random>@example.com) and retry."
+            elif err_msg:
+                next_hint = f"HTTP {http_status}: Server rejected request with message '{err_msg}'. Adjust JSON fields/headers and retry."
+            else:
+                next_hint = "HTTP 4xx: Server rejected request syntax or payload structure. Inspect response body for validation errors, adjust JSON fields/headers, and retry."
+        elif http_status == 404:
+            next_hint = "HTTP 404: path does not exist. Do not retry variants; use ffuf results or read the API documentation artifact."
+        elif http_status == 500 and "Unexpected path" in body_excerpt:
+            next_hint = "HTTP 500 with 'Unexpected path': the route does not exist. Stop guessing endpoints; read the API/swagger artifact or use a path already discovered."
+        elif http_status == 500:
+            next_hint = "HTTP 500: Server exception occurred. Check if payload triggered an unhandled database error or query crash."
+        elif json_items is not None and ("search" in request_url or "q=" in request_url):
+            next_hint = (
+                f"Search endpoint returned {json_items} items. Compare this with a benign "
+                "baseline; a payload that changes the row count is evidence of injection. "
+                "Record it with record_finding, cite both step ids, and hand off."
+            )
+        elif extracted_routes:
             sample_routes_hint = ", ".join(extracted_routes[:5])
             next_hint = (
                 f"Discovered {len(extracted_routes)} client/API routes in response (e.g. {sample_routes_hint}). "
@@ -589,29 +837,6 @@ def _build_pure_observation(
             )
         elif extracted_forms:
             next_hint = f"Discovered {len(extracted_forms)} HTML forms. Test form submission endpoints and input parameters."
-        elif http_status in (400, 422):
-            next_hint = "HTTP 4xx: Server rejected request syntax or payload structure. Inspect response body for validation errors, adjust JSON fields/headers, and retry."
-        elif http_status in (401, 403):
-            if any(term in request_url.lower() for term in ("login", "auth", "token", "session")):
-                next_hint = (
-                    f"HTTP {http_status} on login/auth: Credentials rejected. Do not brute-force or guess credentials repeatedly. "
-                    "Test for authentication bypass (e.g. SQL injection on login: {\"email\": \"' or 1=1--\", \"password\": \"x\"}), "
-                    "or test user registration (/api/Users) to create an account."
-                )
-            else:
-                next_hint = f"HTTP {http_status}: Authentication or authorization required. Analyze headers, test for token bypass, or inspect public paths."
-        elif http_status == 404:
-            next_hint = "HTTP 404: path does not exist. Do not retry variants; use ffuf results or read the API documentation artifact."
-        elif http_status == 500 and "Unexpected path" in body_excerpt:
-            next_hint = "HTTP 500 with 'Unexpected path': the route does not exist. Stop guessing endpoints; read the API/swagger artifact or use a path already discovered."
-        elif http_status == 500:
-            next_hint = "HTTP 500: Server exception occurred. Check if payload triggered an unhandled database error or query crash."
-        elif json_items is not None and ("search" in request_url or "q=" in request_url):
-            next_hint = (
-                f"Search endpoint returned {json_items} items. Compare this with a benign "
-                "baseline; a payload that changes the row count is evidence of injection. "
-                "Record it with record_finding, cite both step ids, and hand off."
-            )
         else:
             next_hint = "Compare observed HTTP status and response against expected_observation and would_falsify."
 
@@ -622,6 +847,8 @@ def _build_pure_observation(
             "json_items": json_items,
             "request_url": request_url,
         }
+        if auth_data:
+            facts["auth"] = auth_data
         if extracted_routes:
             facts["extracted_routes"] = extracted_routes
         if extracted_files:

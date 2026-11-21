@@ -49,6 +49,17 @@ def test_normalize_plan_steps_validates_and_bounds():
     assert "valid_action" in steps[0]
 
 
+def test_normalize_plan_steps_web_target_action_fallback():
+    raw = [
+        {"role": "recon", "action": "", "target": "http://127.0.0.1:3000", "rationale": "explore endpoints"},
+        {"role": "recon", "action": "", "target": "10.0.0.1", "rationale": "port scan host"},
+    ]
+    steps = normalize_plan_steps(raw)
+    assert steps[0]["action"] == "curl_request"
+    assert steps[1]["action"] == "nmap_scan"
+
+
+
 def test_template_plan_is_generic_and_covers_access_control():
     steps = _template_plan(
         "Broken access control: post feedback in another user's name",

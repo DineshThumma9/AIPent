@@ -287,19 +287,7 @@ function PlanCard({
       <ol className="plan-checklist">
         {steps.map((step, index) => (
           <li className="plan-step" key={step.id}>
-            <div className="plan-step-gutter">
-              <span className="plan-step-num mono">{String(index + 1).padStart(2, '0')}</span>
-              {canDecide && (
-                <button
-                  type="button"
-                  className="plan-x"
-                  aria-label={`Remove step ${index + 1}`}
-                  onClick={() => setSteps((current) => current.filter((_, i) => i !== index))}
-                >
-                  ×
-                </button>
-              )}
-            </div>
+            <span className="plan-step-num mono">{String(index + 1).padStart(2, '0')}</span>
 
             <div className="plan-step-main">
               <textarea
@@ -315,27 +303,6 @@ function PlanCard({
                 }}
                 disabled={!canDecide}
               />
-              <div className="plan-step-sub">
-                <input
-                  className="plan-step-tool mono"
-                  aria-label={`Tool for step ${index + 1}`}
-                  value={step.action}
-                  placeholder="tool (optional)"
-                  onChange={(event) => update(index, { action: event.target.value })}
-                  disabled={!canDecide}
-                />
-                <input
-                  className="plan-step-target mono"
-                  aria-label={`Target for step ${index + 1}`}
-                  value={step.target}
-                  placeholder="target (optional)"
-                  onChange={(event) => update(index, { target: event.target.value })}
-                  disabled={!canDecide}
-                />
-                {step.valid_action === false && (
-                  <span className="plan-step-warn" title="Tool is not in this agent's registry">!</span>
-                )}
-              </div>
             </div>
 
             <input
@@ -346,6 +313,19 @@ function PlanCard({
               onChange={(event) => update(index, { role: event.target.value })}
               disabled={!canDecide}
             />
+
+            {canDecide ? (
+              <button
+                type="button"
+                className="plan-x"
+                aria-label={`Remove step ${index + 1}`}
+                onClick={() => setSteps((current) => current.filter((_, i) => i !== index))}
+              >
+                ×
+              </button>
+            ) : (
+              <span aria-hidden="true" />
+            )}
           </li>
         ))}
       </ol>
@@ -360,10 +340,9 @@ function PlanCard({
         </button>
       )}
 
-      <details className="plan-feedback">
-        <summary>Feedback for the team <span className="mono">optional</span></summary>
-        <label className="sr-only" htmlFor="plan-feedback">
-          Feedback for every agent
+      <div className="plan-feedback">
+        <label className="plan-feedback-label" htmlFor="plan-feedback">
+          Feedback for the team <span className="mono">optional</span>
         </label>
         <textarea
           id="plan-feedback"
@@ -374,7 +353,7 @@ function PlanCard({
           disabled={!canDecide}
           rows={2}
         />
-      </details>
+      </div>
 
       {pending && !gateOpen && (
         <p className="gate-hint">The plan is not open yet; wait for the run to reach the gate.</p>
@@ -392,10 +371,24 @@ function PlanCard({
                   reason,
                   steps
                     .filter((step) => step.rationale.trim())
-                    .map((step) => ({
-                      ...step,
-                      target: step.target.trim() || defaultTarget,
-                    })),
+                    .map((step) => {
+                      const role = step.role?.trim().toLowerCase()
+                      const target = step.target?.trim() || defaultTarget || 'in-scope target'
+                      const isWebTarget =
+                        target.startsWith('http://') ||
+                        target.startsWith('https://') ||
+                        defaultTarget.startsWith('http://') ||
+                        defaultTarget.startsWith('https://')
+                      return {
+                        ...step,
+                        target,
+                        action:
+                          step.action?.trim() ||
+                          (role === 'discovery' || role === 'validation' || isWebTarget
+                            ? 'curl_request'
+                            : 'nmap_scan'),
+                      }
+                    }),
                   feedback,
                 )
               }

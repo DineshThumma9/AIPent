@@ -56,31 +56,25 @@
 }
 
 .plan-checklist {
-  margin: 8px 0 0;
+  margin: 4px 0 0;
   padding: 0;
   list-style: none;
 }
 
 .plan-step {
   display: grid;
-  grid-template-columns: 28px minmax(0, 1fr) 76px;
+  grid-template-columns: 22px minmax(0, 1fr) 68px 18px;
   align-items: start;
   gap: 8px;
-  padding: 10px 0;
+  padding: 4px 0;
   border-bottom: 1px dotted var(--rule);
 }
 
-.plan-step-gutter {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-}
-
 .plan-step-num {
-  padding-top: 3px;
+  padding-top: 2px;
   font-size: 11px;
   color: var(--ink-muted);
+  line-height: 1.35;
 }
 
 .plan-step-main {
@@ -91,7 +85,7 @@
 .plan-step textarea {
   width: 100%;
   min-width: 0;
-  padding: 2px 0;
+  padding: 0;
   border: 0;
   background: transparent;
   color: var(--ink);
@@ -111,10 +105,10 @@
 
 .plan-step-text {
   display: block;
-  min-height: 22px;
-  font-size: 14px !important;
+  min-height: 20px;
+  font-size: 13.5px !important;
   font-weight: 500;
-  line-height: 1.4;
+  line-height: 1.35;
   resize: none;
   overflow: hidden;
   field-sizing: content;
@@ -122,36 +116,12 @@
   overflow-wrap: break-word;
 }
 
-.plan-step-sub {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  margin-top: 2px;
-}
-
-.plan-step-tool {
-  flex: 0 1 120px;
-  color: var(--ink-muted) !important;
-  font-size: 11px !important;
-}
-
-.plan-step-target {
-  flex: 1 1 140px;
-  color: var(--ink-muted) !important;
-  font-size: 11px !important;
-}
-
-.plan-step-warn {
-  color: var(--amber);
-  font-weight: 700;
-  cursor: help;
-}
-
 .plan-step-agent {
-  padding-top: 3px !important;
+  padding-top: 2px !important;
   text-align: right;
   color: var(--ink-muted) !important;
   font-size: 11px !important;
+  line-height: 1.35;
 }
 
 .plan-x {
@@ -164,10 +134,16 @@
   font-size: 15px;
   line-height: 1;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.6;
+  transition: opacity 0.15s, color 0.15s;
 }
 
 .plan-x:hover,
 .plan-x:focus-visible {
+  opacity: 1;
   color: var(--oxide);
 }
 
@@ -176,42 +152,41 @@
 }
 
 .plan-add {
-  margin-top: 8px;
+  margin-top: 6px;
   padding: 2px 0;
   border: 0;
   background: transparent;
   color: var(--oxide);
-  font-size: 12px;
+  font-size: 11px;
   cursor: pointer;
 }
 
+.plan-add:hover {
+  text-decoration: underline;
+}
+
 .plan-feedback {
-  margin-top: 9px;
+  margin-top: 8px;
   padding-top: 8px;
   border-top: 1px dotted var(--rule);
 }
 
-.plan-feedback > summary {
-  cursor: pointer;
+.plan-feedback-label {
+  display: block;
   font-size: 11px;
   color: var(--ink-soft);
-  list-style: none;
+  margin-bottom: 5px;
 }
 
-.plan-feedback > summary::-webkit-details-marker {
-  display: none;
-}
-
-.plan-feedback > summary .mono {
+.plan-feedback-label .mono {
   color: var(--ink-muted);
   font-size: 10px;
 }
 
 .plan-feedback textarea {
   width: 100%;
-  min-height: 44px;
-  margin-top: 6px;
-  padding: 6px;
+  min-height: 42px;
+  padding: 6px 8px;
   border: 1px solid var(--rule);
   border-radius: 2px;
   background: var(--paper-raised);
@@ -220,6 +195,12 @@
   font-size: 12px;
   line-height: 1.4;
   resize: vertical;
+}
+
+.plan-feedback textarea:focus {
+  border-color: var(--oxide);
+  outline: 1px solid var(--oxide);
+  outline-offset: 1px;
 }
 
 .plan-actions {
@@ -292,7 +273,7 @@
 
 @media (max-width: 900px) {
   .plan-step {
-    grid-template-columns: 24px minmax(0, 1fr) 60px;
+    grid-template-columns: 20px minmax(0, 1fr) 56px 16px;
   }
 
   .plan-step-text {

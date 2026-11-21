@@ -191,3 +191,74 @@ async def test_read_artifact_grep_and_manifest_views(engine, tmp_path):
         assert obs_manifest.ok is True
         assert "Manifest (manifest)" in obs_manifest.summary
         assert "facts" in obs_manifest.facts or "manifest" in obs_manifest.facts
+
+
+def test_parse_content_json_with_table_text():
+    """Ensure JSON API responses containing table text are parsed as JSON, not HTML."""
+    json_payload = json.dumps({
+        "status": "success",
+        "doc": "<table><tr><td>specs</td></tr></table>",
+        "paths": {
+            "/api/v2/items": {"get": {}},
+        },
+    })
+    # Sniffed JSON without content-type
+    res = parse_content(json_payload, url="http://127.0.0.1:3000/api/docs")
+    assert "status" in res.keys
+    assert "doc" in res.keys
+    assert "/api/v2/items" in res.routes
+
+    # With content-type application/json
+    res_ct = parse_content(json_payload, url="http://127.0.0.1:3000/api/docs", content_type="application/json")
+    assert "status" in res_ct.keys
+    assert "/api/v2/items" in res_ct.routes
+
+
+def test_sidecar_manifest_unpacks_probe_result(tmp_path):
+    """Ensure artifacts with 'probe_result' format are properly unpacked into sidecar manifests."""
+    probe_file = tmp_path / "probe_sample.http_probe.json"
+    probe_payload = {
+        "probe_result": {
+            "url": "http://127.0.0.1:3000/test-page",
+            "url_probed": "http://127.0.0.1:3000/test-page",
+            "method": "GET",
+            "status_code": 200,
+            "headers": {"content-type": "text/html; charset=UTF-8"},
+            "body_preview": "<html><body><a href=\"/api/v1/users\">Users</a><a href=\"/test-page\">Self</a></body></html>",
+        },
+        "step_id": 5,
+    }
+    probe_file.write_text(json.dumps(probe_payload), encoding="utf-8")
+
+    manifest_path = create_sidecar_manifest(probe_file)
+    assert manifest_path is not None
+    assert manifest_path.exists()
+
+    manifest_data = read_sidecar_manifest(probe_file)
+    assert manifest_data is not None
+    # /api/v1/users must be extracted
+    assert "/api/v1/users" in manifest_data["routes"]
+    # Self-route /test-page must be filtered out
+    assert "/test-page" not in manifest_data["routes"]
+
+
+def test_filter_self_routes_with_query_params():
+    """Ensure filter_self_routes filters relative URLs with query parameters matching request path."""
+    from app.parsers.manifest import filter_self_routes
+
+    routes = [
+        "/login?redirect=1",
+        "login?redirect=1",
+        "/login",
+        "login",
+        "/dashboard",
+        "/dashboard?tab=settings",
+    ]
+    filtered = filter_self_routes(routes, "http://127.0.0.1:3000/login")
+    assert "/login?redirect=1" not in filtered
+    assert "login?redirect=1" not in filtered
+    assert "/login" not in filtered
+    assert "login" not in filtered
+    assert "/dashboard" in filtered
+    assert "/dashboard?tab=settings" in filtered
+

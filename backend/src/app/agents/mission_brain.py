@@ -362,10 +362,11 @@ def normalize_plan_steps(raw: Any) -> list[dict[str, Any]]:
         target = str(item.get("target") or "").strip()
         rationale = str(item.get("rationale") or "").strip()[:1000]
 
-        if not action and rationale:
-            action = "curl_request" if role in ("discovery", "validation") else "nmap_scan"
         if not target and rationale:
             target = "in-scope target"
+        if not action and rationale:
+            is_web = target.startswith(("http://", "https://"))
+            action = "curl_request" if role in ("discovery", "validation") or is_web else "nmap_scan"
 
         if not action or not target:
             continue
