@@ -102,6 +102,15 @@ class FfufArgs(ActionReasoning):
     filter_size: str | None = Field(default=None, description="Filter response size (e.g. '5230') to suppress wildcard/SPA catch-all pages.")
 
 
+class KatanaArgs(ActionReasoning):
+    depth: int = Field(default=3, ge=1, le=5, description="Crawl depth (default: 3). Parses client-side JS bundles.")
+
+
+class NucleiArgs(ActionReasoning):
+    tags: str | None = Field(default=None, description="Template tags (e.g. 'cve,exposure,swagger,misconfig').")
+    severity: str | None = Field(default=None, description="Severity filter: 'info,low,medium,high,critical'.")
+
+
 
 class WhatwebArgs(ActionReasoning):
     pass
@@ -407,6 +416,30 @@ ffuf_scan_tool = ToolSpec(
     param_fields=("path", "wordlist", "filter_size"),
 )
 
+katana_crawl_tool = ToolSpec(
+    name="katana_crawl",
+    kind="action",
+    action="katana_crawl",
+    args_model=KatanaArgs,
+    description=(
+        "Next-generation web crawler that parses modern client-side JavaScript bundles "
+        "(main.js, vendor.js) and extracts hidden REST endpoints, route schemas, and API paths."
+    ),
+    param_fields=("depth",),
+)
+
+nuclei_scan_tool = ToolSpec(
+    name="nuclei_scan",
+    kind="action",
+    action="nuclei_scan",
+    args_model=NucleiArgs,
+    description=(
+        "Fast, template-based vulnerability scanner for targeted CVEs, exposures, "
+        "and security misconfigurations with zero false positives."
+    ),
+    param_fields=("tags", "severity"),
+)
+
 nikto_scan_tool = ToolSpec(
     name="nikto_scan",
     kind="action",
@@ -554,6 +587,8 @@ ROLE_TOOLS: dict[str, list[ToolSpec]] = {
     "discovery": [
         curl_request_tool,
         ffuf_scan_tool,
+        katana_crawl_tool,
+        nuclei_scan_tool,
         nikto_scan_tool,
         zap_baseline_tool,
         lookup_cve_tool,
@@ -566,6 +601,7 @@ ROLE_TOOLS: dict[str, list[ToolSpec]] = {
     ],
     "validation": [
         curl_request_tool,
+        nuclei_scan_tool,
         sqlmap_scan_tool,
         hash_identify_tool,
         hashcat_crack_tool,

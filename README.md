@@ -146,10 +146,11 @@ AIPENT provides a unified launcher that automatically boots the MCP containers, 
 #### Individual Component Control (Under the Hood)
 If you prefer running services individually:
 
-1. **Start MCP Tool Containers (ZAP, Vulnify, Curl, Typst):**
+1. **Start MCP Tool Containers (ZAP, Vulnify, Curl, Typst, Kali, Nuclei, Katana):**
    ```bash
    docker compose -f mcp/compose.yaml up -d
    ```
+   *(Pulls and initializes all containerized tool engines and MCP services in one command).*
 2. **Launch Docker MCP Gateway:**
    ```bash
    ./gateway/start.sh
@@ -419,10 +420,92 @@ An optional Dockerized FastMCP bridge is also maintained in [`vulnify-mcp/`](vul
 - Linux / macOS / WSL2
 - Python 3.12+
 - Node.js 20+
-- Docker (for lab target container)
+- Docker & Docker Compose (for lab targets and MCP container services)
 - `uv` (recommended) or `pip`
 
+---
 
+### 1. Docker MCP Gateway CLI Plugin (`docker mcp`)
+
+The Docker MCP Gateway requires the **`docker-mcp`** CLI plugin (from [`docker/mcp-gateway`](https://github.com/docker/mcp-gateway)).
+
+> **Important for Linux / Standalone Docker Engine:** While Docker Desktop may manage MCP components via UI extensions, standalone Docker Engine on Linux **does not pre-bundle** the `docker mcp` CLI plugin. You must install it into your user CLI plugins directory.
+
+#### Linux / WSL2 / macOS Installation
+```bash
+# 1. Create the Docker CLI plugins directory
+mkdir -p ~/.docker/cli-plugins
+
+# 2. Download and unpack the latest release binary (adjust architecture if arm64)
+curl -fsSL https://github.com/docker/mcp-gateway/releases/latest/download/docker-mcp-linux-amd64.tar.gz | tar -xz -C ~/.docker/cli-plugins/
+
+# 3. Grant executable permissions
+chmod +x ~/.docker/cli-plugins/docker-mcp
+
+# 4. Verify installation
+docker mcp version
+```
+
+---
+
+### 2. Project Discovery & Web Fuzzing Engines (`ffuf`, `katana`, `nuclei`)
+
+AIPENT includes native adapters for three high-velocity discovery and vulnerability validation engines:
+
+| Tool | Role in AIPENT | Primary Capability |
+| :--- | :--- | :--- |
+| **`ffuf`** | Discovery Specialist | High-speed directory and API parameter fuzzing with automated SPA auto-calibration (`-ac`) to filter fallback `index.html` noise. |
+| **`katana`** | Discovery Specialist | Next-generation headless web crawler that parses client-side JavaScript bundles (`main.js`, `vendor.js`), discovering hidden endpoints, routes, and API schemas. |
+| **`nuclei`** | Discovery & Validation | Fast, template-driven vulnerability scanner executing targeted CVE, exposure, and misconfiguration template packs with verified proof-of-concept output. |
+
+#### Tool Execution Architecture (Containerized & Native Acceleration)
+- **Containerized Execution via Docker MCP Gateway:** Like `nmap`, `nikto`, `sqlmap`, and `dirb`, `katana_crawl` and `nuclei_scan` execute through the containerized Docker MCP Gateway (`cyberillo/kali-mcp-server`), keeping tool dependencies isolated inside containers without requiring host installation.
+- **Docker Compose Tool Binding:** All containerized images (`cyberillo/kali-mcp-server`, `projectdiscovery/nuclei`, `projectdiscovery/katana`) are wired directly in [`mcp/compose.yaml`](mcp/compose.yaml) and included in the root [`docker-compose.yml`](docker-compose.yml). Running `docker compose up` (or `./start.sh`) coordinates and fetches all tool images automatically.
+- **Local Fuzzing Acceleration (`ffuf`):** For directory and API route fuzzing with automated SPA calibration (`-ac`), native binary execution is supported via [`LOCAL_PREFERRED_ACTIONS`](backend/src/app/actions/catalogue.py).
+
+#### Installation Options
+
+##### Option A: Using Go (Recommended)
+Ensure Go is installed (`export PATH="$HOME/go/bin:$HOME/.local/bin:$PATH"`):
+```bash
+# 1. Install ffuf (v2)
+go install github.com/ffuf/ffuf/v2@latest
+
+# 2. Install ProjectDiscovery katana
+go install github.com/projectdiscovery/katana/cmd/katana@latest
+
+# 3. Install ProjectDiscovery nuclei
+go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+
+# 4. Download / update initial Nuclei vulnerability templates
+nuclei -update-templates
+```
+
+##### Option B: Using Homebrew (macOS / Linux)
+```bash
+brew install ffuf katana nuclei
+nuclei -update-templates
+```
+
+##### Option C: Using `pdtm` (ProjectDiscovery Tool Manager)
+```bash
+go install -v github.com/projectdiscovery/pdtm/cmd/pdtm@latest
+pdtm -install katana,nuclei
+nuclei -update-templates
+```
+
+##### Option D: Pre-compiled GitHub Release Binaries (Direct Download)
+You can download pre-compiled releases directly from their GitHub repositories:
+- **`ffuf`:** [github.com/ffuf/ffuf/releases](https://github.com/ffuf/ffuf/releases)
+- **`katana`:** [github.com/projectdiscovery/katana/releases](https://github.com/projectdiscovery/katana/releases)
+- **`nuclei`:** [github.com/projectdiscovery/nuclei/releases](https://github.com/projectdiscovery/nuclei/releases)
+
+Place the extracted binaries in `~/.local/bin/` or `/usr/local/bin/` and verify:
+```bash
+ffuf -V && katana -version && nuclei -version
+```
+
+---
 
 ### Typst Compiler (For Professional PDF Reports)
 
@@ -441,8 +524,11 @@ AIPENT supports two compilation modes:
 # 1. Install dependencies (first time only)
 cd backend && uv sync && cd ../frontend && npm install && cd ..
 
-# 2. Run the entire stack in one command
+# 2. Run the entire stack in one command (services start in background)
 ./start.sh --with-lab
+
+# Or run the stack and stream live backend & agent run logs in the terminal:
+./start.sh --with-lab --logs
 ```
 
 Your mission desk is instantly available at **`http://localhost:5173`**!
@@ -468,12 +554,16 @@ AIPENT includes a rich terminal CLI for running security assessments, monitoring
 # Run an unattended assessment with all requests auto-approved:
 ./aipent scan http://127.0.0.1:3000 -y
 
+# Run quiet unattended mode (clean terminal; full logs stream to backend/data/aipent.log):
+./aipent scan http://127.0.0.1:3000 -y -s
+
 # Pass an assessment query / objective with auto-approval:
 ./aipent scan http://127.0.0.1:3000 -r "Find SQL injection and XSS on /rest/products" -y
 ./aipent scan http://127.0.0.1:3000 -q "Test auth bypass vulnerabilities" --auto-approve
 
 # Direct shorthand syntax (without explicit 'scan'):
 ./aipent http://127.0.0.1:3000 -y
+./aipent http://127.0.0.1:3000 -y -s
 
 # Scan specific ports with scope exclusions:
 ./aipent scan 192.168.1.50 -p 80,443,8080 -e "/admin,/logout" -y

@@ -58,6 +58,8 @@ YOUR TOOLS
 ----------
 - curl_request: Fast, targeted HTTP requests (GET, POST, PUT, DELETE, PATCH, OPTIONS, custom headers, body payloads) to inspect specific routes, API endpoints, or directory contents.
 - ffuf_scan: High-speed web content, directory, and route enumeration with auto-calibration.
+- katana_crawl: Next-generation headless web crawler; parses client-side JavaScript bundles to extract hidden API routes and endpoints.
+- nuclei_scan: Fast template-based vulnerability scanner for verified exposures, misconfigurations, and CVEs.
 - nikto_scan: Web server configuration, known dangerous files, and server misconfigurations.
 - zap_baseline: Passive web baseline audit and spidering (requires operator approval).
 - lookup_cve: Correlate discovered software versions with published CVEs.

@@ -192,6 +192,11 @@ fi
 
 if ! command -v "docker" >/dev/null 2>&1 || ! docker mcp version >/dev/null 2>&1; then
   echo -e "${RED}[ERROR] 'docker mcp' CLI plugin is required but not found.${NC}"
+  echo -e "${YELLOW}Install it into ~/.docker/cli-plugins/ with:${NC}"
+  echo "  mkdir -p ~/.docker/cli-plugins"
+  echo "  curl -fsSL https://github.com/docker/mcp-gateway/releases/latest/download/docker-mcp-linux-amd64.tar.gz | tar -xz -C ~/.docker/cli-plugins/"
+  echo "  chmod +x ~/.docker/cli-plugins/docker-mcp"
+  echo -e "${CYAN}See README.md or gateway/README.md for full instructions.${NC}"
   exit 1
 fi
 
@@ -346,9 +351,11 @@ else
   wait_for_http "http://127.0.0.1:8010/health" "Backend API" 35
 fi
 
-# If log streaming is enabled, tail backend.log in background
+# If log streaming is enabled, tail both backend API and agent execution logs in background
 if [ "$FOLLOW_LOGS" = true ]; then
-  tail -n 20 -f "$LOG_DIR/backend.log" &
+  mkdir -p "$ROOT_DIR/backend/data"
+  touch "$ROOT_DIR/backend/data/aipent.log"
+  tail -n 20 -f "$LOG_DIR/backend.log" "$ROOT_DIR/backend/data/aipent.log" &
   TAIL_PID=$!
 fi
 

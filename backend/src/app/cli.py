@@ -58,6 +58,7 @@ Supports interactive human approval gates, automated policy approvals, and clien
 APP_EPILOG = """[bold cyan]Key Options & Flags (for scan):[/]
   [bold green]-r, --request, -q, --query[/] <str>  Assessment query, objective, or guidance for the agent (e.g. 'Test /rest/products for SQLi')
   [bold green]-y, --auto-approve, --yes[/]         Auto-approve all human action gates & requests (unattended mode)
+  [bold green]-s, --quiet, --silent[/]             Quiet mode: record logs in aipent.log without terminal event flood
   [bold green]-p, --ports[/] <str>                 Target ports comma-separated (e.g. '80,443,3000')
   [bold green]-e, --exclude, --exclusions[/] <str> Endpoints or hosts to exclude from scope (e.g. '/admin,/logout')
   [bold green]-t, --title[/] <str>                 Custom assessment title (default: 'VAPT Assessment - <target>')
@@ -66,6 +67,9 @@ APP_EPILOG = """[bold cyan]Key Options & Flags (for scan):[/]
 [bold cyan]Helpful Examples:[/]
   [dim]# Run an unattended assessment with all requests auto-approved:[/dim]
   [green]aipent scan http://127.0.0.1:3000 -y[/]
+
+  [dim]# Quiet unattended assessment (clean terminal; logs streamed to aipent.log):[/dim]
+  [green]aipent scan http://127.0.0.1:3000 -y -s[/]
 
   [dim]# Pass a specific query / request objective with auto-approval:[/dim]
   [green]aipent scan http://127.0.0.1:3000 -r "Find SQL injection and XSS on search" -y[/]
@@ -91,6 +95,9 @@ APP_EPILOG = """[bold cyan]Key Options & Flags (for scan):[/]
 SCAN_EPILOG = """[bold cyan]Helpful Examples:[/]
   [dim]# Run against local target with all requests auto-approved (unattended):[/dim]
   [green]aipent scan http://127.0.0.1:3000 -y[/]
+
+  [dim]# Run quiet unattended mode (no terminal spam; full logs in aipent.log):[/dim]
+  [green]aipent scan http://127.0.0.1:3000 -y -s[/]
 
   [dim]# Target a specific vulnerability or query with auto-approval:[/dim]
   [green]aipent scan http://127.0.0.1:3000 -r "Test for SQL injection on search endpoint" -y[/]
@@ -337,6 +344,13 @@ def scan_cmd(
         "--approve-all",
         help="Auto-approve all human action gates & execution requests without prompting (unattended mode).",
     ),
+    quiet: bool = typer.Option(
+        False,
+        "-s",
+        "--quiet",
+        "--silent",
+        help="Quiet mode: suppress terminal live streaming events (full logs are recorded in backend/data/aipent.log).",
+    ),
     exclusions: Optional[str] = typer.Option(
         None,
         "-e",
@@ -431,19 +445,28 @@ def scan_cmd(
             style="dim",
         )
 
-        console.print()
-        console.print(
-            Panel(
-                banner,
-                title="[bold green]AIPENT Autonomous VAPT[/]",
-                box=box.ROUNDED,
-                padding=(1, 2),
+        if quiet:
+            from app.core.log import setup_logging
+            setup_logging(stream=False, force=True)
+            console.print(
+                f"[bold cyan]AIPENT:[/] Assessment [bold green]#{aid}[/] started against [bold white]{clean_host}[/] "
+                f"([yellow]{'Auto-Approve' if auto_approve else 'Interactive'}[/]; quiet mode — logs in [dim]{settings.log_path}[/dim])\n"
             )
-        )
+        else:
+            console.print()
+            console.print(
+                Panel(
+                    banner,
+                    title="[bold green]AIPENT Autonomous VAPT[/]",
+                    box=box.ROUNDED,
+                    padding=(1, 2),
+                )
+            )
 
         # 2. Start Assessment Run
         await runner.start_run(aid)
-        console.print("[dim]Starting LangGraph observe-reason-act agent loop...[/]\n")
+        if not quiet:
+            console.print("[dim]Starting LangGraph observe-reason-act agent loop...[/]\n")
 
         # 3. Live Monitoring Loop
         last_audit_id = 0
@@ -451,34 +474,38 @@ def scan_cmd(
         seen_findings: set[str] = set()
         start_time = time.time()
 
-        progress = Progress(
-            SpinnerColumn(style="cyan"),
-            TextColumn("[bold cyan]{task.description}"),
-            BarColumn(bar_width=None),
-            TimeElapsedColumn(),
-            console=console,
-            transient=True,
-        )
-        progress_task = progress.add_task("Agent starting…", total=None)
-        progress.start()
+        progress: Optional[Progress] = None
+        progress_task = None
+        if not quiet:
+            progress = Progress(
+                SpinnerColumn(style="cyan"),
+                TextColumn("[bold cyan]{task.description}"),
+                BarColumn(bar_width=None),
+                TimeElapsedColumn(),
+                console=console,
+                transient=True,
+            )
+            progress_task = progress.add_task("Agent starting…", total=None)
+            progress.start()
         timed_out = False
         try:
             while time.time() - start_time < timeout:
                 await asyncio.sleep(0.6)
                 view = await runner.get_view(aid)
-    
-                role = (view.active_role or "agent").upper()
-                if view.paused:
-                    description = "Waiting for your approval"
-                elif view.running:
-                    description = (
-                        f"{role} working · {view.steps} action"
-                        f"{'' if view.steps == 1 else 's'} · {last_audit_id} events"
-                    )
-                else:
-                    description = f"Wrapping up · {last_audit_id} events"
-                progress.update(progress_task, description=description)
-    
+
+                if progress and progress_task is not None:
+                    role = (view.active_role or "agent").upper()
+                    if view.paused:
+                        description = "Waiting for your approval"
+                    elif view.running:
+                        description = (
+                            f"{role} working · {view.steps} action"
+                            f"{'' if view.steps == 1 else 's'} · {last_audit_id} events"
+                        )
+                    else:
+                        description = f"Wrapping up · {last_audit_id} events"
+                    progress.update(progress_task, description=description)
+
                 # Check new audit events
                 async with get_async_session_ctx() as session:
                     from sqlmodel import select
@@ -489,9 +516,11 @@ def scan_cmd(
                     )
                     res = await session.execute(stmt)
                     events = list(res.scalars().all())
-    
+
                 for ev in events:
                     last_audit_id = max(last_audit_id, ev.id or 0)
+                    if quiet:
+                        continue
                     payload = ev.payload or {}
                     etype = ev.event_type
     
@@ -548,7 +577,8 @@ def scan_cmd(
     
                 # Check if paused at an approval gate
                 if view.paused and view.pending:
-                    progress.stop()
+                    if progress:
+                        progress.stop()
                     pending = view.pending
                     gate = pending.get("gate") or pending.get("role") or "action"
                     action_name = pending.get("action") or pending.get("role") or "Review Delivery"
@@ -620,8 +650,9 @@ def scan_cmd(
                                 "feedback": feedback,
                             },
                         )
-                        progress.start()
-                        progress.update(progress_task, description="Resuming the run…")
+                        if progress and progress_task is not None:
+                            progress.start()
+                            progress.update(progress_task, description="Resuming the run…")
                         continue
 
                     batch = _curl_batch_requests(argv)
@@ -708,15 +739,17 @@ def scan_cmd(
                             )
     
                     # Resume the live indicator after the blocking prompt.
-                    progress.start()
-                    progress.update(progress_task, description="Resuming the run…")
+                    if progress and progress_task is not None:
+                        progress.start()
+                        progress.update(progress_task, description="Resuming the run…")
     
                 # Check if run reached terminal state
                 if not view.running and not view.paused:
-                    progress.update(
-                        progress_task,
-                        description=f"Run {view.status} · {last_audit_id} events",
-                    )
+                    if progress and progress_task is not None:
+                        progress.update(
+                            progress_task,
+                            description=f"Run {view.status} · {last_audit_id} events",
+                        )
                     console.print(f"\n[bold green]Assessment completed with status:[/] [bold]{view.status.upper()}[/bold]\n")
                     break
                 else:
@@ -727,7 +760,8 @@ def scan_cmd(
                     break
     
         finally:
-            progress.stop()
+            if progress:
+                progress.stop()
 
         if timed_out:
             console.print(

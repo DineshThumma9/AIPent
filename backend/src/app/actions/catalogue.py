@@ -339,12 +339,23 @@ def _dirb_argv(
     ]
 
 
+def _find_binary(binary: str) -> str:
+    """Find binary in system PATH or ~/.local/bin/."""
+    found = shutil.which(binary)
+    if found:
+        return found
+    local_bin = Path.home() / ".local" / "bin" / binary
+    if local_bin.exists() and os.access(local_bin, os.X_OK):
+        return str(local_bin)
+    return binary
+
+
 def _ffuf_argv(
     assessment: Assessment, target: str, output: Path, params: dict[str, Any] | None = None
 ) -> list[str]:
     p = params or {}
     host, port = _clean_host_and_port(target, _web_port(assessment))
-    return ffuf.argv(
+    cmd = ffuf.argv(
         target=host,
         port=port,
         output_path=str(output),
@@ -354,6 +365,9 @@ def _ffuf_argv(
         filter_size=p.get("filter_size"),
         auto_calibrate=bool(p.get("auto_calibrate", True)),
     )
+    if cmd:
+        cmd[0] = _find_binary(cmd[0])
+    return cmd
 
 
 def _katana_argv(
@@ -362,12 +376,15 @@ def _katana_argv(
     p = params or {}
     depth = int(p.get("depth", 3))
     host, port = _clean_host_and_port(target, _web_port(assessment))
-    return katana.argv(
+    cmd = katana.argv(
         target=host,
         port=port,
         output_path=str(output),
         depth=depth,
     )
+    if cmd:
+        cmd[0] = _find_binary(cmd[0])
+    return cmd
 
 
 def _nuclei_argv(
@@ -375,13 +392,16 @@ def _nuclei_argv(
 ) -> list[str]:
     p = params or {}
     host, port = _clean_host_and_port(target, _web_port(assessment))
-    return nuclei.argv(
+    cmd = nuclei.argv(
         target=host,
         port=port,
         output_path=str(output),
         tags=p.get("tags"),
         severity=p.get("severity"),
     )
+    if cmd:
+        cmd[0] = _find_binary(cmd[0])
+    return cmd
 
 
 
@@ -816,7 +836,7 @@ def get_action(name: str) -> ActionSpec:
         raise UnknownAction(f"action {name!r} is not in the catalogue") from exc
 
 
-LOCAL_PREFERRED_ACTIONS = {"hashcat_crack", "ffuf_scan", "katana_crawl", "nuclei_scan"}
+LOCAL_PREFERRED_ACTIONS = {"hashcat_crack", "ffuf_scan"}
 
 
 def is_local_exempt(action: str) -> bool:

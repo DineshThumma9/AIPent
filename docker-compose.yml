@@ -4,6 +4,9 @@
 # ==============================================================================
 name: aipent
 
+include:
+  - path: mcp/compose.yaml
+
 services:
   backend:
     build:

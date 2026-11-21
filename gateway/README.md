@@ -9,6 +9,37 @@ backend -> http://127.0.0.1:8812/sse -> kali (stdio container)
                                       -> zap  (remote :7456) -> zaproxy :8090
 ```
 
+## Prerequisites: Installing `docker-mcp` Plugin
+
+The Docker MCP Gateway requires the **`docker-mcp`** CLI plugin (from [`docker/mcp-gateway`](https://github.com/docker/mcp-gateway)).
+
+> **Note for Linux / Docker Engine Users:** Unlike Docker Desktop on macOS/Windows, standard Docker Engine on Linux **does not pre-bundle** the `docker mcp` CLI plugin. It must be installed into your Docker CLI plugins directory.
+
+### Linux / WSL2 / macOS (x86_64 / amd64)
+```bash
+# 1. Create the Docker CLI plugins directory
+mkdir -p ~/.docker/cli-plugins
+
+# 2. Download and extract the latest docker-mcp binary
+curl -fsSL https://github.com/docker/mcp-gateway/releases/latest/download/docker-mcp-linux-amd64.tar.gz | tar -xz -C ~/.docker/cli-plugins/
+
+# 3. Ensure executable permissions
+chmod +x ~/.docker/cli-plugins/docker-mcp
+
+# 4. Verify installation
+docker mcp version
+```
+
+*(For ARM64 Linux / Apple Silicon, replace `linux-amd64` with `linux-arm64` or `darwin-arm64` as appropriate).*
+
+### Building from Source (Go required)
+```bash
+git clone https://github.com/docker/mcp-gateway.git
+cd mcp-gateway
+mkdir -p "$HOME/.docker/cli-plugins/"
+make docker-mcp
+```
+
 ## Start order
 
 ### Recommended: One-command launcher

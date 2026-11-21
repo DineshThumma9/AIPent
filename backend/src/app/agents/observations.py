@@ -689,6 +689,102 @@ def _build_pure_observation(
             next_hint=next_hint,
         )
 
+    if step.action == "katana_crawl":
+        endpoints = [f.endpoint or f.title for f in findings if f.endpoint or f.title]
+        count = len(endpoints)
+        sensitive = [
+            ep
+            for ep in endpoints
+            if any(
+                kw in ep.lower()
+                for kw in (
+                    "admin",
+                    "api",
+                    "rest",
+                    "swagger",
+                    "graphql",
+                    "config",
+                    "backup",
+                    "db",
+                    ".git",
+                    ".env",
+                    "login",
+                    "secret",
+                    "password",
+                )
+            )
+        ]
+        sample = endpoints[:5]
+        if count > 0:
+            summary_str = f"{count} endpoint{'s' if count != 1 else ''} discovered by Katana crawler: {', '.join(sample)}"
+            if sensitive:
+                summary_str += f" (sensitive: {', '.join(sensitive[:3])})"
+            next_hint = (
+                f"Katana crawler mapped {count} routes from JS bundles and markup. "
+                f"Probe endpoints with curl_request or inspect sidecar manifest via read_artifact(step_id={step.id}, view='routes')."
+            )
+        else:
+            summary_str = "Katana crawler completed; 0 new endpoints discovered."
+            next_hint = "Katana crawl finished with 0 matches for target."
+
+        return Observation(
+            ok=True,
+            status="succeeded",
+            action=step.action,
+            target=step.target,
+            step_id=step.id,
+            summary=summary_str,
+            findings_created=created_ids,
+            findings_updated=updated_ids,
+            evidence_ids=evidence_ids,
+            artifact=artifact_info,
+            facts={
+                "discovered_endpoints": endpoints,
+                "sensitive_endpoints": sensitive,
+                "total_discovered": count,
+            },
+            errors=[],
+            next_hint=next_hint,
+        )
+
+    if step.action == "nuclei_scan":
+        f_titles = [f.title for f in findings if f.title]
+        count = len(findings)
+        sev_counts: dict[str, int] = {}
+        for f in findings:
+            s = str(f.severity or "info").lower()
+            sev_counts[s] = sev_counts.get(s, 0) + 1
+        sev_summary = ", ".join(f"{k}: {v}" for k, v in sev_counts.items()) if sev_counts else "none"
+
+        if count > 0:
+            summary_str = f"Nuclei scan matched {count} vulnerability template{'s' if count != 1 else ''} ({sev_summary}): {', '.join(f_titles[:3])}"
+            next_hint = (
+                f"Nuclei identified {count} issue(s). Review evidence and correlate candidate findings with record_finding or validate via curl_request."
+            )
+        else:
+            summary_str = "Nuclei scan completed; 0 vulnerability templates matched."
+            next_hint = "Nuclei found no matching exposures or vulnerabilities for the tested template set."
+
+        return Observation(
+            ok=True,
+            status="succeeded",
+            action=step.action,
+            target=step.target,
+            step_id=step.id,
+            summary=summary_str,
+            findings_created=created_ids,
+            findings_updated=updated_ids,
+            evidence_ids=evidence_ids,
+            artifact=artifact_info,
+            facts={
+                "matched_templates": f_titles,
+                "total_matched": count,
+                "severities": sev_counts,
+            },
+            errors=[],
+            next_hint=next_hint,
+        )
+
     if step.action == "curl_request":
         p_data: dict[str, Any] = {}
         if step.output_path and Path(step.output_path).exists():

@@ -46,3 +46,19 @@ def test_resolve_argv_for_new_tools(assessment):
     argv = resolve_argv("nuclei_scan", assessment, "127.0.0.1", 1)
     assert "nuclei" in argv[0]
     assert "-u" in argv
+
+
+def test_gateway_routing_for_katana_and_nuclei(assessment, monkeypatch):
+    """When MCP gateway is enabled, katana and nuclei route through MCP (not locally exempt)."""
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "mcp_enabled", True)
+    monkeypatch.setattr(settings, "mcp_transport", "gateway")
+
+    argv_katana = resolve_argv("katana_crawl", assessment, "127.0.0.1", 1)
+    assert argv_katana[0] == "mcp"
+    assert argv_katana[1] == "katana_crawl"
+
+    argv_nuclei = resolve_argv("nuclei_scan", assessment, "127.0.0.1", 1)
+    assert argv_nuclei[0] == "mcp"
+    assert argv_nuclei[1] == "nuclei_scan"

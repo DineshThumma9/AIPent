@@ -15,6 +15,7 @@ def setup_logging(
     level: str | None = None,
     log_file: str | Path | None = None,
     force: bool = False,
+    stream: bool = True,
 ) -> Path:
     """Configure the `aipent` logger. Safe to call repeatedly."""
     global _configured
@@ -34,10 +35,13 @@ def setup_logging(
         "%(asctime)s %(levelname)-7s %(name)s [%(threadName)s] %(message)s",
         "%Y-%m-%d %H:%M:%S",
     )
-    for handler in (
-        logging.StreamHandler(sys.stdout),
-        RotatingFileHandler(path, maxBytes=5_000_000, backupCount=3, encoding="utf-8"),
-    ):
+    handlers: list[logging.Handler] = [
+        RotatingFileHandler(path, maxBytes=5_000_000, backupCount=3, encoding="utf-8")
+    ]
+    if stream:
+        handlers.insert(0, logging.StreamHandler(sys.stdout))
+
+    for handler in handlers:
         handler.setFormatter(fmt)
         _root.addHandler(handler)
 

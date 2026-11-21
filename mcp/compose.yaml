@@ -120,5 +120,35 @@ services:
     container_name: aipent-typst
     restart: "no"
 
+  # ----------------------------------------------------------------------------
+  # Kali MCP Tool Server (nmap, nikto, sqlmap, dirb, whatweb, hashcat, ffuf)
+  # ----------------------------------------------------------------------------
+  kali:
+    image: cyberillo/kali-mcp-server:latest
+    container_name: aipent-kali
+    restart: "no"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: ["echo", "Kali MCP tool server image ready"]
+
+  # ----------------------------------------------------------------------------
+  # ProjectDiscovery Discovery & Vulnerability Engines
+  # ----------------------------------------------------------------------------
+  nuclei:
+    image: projectdiscovery/nuclei:latest
+    container_name: aipent-nuclei
+    restart: "no"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: ["-version"]
+
+  katana:
+    image: projectdiscovery/katana:latest
+    container_name: aipent-katana
+    restart: "no"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: ["-version"]
+
 volumes:
   mcp-launch-safety:
